@@ -1585,5 +1585,8 @@
     "certificateExpiryNotificationHelp": "Die Anzahl der Tage im Voraus kann in den Einstellungen konfiguriert werden.",
     "domainExpiryNotificationHelp": "Die Anzahl der Tage im Voraus kann in Einstellungen konfiguriert werden.",
     "signalUseTemplate": "Benutzerdefinierte Nachrichtenvorlage verwenden",
-    "signalUseTemplateDescription": "Wenn diese Option aktiviert ist, wird die Nachricht mit einer benutzerdefinierten Vorlage versendet. Du kannst Liquid-Templating verwenden, um das Benachrichtigungsformat anzupassen."
+    "signalUseTemplateDescription": "Wenn diese Option aktiviert ist, wird die Nachricht mit einer benutzerdefinierten Vorlage versendet. Du kannst Liquid-Templating verwenden, um das Benachrichtigungsformat anzupassen.",
+    "monitorTypeGameServer": "Spieleserver",
+    "monitorTypeDatabase": "Datenbankmonitor-Typ",
+    "monitorTypeSpecial": "Speziell"
 }
