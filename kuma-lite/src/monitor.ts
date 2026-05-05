@@ -50,7 +50,7 @@ export async function performCheck(monitor: Monitor): Promise<CheckResult> {
       signal: controller.signal,
       redirect: 'follow',
       headers: {
-        'User-Agent': 'kuma-lite/0.1 (+https://github.com/yuuskidai/serverless-uptime)',
+        'User-Agent': 'kuma-lite/0.1 (uptime monitor)',
       },
     });
     const latency = Date.now() - start;

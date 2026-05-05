@@ -1,3 +1,18 @@
+<!-- fork-notice:start -->
+> **Fork notice / フォークについて**
+>
+> This repository is a fork of [louislam/uptime-kuma](https://github.com/louislam/uptime-kuma)
+> (Copyright © 2021 Louis Lam, MIT License — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE)).
+> Upstream sources are preserved unmodified except where noted; new additions live in
+> [`kuma-lite/`](./kuma-lite) and are an independent, original implementation released
+> under the same MIT License.
+>
+> 本リポジトリは [louislam/uptime-kuma](https://github.com/louislam/uptime-kuma) のフォークです
+> （Copyright © 2021 Louis Lam, MIT License — [LICENSE](./LICENSE) / [NOTICE](./NOTICE) 参照）。
+> 上流のソースは原則そのまま保持しています。本フォークでの追加は [`kuma-lite/`](./kuma-lite) に
+> あり、Uptime Kuma 本体のコードを再利用しないオリジナル実装で、同じく MIT License で配布します。
+<!-- fork-notice:end -->
+
 <div align="center" width="100%">
     <img src="./public/icon.svg" width="128" alt="Uptime Kuma Logo" />
 </div>
