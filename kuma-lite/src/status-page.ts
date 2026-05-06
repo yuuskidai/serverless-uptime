@@ -19,11 +19,11 @@ interface ScaleConfig {
 }
 
 const SCALES: Record<Scale, ScaleConfig> = {
-  '60m': { ms: 60 * 60_000, buckets: 60, label: '直近60分', short: '60m' },
-  '12h': { ms: 12 * 3_600_000, buckets: 60, label: '直近12時間', short: '12h' },
-  '24h': { ms: 24 * 3_600_000, buckets: 60, label: '直近24時間', short: '24h' },
-  '7d': { ms: 7 * 86_400_000, buckets: 84, label: '直近7日', short: '7d' },
-  '30d': { ms: 30 * 86_400_000, buckets: 30, label: '直近30日', short: '30d' },
+  '60m': { ms: 60 * 60_000, buckets: 60, label: '直近60分', short: '60分' },
+  '12h': { ms: 12 * 3_600_000, buckets: 60, label: '直近12時間', short: '12時間' },
+  '24h': { ms: 24 * 3_600_000, buckets: 60, label: '直近24時間', short: '24時間' },
+  '7d': { ms: 7 * 86_400_000, buckets: 84, label: '直近7日', short: '7日' },
+  '30d': { ms: 30 * 86_400_000, buckets: 30, label: '直近30日', short: '30日' },
 };
 
 const SCALE_ORDER: Scale[] = ['60m', '12h', '24h', '7d', '30d'];
@@ -55,6 +55,15 @@ function computeNextRefreshMs(now: number): number {
 }
 
 type BucketState = 'up' | 'down' | 'partial' | 'none';
+/**
+ * Effective state shown on the per-monitor badge and the global header.
+ * Derived from `monitor_state.current_status` plus a short look-back at
+ * recent down checks so a monitor that just recovered (or is flapping)
+ * is no longer displayed as serenely "Operational".
+ */
+type EffectiveState = 'up' | 'degraded' | 'down';
+/** Window used to decide whether a monitor is "Recently degraded". */
+const RECENT_DOWN_WINDOW_MS = 15 * 60_000;
 
 interface BucketView {
   index: number;
@@ -69,6 +78,7 @@ interface BucketView {
 interface MonitorView {
   monitor: Monitor;
   state: CheckStatus;
+  effState: EffectiveState;
   uptime: number | null;
   latestLatency: number | null;
   latestTs: number | null;
@@ -105,6 +115,19 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     .all<MonitorState>();
   const stateById = new Map<number, MonitorState>();
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
+
+  // Monitors that recorded any failure in the recent look-back window.
+  // Drives the "Recently degraded" badge — even when monitor_state has
+  // already flipped back to "up", the recent flap stays visible.
+  const recentDownResult = await env.DB.prepare(
+    `SELECT DISTINCT monitor_id FROM checks
+       WHERE ts >= ? AND status = 'down' AND monitor_id IN (${placeholders})`,
+  )
+    .bind(now - RECENT_DOWN_WINDOW_MS, ...ids)
+    .all<{ monitor_id: number }>();
+  const recentDownIds = new Set<number>(
+    (recentDownResult.results ?? []).map((r) => r.monitor_id),
+  );
 
   const latestResult = await env.DB.prepare(
     `SELECT c.monitor_id, c.latency_ms, c.ts
@@ -199,9 +222,17 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       totalChecks += b.upCount + b.downCount;
       totalUps += b.upCount;
     }
+    const state = stateRow?.current_status ?? 'up';
+    const effState: EffectiveState =
+      state === 'down'
+        ? 'down'
+        : recentDownIds.has(monitor.id)
+        ? 'degraded'
+        : 'up';
     return {
       monitor,
-      state: stateRow?.current_status ?? 'up',
+      state,
+      effState,
       uptime: totalChecks > 0 ? (totalUps / totalChecks) * 100 : null,
       latestLatency: latest?.latency_ms ?? null,
       latestTs: latest?.ts ?? null,
@@ -256,9 +287,18 @@ function parseHidden(input: string | undefined): Set<number> {
   return set;
 }
 
-function computeOverall(views: MonitorView[]): { ok: boolean; downCount: number } {
-  const downCount = views.filter((v) => v.state === 'down').length;
-  return { ok: downCount === 0, downCount };
+interface OverallStatus {
+  status: 'ok' | 'degraded' | 'down';
+  downCount: number;
+  degradedCount: number;
+}
+
+function computeOverall(views: MonitorView[]): OverallStatus {
+  const downCount = views.filter((v) => v.effState === 'down').length;
+  const degradedCount = views.filter((v) => v.effState === 'degraded').length;
+  const status: OverallStatus['status'] =
+    downCount > 0 ? 'down' : degradedCount > 0 ? 'degraded' : 'ok';
+  return { status, downCount, degradedCount };
 }
 
 function renderShell(title: string, body: string, now: number, scale: Scale): string {
@@ -429,24 +469,12 @@ function emptyState(): string {
 
 function renderBody(
   views: MonitorView[],
-  overall: { ok: boolean; downCount: number },
+  overall: OverallStatus,
   now: number,
   scale: Scale,
 ): string {
   const config = SCALES[scale];
-  const headerStatus = overall.ok
-    ? `<div class="flex items-center gap-2.5">
-         <span class="relative inline-flex">
-           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-green-400 bg-green-400"></span>
-         </span>
-         <span class="text-green-400 font-medium">All systems operational</span>
-       </div>`
-    : `<div class="flex items-center gap-2.5">
-         <span class="relative inline-flex">
-           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-red-400 bg-red-400"></span>
-         </span>
-         <span class="text-red-400 font-medium">${overall.downCount} monitor${overall.downCount === 1 ? '' : 's'} down</span>
-       </div>`;
+  const headerStatus = renderHeaderStatus(overall);
 
   const cards = views.map((v) => renderCard(v, scale)).join('\n');
   const nextRefreshMs = computeNextRefreshMs(now);
@@ -459,14 +487,14 @@ function renderBody(
     <header class="mb-10">
       <div class="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">Service Status</p>
+          <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">サービス状況</p>
           <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight">kuma-lite</h1>
           <div class="mt-3 text-sm">${headerStatus}</div>
         </div>
         <div class="flex items-center gap-4 flex-wrap">
           <div class="flex items-center gap-2">
-            <label for="scale-select" class="text-[10px] uppercase tracking-wider text-slate-500">Range</label>
-            <select id="scale-select" class="scale-select" aria-label="Time scale">
+            <label for="scale-select" class="text-[10px] uppercase tracking-wider text-slate-500">表示期間</label>
+            <select id="scale-select" class="scale-select" aria-label="表示期間">
               ${scaleOptions}
             </select>
           </div>
@@ -479,12 +507,11 @@ function renderBody(
                       transform="rotate(-90 18 18)"/>
             </svg>
             <div class="flex flex-col leading-tight">
-              <span class="text-slate-300">Updated</span>
+              <span class="text-slate-300">最終更新</span>
               <span class="text-slate-200 tabular-nums" data-jst-datetime="${now}">${formatJstDateTime(now)}</span>
               <span class="mt-1 text-[11px] text-slate-500">
-                Next refresh
-                <span class="text-slate-400 tabular-nums" data-jst-time-secs="${nextRefreshMs}">${formatJstTimeSecs(nextRefreshMs)}</span>
-                · <span id="refresh-countdown" class="tabular-nums">—</span>s
+                次回更新まで <span id="refresh-countdown" class="tabular-nums text-slate-400">—</span>秒
+                <span class="ml-1 text-slate-600 tabular-nums" data-jst-time-secs="${nextRefreshMs}">(${formatJstTimeSecs(nextRefreshMs)})</span>
               </span>
             </div>
           </div>
@@ -495,26 +522,63 @@ function renderBody(
       ${cards}
     </main>
     <footer class="mt-12 pt-6 border-t border-slate-800/50 text-xs text-slate-500 text-center">
-      Powered by kuma-lite on Cloudflare Workers · ${escapeHtml(config.label)}
+      kuma-lite · ${escapeHtml(config.label)}
     </footer>
   `;
 }
 
+function renderHeaderStatus(overall: OverallStatus): string {
+  if (overall.status === 'down') {
+    const n = overall.downCount;
+    return `<div class="flex items-center gap-2.5">
+         <span class="relative inline-flex">
+           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-red-400 bg-red-400"></span>
+         </span>
+         <span class="text-red-400 font-medium">${n}件 — 現在アクセスできません</span>
+       </div>`;
+  }
+  if (overall.status === 'degraded') {
+    const n = overall.degradedCount;
+    return `<div class="flex items-center gap-2.5">
+         <span class="relative inline-flex">
+           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-amber-400 bg-amber-400"></span>
+         </span>
+         <span class="text-amber-300 font-medium">${n}件 — 直近に一時的な不調がありました</span>
+       </div>`;
+  }
+  return `<div class="flex items-center gap-2.5">
+         <span class="relative inline-flex">
+           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-green-400 bg-green-400"></span>
+         </span>
+         <span class="text-green-400 font-medium">すべて正常に稼働中</span>
+       </div>`;
+}
+
+function renderBadge(effState: EffectiveState): string {
+  if (effState === 'down') {
+    return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
+         <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> 停止中
+       </span>`;
+  }
+  if (effState === 'degraded') {
+    return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30">
+         <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> 直近に不調あり
+       </span>`;
+  }
+  return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
+       <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> 正常
+     </span>`;
+}
+
 function renderCard(view: MonitorView, scale: Scale): string {
   const config = SCALES[scale];
-  const isUp = view.state === 'up';
-  const badge = isUp
-    ? `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
-         <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> Operational
-       </span>`
-    : `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
-         <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Down
-       </span>`;
+  const badge = renderBadge(view.effState);
 
   const uptimeText = view.uptime === null ? '—' : `${view.uptime.toFixed(2)}%`;
-  const latencyText = view.latestLatency === null ? '—' : `${view.latestLatency} ms`;
+  const latencyText =
+    view.latestLatency === null ? '—' : `${view.latestLatency} ミリ秒`;
   const lastCheck =
-    view.latestTs === null ? 'never' : `${formatRelative(Date.now() - view.latestTs)} ago`;
+    view.latestTs === null ? 'データなし' : formatRelative(Date.now() - view.latestTs);
 
   const monitorId = view.monitor.id;
   const bars = view.buckets
@@ -558,27 +622,27 @@ function renderCard(view: MonitorView, scale: Scale): string {
 
       <div class="mt-5">
         <div class="bar-row" role="img"
-             aria-label="${escapeAttr(config.label)} timeline for ${escapeAttr(view.monitor.name)}">
+             aria-label="${escapeAttr(view.monitor.name)} の${escapeAttr(config.label)}のタイムライン">
           ${bars}
         </div>
         <div class="mt-2 flex justify-between text-[10px] text-slate-500 font-mono tabular-nums">
           <span data-jst-${useDateLabels ? 'shortdate' : 'time'}="${windowStart}">${startLabel}</span>
-          <span class="text-slate-600">${escapeHtml(config.label)} · JST</span>
+          <span class="text-slate-600">${escapeHtml(config.label)}</span>
           <span data-jst-${useDateLabels ? 'shortdate' : 'time'}="${windowEnd}">${endLabel}</span>
         </div>
       </div>
 
       <div class="mt-4 grid grid-cols-3 gap-3 text-xs">
         <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">Uptime · ${escapeHtml(config.short)}</div>
+          <div class="text-slate-500 uppercase tracking-wider text-[10px]">稼働率 · ${escapeHtml(config.short)}</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${uptimeText}</div>
         </div>
         <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">Latency</div>
+          <div class="text-slate-500 uppercase tracking-wider text-[10px]">応答速度</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${latencyText}</div>
         </div>
         <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">Last check</div>
+          <div class="text-slate-500 uppercase tracking-wider text-[10px]">最終確認</div>
           <div class="text-slate-100 font-medium mt-1">${lastCheck}</div>
         </div>
       </div>
@@ -647,10 +711,10 @@ function renderClientScript(): string {
   const tip = document.getElementById('tooltip');
   const tipCard = tip.firstElementChild;
   const STATE_LABEL = {
-    up: 'Operating normally',
-    down: 'Outage',
-    partial: 'Partial outage',
-    none: 'No data',
+    up: '正常',
+    down: '停止',
+    partial: '一部停止',
+    none: 'データなし',
   };
   const STATE_COLOR = {
     up: 'text-green-300',
@@ -691,7 +755,7 @@ function renderClientScript(): string {
         ? '<div class="mt-2 pt-2 border-t border-slate-700/60 text-slate-300 font-mono text-[11px] break-all">' + escapeText(error) + '</div>'
         : '',
       isIncident
-        ? '<div class="mt-2 text-[10px] text-slate-500">Click to inspect</div>'
+        ? '<div class="mt-2 text-[10px] text-slate-500">クリックして詳細を確認</div>'
         : '',
     ].join('');
     positionTooltip(evt);
@@ -748,7 +812,7 @@ function renderClientScript(): string {
     const el = document.querySelector('[data-jst-time-secs]');
     if (el) {
       el.dataset.jstTimeSecs = String(target);
-      el.textContent = formatTimeSecs(target);
+      el.textContent = '(' + formatTimeSecs(target) + ')';
     }
   }
   function tick() {
@@ -799,7 +863,7 @@ function renderClientScript(): string {
     el.textContent = formatTime(el.dataset.jstTime);
   });
   document.querySelectorAll('[data-jst-time-secs]').forEach((el) => {
-    el.textContent = formatTimeSecs(el.dataset.jstTimeSecs);
+    el.textContent = '(' + formatTimeSecs(el.dataset.jstTimeSecs) + ')';
   });
   document.querySelectorAll('[data-jst-shortdate]').forEach((el) => {
     el.textContent = formatShortDate(el.dataset.jstShortdate);
@@ -875,8 +939,8 @@ export function formatJstShortDate(ts: number): string {
 }
 
 function formatRelative(ms: number): string {
-  if (ms < 60_000) return `${Math.max(1, Math.floor(ms / 1000))}s`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`;
-  return `${Math.floor(ms / 86_400_000)}d`;
+  if (ms < 60_000) return `${Math.max(1, Math.floor(ms / 1000))}秒前`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}分前`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}時間前`;
+  return `${Math.floor(ms / 86_400_000)}日前`;
 }
