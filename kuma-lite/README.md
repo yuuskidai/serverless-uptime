@@ -196,7 +196,10 @@ npx wrangler secret put SLACK_SIGNING_SECRET   # Slack App の Signing Secret
 
 Slack App 側の設定ポイント:
 
-- **Bot Token Scopes**: `chat:write`, `commands`
+- **Bot Token Scopes**: `chat:write`, `commands`, `reactions:write`
+  （`reactions:write` は復旧時に DOWN メッセージへ ✅ リアクションを付ける
+  ために必須。後から追加した場合は **「Install App → Reinstall to Workspace」**
+  を忘れずに）
 - **Slash Commands**: `/kuma` を追加し、Request URL を
   `https://kuma-lite.<your-subdomain>.workers.dev/slack/events` に設定
 - **Event Subscriptions**: 不要（`/status` は slash command のみ使用）

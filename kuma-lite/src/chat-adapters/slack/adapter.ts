@@ -87,6 +87,16 @@ export function decodeSlackThreadId(threadId: string): SlackThreadId {
   };
 }
 
+function decodeChannelOrThread(id: string): { channel: string; threadTs: string } {
+  const stripped = id.startsWith('slack:') ? id.slice('slack:'.length) : id;
+  const colon = stripped.indexOf(':');
+  if (colon === -1) return { channel: stripped, threadTs: '' };
+  return {
+    channel: stripped.slice(0, colon),
+    threadTs: stripped.slice(colon + 1),
+  };
+}
+
 function rootText(text: string): FormattedContent {
   return {
     type: 'root',
@@ -420,6 +430,36 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       threadId: encodeSlackThreadId({ channel, threadTs: result.ts }),
       raw: (result.message as SlackRawMessage | undefined) ?? (result as SlackRawMessage),
     };
+  }
+
+  /**
+   * Slack-specific escape hatch for posting Block Kit payloads. The chat-sdk
+   * Postable type system only models cross-platform content (text / cards),
+   * so to leverage Slack-native blocks (`header`, `section.fields`,
+   * `context`, etc.) we expose a thin pass-through wrapper around
+   * `chat.postMessage`.
+   *
+   * - `channelOrThreadId`: a chat-sdk channel id (`slack:CXXX`) or thread id
+   *   (`slack:CXXX:ts`); the latter is treated as a top-level post in the
+   *   same channel.
+   * - `args.threadTs`: when set, posts as an in-thread reply.
+   * - `args.text` is a plain-text fallback used for notifications,
+   *   accessibility, and clients that can't render blocks.
+   */
+  async postBlocks(
+    channelOrThreadId: string,
+    args: { text: string; blocks: unknown[]; threadTs?: string },
+  ): Promise<{ ts: string; channel: string }> {
+    const decoded = decodeChannelOrThread(channelOrThreadId);
+    const result = await this.client.postMessage({
+      channel: decoded.channel,
+      text: args.text,
+      blocks: args.blocks,
+      thread_ts: args.threadTs,
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+    return { ts: result.ts, channel: decoded.channel };
   }
 
   async editMessage(

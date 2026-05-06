@@ -11,7 +11,7 @@ export interface SlackBot {
 
 /**
  * Build a chat-sdk Chat instance wired up with the Slack adapter and the
- * `/status` slash command handler. Returns null when the required Slack
+ * `/kuma` slash command handler. Returns null when the required Slack
  * env vars are missing — callers can short-circuit Slack integration in
  * that case.
  *
@@ -35,10 +35,18 @@ export function buildSlackBot(env: Env): SlackBot | null {
     logger: 'warn',
   });
 
+  // The handler is captured via closure so we can reach `slack.postBlocks`
+  // (a Slack-specific escape hatch). chat-sdk's `event.channel.post(text)`
+  // would only let us send plain text, losing Block Kit hierarchy.
   chat.onSlashCommand(['/kuma', '/kuma-status'], async (event) => {
     if (event.adapter.name !== 'slack') return;
-    const summary = await renderStatusSummary(env);
-    await event.channel.post(summary);
+    const channelId = stripSlackPrefix(
+      // event.channel exposes a chat-sdk Channel; we only need its id here.
+      (event.channel as unknown as { id?: string }).id ?? `slack:${env.SLACK_DEFAULT_CHANNEL ?? ''}`,
+    );
+    if (!channelId) return;
+    const { text, blocks } = await renderStatusBlocks(env);
+    await slack.postBlocks(`slack:${channelId}`, { text, blocks });
   });
 
   return env.SLACK_DEFAULT_CHANNEL
@@ -46,19 +54,22 @@ export function buildSlackBot(env: Env): SlackBot | null {
     : { chat, slack };
 }
 
-interface MonitorRow {
+function stripSlackPrefix(id: string): string {
+  return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
+}
+
+interface MonitorWithState {
   id: number;
   name: string;
   url: string;
-}
-
-interface MonitorWithState extends MonitorRow {
   current_status: 'up' | 'down' | null;
   consecutive_failures: number | null;
   down_since: number | null;
 }
 
-async function renderStatusSummary(env: Env): Promise<string> {
+async function renderStatusBlocks(
+  env: Env,
+): Promise<{ text: string; blocks: unknown[] }> {
   const rows = await env.DB.prepare(
     `SELECT m.id, m.name, m.url,
             s.current_status, s.consecutive_failures, s.down_since
@@ -68,12 +79,19 @@ async function renderStatusSummary(env: Env): Promise<string> {
       ORDER BY m.id`,
   ).all<MonitorWithState>();
   const monitors = rows.results ?? [];
+
   if (monitors.length === 0) {
-    return 'No monitors are configured.';
+    return {
+      text: 'No monitors are configured.',
+      blocks: [
+        {
+          type: 'section',
+          text: { type: 'mrkdwn', text: ':information_source:  No monitors are configured.' },
+        },
+      ],
+    };
   }
 
-  // DOWN first (longest-down at top so the most concerning shows highest),
-  // then UP grouped at the bottom and sorted by name for stable reading.
   const down = monitors
     .filter((m) => m.current_status === 'down')
     .sort((a, b) => (a.down_since ?? 0) - (b.down_since ?? 0));
@@ -82,40 +100,82 @@ async function renderStatusSummary(env: Env): Promise<string> {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const total = monitors.length;
-  const header =
+  const headerText =
     down.length === 0
-      ? `:large_green_circle:  *All ${total} monitor${total === 1 ? '' : 's'} are operational.*`
-      : `:red_circle:  *${down.length} of ${total} monitor${total === 1 ? '' : 's'} ${down.length === 1 ? 'is' : 'are'} DOWN.*`;
+      ? `✅  All ${total} monitor${total === 1 ? '' : 's'} operational`
+      : `🔴  ${down.length}/${total} monitor${total === 1 ? '' : 's'} DOWN`;
 
-  const sections: string[] = [header, ''];
+  const blocks: unknown[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: headerText, emoji: true },
+    },
+  ];
 
   if (down.length > 0) {
-    sections.push(`*━━━━━ DOWN  (${down.length}) ━━━━━*`);
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `*🔴  DOWN  (${down.length})*` }],
+    });
     for (const m of down) {
-      const downFor = m.down_since
-        ? formatDuration(Date.now() - m.down_since)
-        : '—';
-      sections.push(
-        `:red_circle:  *${escapeMrkdwn(m.name)}*`,
-        `>  <${m.url}|${escapeMrkdwn(displayUrl(m.url))}>`,
-        `>  Down for *${downFor}*`,
-        '',
-      );
+      const downFor = m.down_since ? formatDuration(Date.now() - m.down_since) : '—';
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: [
+            `:red_circle:  *${slackEscape(m.name)}*`,
+            `<${m.url}|${slackEscape(displayUrl(m.url))}>`,
+            `_Down for *${downFor}*_`,
+          ].join('\n'),
+        },
+      });
     }
   }
 
   if (up.length > 0) {
-    sections.push(`*━━━━━ UP  (${up.length}) ━━━━━*`);
-    for (const m of up) {
-      sections.push(
-        `:large_green_circle:  *${escapeMrkdwn(m.name)}*  —  <${m.url}|${escapeMrkdwn(displayUrl(m.url))}>`,
-      );
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: `*🟢  UP  (${up.length})*` }],
+    });
+    // 2 monitors per section.fields row for compactness.
+    for (let i = 0; i < up.length; i += 2) {
+      const left = up[i];
+      const right = up[i + 1];
+      const fields: unknown[] = [];
+      if (left) {
+        fields.push({
+          type: 'mrkdwn',
+          text: `:large_green_circle:  *${slackEscape(left.name)}*\n<${left.url}|${slackEscape(displayUrl(left.url))}>`,
+        });
+      }
+      if (right) {
+        fields.push({
+          type: 'mrkdwn',
+          text: `:large_green_circle:  *${slackEscape(right.name)}*\n<${right.url}|${slackEscape(displayUrl(right.url))}>`,
+        });
+      }
+      blocks.push({ type: 'section', fields });
     }
-    sections.push('');
   }
 
-  sections.push(`_as of ${new Date().toISOString()}_`);
-  return sections.join('\n');
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: `:clock1:  as of <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+      },
+    ],
+  });
+
+  return { text: headerText, blocks };
+}
+
+function unixSec(): number {
+  return Math.floor(Date.now() / 1000);
 }
 
 function displayUrl(url: string): string {
@@ -127,10 +187,7 @@ function displayUrl(url: string): string {
   }
 }
 
-function escapeMrkdwn(s: string): string {
-  // Slack mrkdwn-safe: only `<`, `>`, `&` need escaping; bold/italic delimiters
-  // (`*`, `_`) are intentionally not escaped because monitor names with those
-  // chars are vanishingly rare and escaping them produces uglier output.
+function slackEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 

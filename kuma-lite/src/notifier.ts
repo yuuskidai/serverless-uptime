@@ -1,5 +1,4 @@
 import type { Env, Monitor } from './types';
-import { encodeSlackThreadId } from './chat-adapters/slack';
 import { buildSlackBot } from './slack-bot';
 
 export interface NotifyDownResult {
@@ -84,12 +83,8 @@ async function postWebhook(url: string, payload: unknown): Promise<void> {
   }
 }
 
-// ── Slack via chat-sdk ──────────────────────────────────────────────────
+// ── Slack via chat-sdk + Block Kit ───────────────────────────────────────
 
-/**
- * Post the top-level DOWN alert and return its ts. The recovery message
- * later threads under this ts and adds a checkmark reaction to it.
- */
 async function sendSlackDown(
   env: Env,
   monitor: Monitor,
@@ -98,25 +93,44 @@ async function sendSlackDown(
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return null;
 
-  const text = [
-    `:red_circle:  *DOWN:* ${monitor.name}`,
-    `<${monitor.url}|${monitor.url}>`,
-    '',
-    `>  *Error:* \`${truncate(error, 500)}\``,
-    `>  _at ${new Date().toISOString()}_`,
-  ].join('\n');
+  const fallback = `🔴 DOWN: ${monitor.name} — ${monitor.url}`;
+  const blocks: unknown[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `🔴  DOWN — ${monitor.name}`, emoji: true },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*Triggered*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
+      ],
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Error*\n\`\`\`${slackEscape(truncate(error, 500))}\`\`\``,
+      },
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `:warning:  Recovery will reply in this thread.`,
+        },
+      ],
+    },
+  ];
 
-  const threadId = encodeSlackThreadId({ channel: bot.defaultChannelId, threadTs: '' });
-  const result = await bot.slack.postMessage(threadId, text);
-  return result.id || null;
+  const result = await bot.slack.postBlocks(bot.defaultChannelId, {
+    text: fallback,
+    blocks,
+  });
+  return result.ts || null;
 }
 
-/**
- * Post the recovery message. When `slackAlertTs` is provided, the message
- * is threaded under the open DOWN alert and a `:white_check_mark:` reaction
- * is added to that DOWN message so the channel timeline shows resolved
- * incidents at a glance.
- */
 async function sendSlackUp(
   env: Env,
   monitor: Monitor,
@@ -127,38 +141,63 @@ async function sendSlackUp(
   if (!bot?.defaultChannelId) return;
 
   const channel = bot.defaultChannelId;
-  const text = [
-    `:large_green_circle:  *RECOVERED:* ${monitor.name}`,
-    `<${monitor.url}|${monitor.url}>`,
-    '',
-    `>  *Down for:* ${formatDuration(downDurationMs)}`,
-    `>  _at ${new Date().toISOString()}_`,
-  ].join('\n');
-
-  // Reply in the same thread as the DOWN alert when we have its ts; fall
-  // back to a top-level post when the ts is missing (e.g., the DOWN was
-  // posted before slack_alert_ts was tracked).
-  const threadId = encodeSlackThreadId({
-    channel,
-    threadTs: slackAlertTs ?? '',
-  });
+  const fallback = `✅ RECOVERED: ${monitor.name} (down for ${formatDuration(downDurationMs)})`;
+  const blocks: unknown[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `✅  RECOVERED — ${monitor.name}`, emoji: true },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*Down for*\n${formatDuration(downDurationMs)}` },
+      ],
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `:large_green_circle:  Recovered at <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+        },
+      ],
+    },
+  ];
 
   await Promise.allSettled([
-    bot.slack.postMessage(threadId, text),
+    bot.slack.postBlocks(channel, {
+      text: fallback,
+      blocks,
+      threadTs: slackAlertTs ?? undefined,
+    }),
     slackAlertTs
-      ? bot.slack.addReaction(
-          encodeSlackThreadId({ channel, threadTs: '' }),
-          slackAlertTs,
-          'white_check_mark',
-        )
+      ? bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark')
       : Promise.resolve(),
   ]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+function unixSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function displayUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.host + (u.pathname === '/' ? '' : u.pathname);
+  } catch {
+    return url;
+  }
+}
+
+function slackEscape(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function formatDuration(ms: number): string {
