@@ -1,4 +1,5 @@
 import { handleApiRequest } from './api';
+import { renderIncidentPage } from './incident-page';
 import { cleanupOldChecks, runChecks } from './monitor';
 import { renderStatusPage } from './status-page';
 import { buildSlackBot } from './slack-bot';
@@ -38,6 +39,10 @@ export default {
 
     if (url.pathname === '/' || url.pathname === '/status') {
       return renderStatusPage(env);
+    }
+
+    if (url.pathname === '/incident') {
+      return renderIncidentPage(env, url);
     }
 
     return new Response('Not found', { status: 404 });
