@@ -20,6 +20,13 @@ export interface Monitor {
   id: number;
   name: string;
   url: string;
+  /**
+   * Optional plain-language note about what business function this URL
+   * represents (e.g., "ログイン機能", "決済 API"). Surfaced on the
+   * status card and incident detail page so non-technical readers see
+   * the function name alongside or instead of the raw URL.
+   */
+  description: string | null;
   method: string;
   expected_status: number;
   keyword: string | null;

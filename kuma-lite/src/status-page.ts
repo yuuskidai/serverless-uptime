@@ -606,13 +606,18 @@ function renderCard(view: MonitorView, scale: Scale): string {
   const startLabel = useDateLabels ? formatJstShortDate(windowStart) : formatJstTime(windowStart);
   const endLabel = useDateLabels ? formatJstShortDate(windowEnd) : formatJstTime(windowEnd);
 
+  const descriptionLine = view.monitor.description
+    ? `<p class="mt-0.5 text-xs text-slate-300 leading-snug">${escapeHtml(view.monitor.description)}</p>`
+    : '';
+
   return `
     <article class="glass rounded-2xl p-5">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0 flex-1">
           <h2 class="font-semibold text-slate-100 truncate">${escapeHtml(view.monitor.name)}</h2>
+          ${descriptionLine}
           <a href="${escapeAttr(view.monitor.url)}" target="_blank" rel="noopener noreferrer"
-             class="mt-0.5 text-xs text-slate-400 hover:text-slate-200 truncate block transition-colors">
+             class="mt-0.5 text-xs text-slate-500 hover:text-slate-300 truncate block transition-colors font-mono">
             ${escapeHtml(view.monitor.url)}
           </a>
         </div>

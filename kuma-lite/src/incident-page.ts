@@ -297,6 +297,9 @@ function renderHealthyWindow(monitor: Monitor, from: number, to: number): string
 }
 
 function renderHeader(monitor: Monitor): string {
+  const descriptionLine = monitor.description
+    ? `<p class="mt-2 text-sm text-slate-300 leading-relaxed">${escapeHtml(monitor.description)}</p>`
+    : '';
   return `
     <header class="mb-8">
       <a href="/" class="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors mb-4">
@@ -307,8 +310,9 @@ function renderHeader(monitor: Monitor): string {
       </a>
       <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">状況レポート</p>
       <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-100">${escapeHtml(monitor.name)}</h1>
+      ${descriptionLine}
       <a href="${escapeAttr(monitor.url)}" target="_blank" rel="noopener noreferrer"
-         class="text-sm text-slate-400 hover:text-slate-200 transition-colors break-all">
+         class="mt-1 inline-block text-xs text-slate-500 hover:text-slate-300 transition-colors break-all font-mono">
         ${escapeHtml(monitor.url)}
       </a>
     </header>

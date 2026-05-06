@@ -4,6 +4,11 @@ CREATE TABLE IF NOT EXISTS monitors (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   url TEXT NOT NULL,
+  -- Optional human-readable note about what this URL serves (e.g.,
+  -- "ログイン機能", "決済 API", "管理画面"). Surfaced as a subtitle on
+  -- the status card and incident detail page so non-technical visitors
+  -- see the business function instead of just the URL.
+  description TEXT,
   method TEXT DEFAULT 'GET',
   expected_status INTEGER DEFAULT 200,
   keyword TEXT,
