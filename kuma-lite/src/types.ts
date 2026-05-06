@@ -4,6 +4,14 @@ export interface Env {
   API_TOKEN: string;
   RETENTION_DAYS: string;
   HIDDEN_MONITOR_IDS?: string;
+
+  // Slack via chat-sdk. Configure all three (or none) to enable Slack
+  // notifications and the `/status` slash command. SLACK_DEFAULT_CHANNEL
+  // is the channel id (e.g. "C0123ABCD") where DOWN/recovery alerts
+  // are posted.
+  SLACK_BOT_TOKEN?: string;
+  SLACK_SIGNING_SECRET?: string;
+  SLACK_DEFAULT_CHANNEL?: string;
 }
 
 export type CheckStatus = 'up' | 'down';
@@ -38,6 +46,8 @@ export interface MonitorState {
   consecutive_failures: number;
   last_notified_at: number | null;
   down_since: number | null;
+  /** Slack message ts of the open DOWN alert; null when monitor is up. */
+  slack_alert_ts: string | null;
 }
 
 export interface CheckResult {

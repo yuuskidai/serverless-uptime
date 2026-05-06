@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Workers Logs (Observability). Captures console logs and runtime metadata
+# for every invocation, viewable in the Cloudflare dashboard under
+# Workers & Pages → kuma-lite → Logs. Free plan retains 3 days of logs;
+# paid plans retain 7 days. head_sampling_rate = 1 keeps 100% of requests.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # D1 database binding. Run `wrangler d1 create kuma-lite-db` and paste the
 # returned database_id below before deploying.
 [[d1_databases]]
@@ -20,7 +28,16 @@ RETENTION_DAYS = "7"
 # Optional: comma-separated list of monitor IDs to skip from public status
 # page output. Useful for hiding internal endpoints.
 # HIDDEN_MONITOR_IDS = ""
+# Optional: Slack channel id (e.g. "C0123ABCD") used for outbound alerts
+# and as the default channel for the `/status` slash command response.
+# SLACK_DEFAULT_CHANNEL = ""
 
 # Secrets (set via `wrangler secret put`):
-#   DISCORD_WEBHOOK_URL  — Discord incoming webhook URL for alerts
-#   API_TOKEN            — bearer token required by the management API
+#   DISCORD_WEBHOOK_URL    — Discord incoming webhook URL for alerts
+#   API_TOKEN              — bearer token required by the management API
+#   SLACK_BOT_TOKEN        — Slack bot token (xoxb-...). Required to enable Slack
+#                            integration; together with SLACK_SIGNING_SECRET
+#                            and SLACK_DEFAULT_CHANNEL it powers DOWN/recovery
+#                            alerts and the `/status` slash command.
+#   SLACK_SIGNING_SECRET   — Slack signing secret used to verify inbound
+#                            webhooks at /slack/events.

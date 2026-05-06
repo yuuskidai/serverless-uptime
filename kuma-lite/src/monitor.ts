@@ -137,11 +137,13 @@ async function reconcileState(
   const prevFailures = previous?.consecutive_failures ?? 0;
   const prevDownSince = previous?.down_since ?? null;
   const prevNotifiedAt = previous?.last_notified_at ?? null;
+  const prevSlackAlertTs = previous?.slack_alert_ts ?? null;
 
   let nextStatus: CheckStatus = prevStatus;
   let nextFailures = prevFailures;
   let nextDownSince = prevDownSince;
   let nextNotifiedAt = prevNotifiedAt;
+  let nextSlackAlertTs = prevSlackAlertTs;
 
   const threshold = Math.max(1, monitor.retry_threshold ?? 1);
 
@@ -151,7 +153,8 @@ async function reconcileState(
       nextStatus = 'down';
       nextDownSince = ts;
       nextNotifiedAt = ts;
-      await safeNotify(() => notifyDown(env, monitor, result.error ?? 'unknown error'));
+      const r = await safeNotifyDown(env, monitor, result.error ?? 'unknown error');
+      nextSlackAlertTs = r?.slackAlertTs ?? null;
     }
   } else {
     nextFailures = 0;
@@ -160,28 +163,55 @@ async function reconcileState(
       const downDurationMs = prevDownSince ? ts - prevDownSince : 0;
       nextDownSince = null;
       nextNotifiedAt = ts;
-      await safeNotify(() => notifyUp(env, monitor, downDurationMs));
+      await safeNotifyUp(env, monitor, downDurationMs, prevSlackAlertTs);
+      nextSlackAlertTs = null;
     }
   }
 
   await env.DB.prepare(
-    `INSERT INTO monitor_state (monitor_id, current_status, consecutive_failures, last_notified_at, down_since)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO monitor_state (monitor_id, current_status, consecutive_failures, last_notified_at, down_since, slack_alert_ts)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(monitor_id) DO UPDATE SET
        current_status = excluded.current_status,
        consecutive_failures = excluded.consecutive_failures,
        last_notified_at = excluded.last_notified_at,
-       down_since = excluded.down_since`,
+       down_since = excluded.down_since,
+       slack_alert_ts = excluded.slack_alert_ts`,
   )
-    .bind(monitor.id, nextStatus, nextFailures, nextNotifiedAt, nextDownSince)
+    .bind(
+      monitor.id,
+      nextStatus,
+      nextFailures,
+      nextNotifiedAt,
+      nextDownSince,
+      nextSlackAlertTs,
+    )
     .run();
 }
 
-async function safeNotify(fn: () => Promise<void>): Promise<void> {
+async function safeNotifyDown(
+  env: Env,
+  monitor: Monitor,
+  error: string,
+): Promise<{ slackAlertTs: string | null } | null> {
   try {
-    await fn();
+    return await notifyDown(env, monitor, error);
   } catch (err) {
-    console.error('notification failed:', errorMessage(err));
+    console.error('notifyDown failed:', errorMessage(err));
+    return null;
+  }
+}
+
+async function safeNotifyUp(
+  env: Env,
+  monitor: Monitor,
+  downDurationMs: number,
+  slackAlertTs: string | null,
+): Promise<void> {
+  try {
+    await notifyUp(env, monitor, downDurationMs, slackAlertTs);
+  } catch (err) {
+    console.error('notifyUp failed:', errorMessage(err));
   }
 }
 
