@@ -57,13 +57,21 @@ function computeNextRefreshMs(now: number): number {
 type BucketState = 'up' | 'down' | 'partial' | 'none';
 /**
  * Effective state shown on the per-monitor badge and the global header.
- * Derived from `monitor_state.current_status` plus a short look-back at
- * recent down checks so a monitor that just recovered (or is flapping)
- * is no longer displayed as serenely "Operational".
+ * Derived to match what the visitor sees on the *latest* bar of the
+ * timeline:
+ *   - `monitor_state.current_status === 'down'` → `down` (system has
+ *     formally tripped past the retry threshold).
+ *   - Latest non-empty bucket has any failure → `degraded` (amber bar
+ *     just appeared).
+ *   - Latest non-empty bucket is fully up → `up`.
+ *
+ * A previous version used a fixed 15-minute look-back, which kept the
+ * badge amber for 15 minutes after a flap even when the latest bucket
+ * was fully green — that drifted from the rightmost bar and confused
+ * readers. The current rule keeps the badge in lock-step with the
+ * latest bar.
  */
 type EffectiveState = 'up' | 'degraded' | 'down';
-/** Window used to decide whether a monitor is "Recently degraded". */
-const RECENT_DOWN_WINDOW_MS = 15 * 60_000;
 
 interface BucketView {
   index: number;
@@ -115,19 +123,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     .all<MonitorState>();
   const stateById = new Map<number, MonitorState>();
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
-
-  // Monitors that recorded any failure in the recent look-back window.
-  // Drives the "Recently degraded" badge — even when monitor_state has
-  // already flipped back to "up", the recent flap stays visible.
-  const recentDownResult = await env.DB.prepare(
-    `SELECT DISTINCT monitor_id FROM checks
-       WHERE ts >= ? AND status = 'down' AND monitor_id IN (${placeholders})`,
-  )
-    .bind(now - RECENT_DOWN_WINDOW_MS, ...ids)
-    .all<{ monitor_id: number }>();
-  const recentDownIds = new Set<number>(
-    (recentDownResult.results ?? []).map((r) => r.monitor_id),
-  );
 
   const latestResult = await env.DB.prepare(
     `SELECT c.monitor_id, c.latency_ms, c.ts
@@ -223,12 +218,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       totalUps += b.upCount;
     }
     const state = stateRow?.current_status ?? 'up';
-    const effState: EffectiveState =
-      state === 'down'
-        ? 'down'
-        : recentDownIds.has(monitor.id)
-        ? 'degraded'
-        : 'up';
+    const effState = deriveEffState(state, buckets);
     return {
       monitor,
       state,
@@ -243,6 +233,22 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const overall = computeOverall(views);
   const html = renderShell('Status', renderBody(views, overall, now, scale), now, scale);
   return htmlResponse(html);
+}
+
+/**
+ * Pick the badge state from the latest non-empty bucket. Empty trailing
+ * buckets (the very current minute that hasn't been written to yet) are
+ * skipped so the badge doesn't go neutral mid-cron-cycle.
+ */
+function deriveEffState(currentStatus: CheckStatus, buckets: BucketView[]): EffectiveState {
+  if (currentStatus === 'down') return 'down';
+  for (let i = buckets.length - 1; i >= 0; i--) {
+    const b = buckets[i];
+    if (!b || b.state === 'none') continue;
+    if (b.state === 'down' || b.state === 'partial') return 'degraded';
+    return 'up';
+  }
+  return 'up';
 }
 
 function buildBuckets(
