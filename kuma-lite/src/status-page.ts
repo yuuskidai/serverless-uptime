@@ -479,7 +479,6 @@ function renderBody(
   now: number,
   scale: Scale,
 ): string {
-  const config = SCALES[scale];
   const headerStatus = renderHeaderStatus(overall);
 
   const cards = views.map((v) => renderCard(v, scale)).join('\n');
@@ -490,13 +489,9 @@ function renderBody(
   ).join('');
 
   return `
-    <header class="mb-10">
-      <div class="flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">サービス状況</p>
-          <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight">kuma-lite</h1>
-          <div class="mt-3 text-sm">${headerStatus}</div>
-        </div>
+    <header class="mb-8">
+      <div class="flex items-center justify-between gap-4 flex-wrap">
+        <div class="text-sm">${headerStatus}</div>
         <div class="flex items-center gap-4 flex-wrap">
           <div class="flex items-center gap-2">
             <label for="scale-select" class="text-[10px] uppercase tracking-wider text-slate-500">表示期間</label>
@@ -517,7 +512,6 @@ function renderBody(
               <span class="text-slate-200 tabular-nums" data-jst-datetime="${now}">${formatJstDateTime(now)}</span>
               <span class="mt-1 text-[11px] text-slate-500">
                 次回更新まで <span id="refresh-countdown" class="tabular-nums text-slate-400">—</span>秒
-                <span class="ml-1 text-slate-600 tabular-nums" data-jst-time-secs="${nextRefreshMs}">(${formatJstTimeSecs(nextRefreshMs)})</span>
               </span>
             </div>
           </div>
@@ -527,10 +521,9 @@ function renderBody(
     <main class="space-y-4">
       ${cards}
     </main>
-    <footer class="mt-12 pt-6 border-t border-slate-800/50 text-xs text-slate-500 text-center">
-      kuma-lite · ${escapeHtml(config.label)}
-    </footer>
   `;
+  // Footer intentionally omitted: the service name appears on each card
+  // and the time range is already shown in the <select>.
 }
 
 function renderHeaderStatus(overall: OverallStatus): string {
@@ -815,11 +808,10 @@ function renderClientScript(): string {
     return Date.now() - lastInteractionAt < PAUSE_GRACE_MS;
   }
   function updateNextRefreshLabel() {
-    const el = document.querySelector('[data-jst-time-secs]');
-    if (el) {
-      el.dataset.jstTimeSecs = String(target);
-      el.textContent = '(' + formatTimeSecs(target) + ')';
-    }
+    /* The wall-clock time-of-next-refresh was previously surfaced next to
+       the countdown. The seconds-remaining number alone communicates the
+       same thing more concisely, so the label is intentionally a no-op
+       — kept as a hook in case we want to revive it. */
   }
   function tick() {
     const now = Date.now();
@@ -868,9 +860,9 @@ function renderClientScript(): string {
   document.querySelectorAll('[data-jst-time]').forEach((el) => {
     el.textContent = formatTime(el.dataset.jstTime);
   });
-  document.querySelectorAll('[data-jst-time-secs]').forEach((el) => {
-    el.textContent = '(' + formatTimeSecs(el.dataset.jstTimeSecs) + ')';
-  });
+  // data-jst-time-secs intentionally unused on the rendered page now;
+  // formatTimeSecs is still defined for forward compatibility.
+  void formatTimeSecs;
   document.querySelectorAll('[data-jst-shortdate]').forEach((el) => {
     el.textContent = formatShortDate(el.dataset.jstShortdate);
   });
