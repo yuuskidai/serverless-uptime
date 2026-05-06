@@ -326,13 +326,13 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       options,
     );
 
-    if (responseUrl) {
-      // Slack will only show the body of an immediate ack. For longer-running
-      // handlers the user should post() into the thread; we ack with empty
-      // ephemeral so Slack doesn't show "operation_timeout".
-      return jsonResponse({ response_type: 'ephemeral', text: '' });
-    }
-    return jsonResponse({ ok: true });
+    // Acknowledge with an empty 200. Returning a JSON body with an empty
+    // `text` field surfaces as "invalid_command_response" in Slack — the
+    // platform expects either a populated payload or an empty body for
+    // deferred handling. The async handler posts back via channel.post(),
+    // which routes through `postChannelMessage`.
+    void responseUrl;
+    return new Response('', { status: 200 });
   }
 
   private async dispatchEvent(
@@ -377,6 +377,32 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       // a new top-level message.
       thread_ts: threadTs || undefined,
     };
+    if (blocks) args.blocks = blocks;
+    const result = await this.client.postMessage(args);
+    return {
+      id: result.ts,
+      threadId: encodeSlackThreadId({ channel, threadTs: result.ts }),
+      raw: (result.message as SlackRawMessage | undefined) ?? (result as SlackRawMessage),
+    };
+  }
+
+  /**
+   * Post a top-level message to a channel (no thread).
+   *
+   * `chat-sdk`'s `Channel.post(...)` routes through this method when the
+   * adapter implements it; without it the framework falls back to errors.
+   * We strip the `slack:` prefix that chat-sdk uses to namespace channel
+   * ids across adapters.
+   */
+  async postChannelMessage(
+    channelId: string,
+    message: AdapterPostableMessage,
+  ): Promise<RawMessage<SlackRawMessage>> {
+    const channel = channelId.startsWith('slack:')
+      ? channelId.slice('slack:'.length)
+      : channelId;
+    const { text, blocks } = postableToText(message);
+    const args: Parameters<SlackClient['postMessage']>[0] = { channel, text };
     if (blocks) args.blocks = blocks;
     const result = await this.client.postMessage(args);
     return {
