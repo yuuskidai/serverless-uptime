@@ -1,40 +1,60 @@
-import type { CheckRow, CheckStatus, Env, Monitor, MonitorState } from './types';
+import type { CheckStatus, Env, Monitor, MonitorState } from './types';
 
-const WINDOW_MS = 90 * 60 * 1000; // 90 minutes
-const BUCKET_MS = 3 * 60 * 1000; // 3 minutes
-const BUCKET_COUNT = WINDOW_MS / BUCKET_MS; // 30
+const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
 // new check has time to fetch + write into D1 before we pull fresh data.
 const REFRESH_BUFFER_MS = 5 * 1000;
-const TIMEZONE = 'Asia/Tokyo';
+
+type Scale = '60m' | '12h' | '24h' | '7d' | '30d';
+
+interface ScaleConfig {
+  /** Total window length in milliseconds. */
+  ms: number;
+  /** How many bars to render across that window. */
+  buckets: number;
+  /** Human-readable label for the <select>. */
+  label: string;
+  /** Short suffix used by the "Uptime · X" stat. */
+  short: string;
+}
+
+const SCALES: Record<Scale, ScaleConfig> = {
+  '60m': { ms: 60 * 60_000, buckets: 60, label: '直近60分', short: '60m' },
+  '12h': { ms: 12 * 3_600_000, buckets: 60, label: '直近12時間', short: '12h' },
+  '24h': { ms: 24 * 3_600_000, buckets: 60, label: '直近24時間', short: '24h' },
+  '7d': { ms: 7 * 86_400_000, buckets: 84, label: '直近7日', short: '7d' },
+  '30d': { ms: 30 * 86_400_000, buckets: 30, label: '直近30日', short: '30d' },
+};
+
+const SCALE_ORDER: Scale[] = ['60m', '12h', '24h', '7d', '30d'];
+const DEFAULT_SCALE: Scale = '30d';
+/**
+ * Sample error messages are only meaningful when a single bucket likely
+ * represents one incident. Past 24h the bucket spans hours-to-days and many
+ * unrelated failures could share it — leaking just one would mislead.
+ */
+const SAMPLE_ERROR_MAX_SCALE_MS = 24 * 3_600_000;
+
+function parseScale(input: string | null): Scale {
+  if (input && Object.prototype.hasOwnProperty.call(SCALES, input)) {
+    return input as Scale;
+  }
+  return DEFAULT_SCALE;
+}
 
 /**
  * Compute the next reload target aligned to the cron schedule, not to the
  * client's page-load instant. The minute-aligned target shared by server
- * and client guarantees that:
- *   1. The countdown tracks real cron freshness, not a per-client phase.
- *   2. The "Updated" timestamp on the next render is roughly 60s after
- *      this one (the cron interval), so the two no longer drift.
- *   3. Mouse activity defers the reload past the missed boundary instead
- *      of resetting the timer relative to the user.
+ * and client guarantees that "Updated" and "Next refresh" advance together.
  */
 function computeNextRefreshMs(now: number): number {
   const nextMinute = Math.ceil(now / 60_000) * 60_000;
   let target = nextMinute + REFRESH_BUFFER_MS;
-  // If the buffer window is closing in less than 3s, the freshly-baked
-  // cron data may still be in flight — push to the following minute.
   if (target - now < 3_000) target += 60_000;
   return target;
 }
 
-interface MonitorView {
-  monitor: Monitor;
-  state: CheckStatus;
-  uptime24h: number | null;
-  latestLatency: number | null;
-  latestTs: number | null;
-  buckets: BucketView[];
-}
+type BucketState = 'up' | 'down' | 'partial' | 'none';
 
 interface BucketView {
   index: number;
@@ -43,16 +63,26 @@ interface BucketView {
   state: BucketState;
   upCount: number;
   downCount: number;
-  /** Sample error from the most recent down check in this bucket. */
   sampleError: string | null;
 }
 
-type BucketState = 'up' | 'down' | 'partial' | 'none';
+interface MonitorView {
+  monitor: Monitor;
+  state: CheckStatus;
+  uptime: number | null;
+  latestLatency: number | null;
+  latestTs: number | null;
+  buckets: BucketView[];
+}
 
-export async function renderStatusPage(env: Env): Promise<Response> {
+export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const now = Date.now();
-  const since24h = now - 24 * 60 * 60 * 1000;
-  const sinceWindow = now - WINDOW_MS;
+  const scale = parseScale(url.searchParams.get('scale'));
+  const config = SCALES[scale];
+  const windowMs = config.ms;
+  const bucketCount = config.buckets;
+  const bucketMs = Math.floor(windowMs / bucketCount);
+  const sinceWindow = now - windowMs;
 
   const hidden = parseHidden(env.HIDDEN_MONITOR_IDS);
 
@@ -62,7 +92,7 @@ export async function renderStatusPage(env: Env): Promise<Response> {
   const monitors = (monitorsResult.results ?? []).filter((m) => !hidden.has(m.id));
 
   if (monitors.length === 0) {
-    return htmlResponse(renderShell('No monitors configured', emptyState(), now));
+    return htmlResponse(renderShell('No monitors configured', emptyState(), now, scale));
   }
 
   const ids = monitors.map((m) => m.id);
@@ -75,21 +105,6 @@ export async function renderStatusPage(env: Env): Promise<Response> {
     .all<MonitorState>();
   const stateById = new Map<number, MonitorState>();
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
-
-  const uptimeResult = await env.DB.prepare(
-    `SELECT monitor_id,
-            COUNT(*) AS total,
-            SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END) AS ups
-       FROM checks
-      WHERE ts >= ? AND monitor_id IN (${placeholders})
-      GROUP BY monitor_id`,
-  )
-    .bind(since24h, ...ids)
-    .all<{ monitor_id: number; total: number; ups: number }>();
-  const uptimeById = new Map<number, { total: number; ups: number }>();
-  for (const row of uptimeResult.results ?? []) {
-    uptimeById.set(row.monitor_id, { total: row.total, ups: row.ups });
-  }
 
   const latestResult = await env.DB.prepare(
     `SELECT c.monitor_id, c.latency_ms, c.ts
@@ -108,44 +123,127 @@ export async function renderStatusPage(env: Env): Promise<Response> {
     latestById.set(row.monitor_id, { latency_ms: row.latency_ms, ts: row.ts });
   }
 
-  const recentResult = await env.DB.prepare(
-    `SELECT monitor_id, status, error, ts FROM checks
+  // Aggregate per-bucket counts on the database side. Without this, a 30-day
+  // window with one-minute checks would pull tens of thousands of rows back
+  // into the Worker just to bucket them in JS.
+  type BucketRow = {
+    monitor_id: number;
+    bucket_idx: number;
+    total: number;
+    ups: number;
+    downs: number;
+  };
+  const aggregateResult = await env.DB.prepare(
+    `SELECT monitor_id,
+            CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
+            COUNT(*) AS total,
+            SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END) AS ups,
+            SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS downs
+       FROM checks
       WHERE ts >= ? AND monitor_id IN (${placeholders})
-      ORDER BY ts ASC`,
+      GROUP BY monitor_id, bucket_idx`,
   )
-    .bind(sinceWindow, ...ids)
-    .all<Pick<CheckRow, 'monitor_id' | 'status' | 'error' | 'ts'>>();
-  const recentByMonitor = new Map<number, RecentCheck[]>();
-  for (const row of recentResult.results ?? []) {
-    const list = recentByMonitor.get(row.monitor_id) ?? [];
-    list.push({ status: row.status, ts: row.ts, error: row.error });
-    recentByMonitor.set(row.monitor_id, list);
+    .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
+    .all<BucketRow>();
+  const bucketsByMonitor = new Map<number, Map<number, BucketRow>>();
+  for (const row of aggregateResult.results ?? []) {
+    let m = bucketsByMonitor.get(row.monitor_id);
+    if (!m) {
+      m = new Map();
+      bucketsByMonitor.set(row.monitor_id, m);
+    }
+    m.set(row.bucket_idx, row);
+  }
+
+  // Sample errors only fetched for short scales. For wider windows, a single
+  // sample error per bucket would conflate distinct incidents; the user can
+  // click through to /incident for the actual list.
+  const sampleErrorByKey = new Map<string, string>();
+  if (windowMs <= SAMPLE_ERROR_MAX_SCALE_MS) {
+    type ErrRow = { monitor_id: number; error: string | null; ts: number };
+    const errResult = await env.DB.prepare(
+      `SELECT monitor_id, error, ts FROM checks
+        WHERE ts >= ? AND status = 'down' AND error IS NOT NULL
+              AND monitor_id IN (${placeholders})
+        ORDER BY ts DESC
+        LIMIT 5000`,
+    )
+      .bind(sinceWindow, ...ids)
+      .all<ErrRow>();
+    for (const row of errResult.results ?? []) {
+      const idx = Math.floor((row.ts - sinceWindow) / bucketMs);
+      if (idx < 0 || idx >= bucketCount) continue;
+      const key = `${row.monitor_id}:${idx}`;
+      // First seen is most recent because we sorted DESC by ts.
+      if (!sampleErrorByKey.has(key) && row.error) {
+        sampleErrorByKey.set(key, row.error);
+      }
+    }
   }
 
   const views: MonitorView[] = monitors.map((monitor) => {
-    const state = stateById.get(monitor.id);
-    const uptime = uptimeById.get(monitor.id);
+    const stateRow = stateById.get(monitor.id);
     const latest = latestById.get(monitor.id);
-    const recent = recentByMonitor.get(monitor.id) ?? [];
+    const monitorBuckets = bucketsByMonitor.get(monitor.id) ?? new Map<number, BucketRow>();
+    const buckets = buildBuckets(
+      monitor.id,
+      monitorBuckets,
+      sampleErrorByKey,
+      sinceWindow,
+      bucketMs,
+      bucketCount,
+    );
+    let totalChecks = 0;
+    let totalUps = 0;
+    for (const b of buckets) {
+      totalChecks += b.upCount + b.downCount;
+      totalUps += b.upCount;
+    }
     return {
       monitor,
-      state: state?.current_status ?? 'up',
-      uptime24h: uptime && uptime.total > 0 ? (uptime.ups / uptime.total) * 100 : null,
+      state: stateRow?.current_status ?? 'up',
+      uptime: totalChecks > 0 ? (totalUps / totalChecks) * 100 : null,
       latestLatency: latest?.latency_ms ?? null,
       latestTs: latest?.ts ?? null,
-      buckets: computeBuckets(recent, sinceWindow),
+      buckets,
     };
   });
 
   const overall = computeOverall(views);
-  const html = renderShell('Status', renderBody(views, overall, now), now);
+  const html = renderShell('Status', renderBody(views, overall, now, scale), now, scale);
   return htmlResponse(html);
 }
 
-interface RecentCheck {
-  status: CheckStatus;
-  ts: number;
-  error: string | null;
+function buildBuckets(
+  monitorId: number,
+  rows: Map<number, { ups: number; downs: number; total: number }>,
+  sampleErrors: Map<string, string>,
+  sinceWindow: number,
+  bucketMs: number,
+  bucketCount: number,
+): BucketView[] {
+  const out: BucketView[] = [];
+  for (let i = 0; i < bucketCount; i++) {
+    const fromMs = sinceWindow + i * bucketMs;
+    const toMs = sinceWindow + (i + 1) * bucketMs;
+    const row = rows.get(i);
+    let state: BucketState = 'none';
+    if (row && row.total > 0) {
+      if (row.downs === 0) state = 'up';
+      else if (row.ups === 0) state = 'down';
+      else state = 'partial';
+    }
+    out.push({
+      index: i,
+      fromMs,
+      toMs,
+      state,
+      upCount: row?.ups ?? 0,
+      downCount: row?.downs ?? 0,
+      sampleError: sampleErrors.get(`${monitorId}:${i}`) ?? null,
+    });
+  }
+  return out;
 }
 
 function parseHidden(input: string | undefined): Set<number> {
@@ -158,44 +256,13 @@ function parseHidden(input: string | undefined): Set<number> {
   return set;
 }
 
-function computeBuckets(rows: RecentCheck[], start: number): BucketView[] {
-  const buckets: BucketView[] = Array.from({ length: BUCKET_COUNT }, (_, i) => ({
-    index: i,
-    fromMs: start + i * BUCKET_MS,
-    toMs: start + (i + 1) * BUCKET_MS,
-    state: 'none' as BucketState,
-    upCount: 0,
-    downCount: 0,
-    sampleError: null,
-  }));
-  for (const row of rows) {
-    const idx = Math.floor((row.ts - start) / BUCKET_MS);
-    if (idx < 0 || idx >= BUCKET_COUNT) continue;
-    const b = buckets[idx];
-    if (!b) continue;
-    if (row.status === 'up') {
-      b.upCount += 1;
-    } else {
-      b.downCount += 1;
-      // Keep the most recent down error as the representative sample.
-      if (row.error) b.sampleError = row.error;
-    }
-  }
-  for (const b of buckets) {
-    if (b.upCount === 0 && b.downCount === 0) b.state = 'none';
-    else if (b.downCount === 0) b.state = 'up';
-    else if (b.upCount === 0) b.state = 'down';
-    else b.state = 'partial';
-  }
-  return buckets;
-}
-
 function computeOverall(views: MonitorView[]): { ok: boolean; downCount: number } {
   const downCount = views.filter((v) => v.state === 'down').length;
   return { ok: downCount === 0, downCount };
 }
 
-function renderShell(title: string, body: string, now: number): string {
+function renderShell(title: string, body: string, now: number, scale: Scale): string {
+  void now;
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -249,9 +316,9 @@ function renderShell(title: string, body: string, now: number): string {
       0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
       50%      { box-shadow: 0 0 0 6px transparent; opacity: 0.6; }
     }
-    /* History bars: each bar takes an equal share of the row so the
-       30-bucket strip always spans the full card width. min/max keep
-       it sensible from mobile (≈8px) to wide screens (≈18px). */
+    /* Each bar takes an equal share of the row so the strip spans the
+       full card width regardless of bucket count or viewport. min-width
+       keeps it scrollable-free on narrow screens. */
     .bar-row {
       display: flex;
       align-items: stretch;
@@ -259,8 +326,7 @@ function renderShell(title: string, body: string, now: number): string {
     }
     .bar {
       flex: 1 1 0;
-      min-width: 4px;
-      max-width: 18px;
+      min-width: 3px;
       height: 36px;
       border-radius: 3px;
       transition: transform 180ms ease, filter 180ms ease;
@@ -277,7 +343,29 @@ function renderShell(title: string, body: string, now: number): string {
     .bar-up      { background: linear-gradient(180deg, #34d399 0%, #16a34a 100%); }
     .bar-down    { background: linear-gradient(180deg, #f87171 0%, #dc2626 100%); }
     .bar-partial { background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%); }
-    .bar-none    { background: rgba(148, 163, 184, 0.10); }
+    .bar-none    { background: rgba(100, 116, 139, 0.18); }
+    select.scale-select {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 8px;
+      padding: 6px 32px 6px 12px;
+      color: #e2e8f0;
+      font-size: 12px;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 20 20' fill='%2394a3b8'><path d='M5 8l5 5 5-5z'/></svg>");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      transition: border-color 180ms ease, background-color 180ms ease;
+    }
+    select.scale-select:hover {
+      border-color: rgba(148, 163, 184, 0.35);
+    }
+    select.scale-select:focus {
+      outline: none;
+      border-color: rgba(34, 197, 94, 0.6);
+    }
     #tooltip {
       position: fixed;
       pointer-events: none;
@@ -307,18 +395,18 @@ function renderShell(title: string, body: string, now: number): string {
     }
     @media (prefers-reduced-motion: reduce) {
       .pulse-dot { animation: none; }
-      .bar:hover { transform: none; filter: none; }
+      .bar.is-clickable:hover { transform: none; filter: none; }
       #tooltip { transition: none; }
       .refresh-ring { transition: none; }
     }
   </style>
 </head>
-<body class="text-slate-100 font-sans antialiased">
+<body class="text-slate-100 font-sans antialiased" data-scale="${scale}" data-window-ms="${SCALES[scale].ms}">
   <div class="max-w-4xl mx-auto px-4 py-10">
     ${body}
   </div>
   <div id="tooltip" role="tooltip" aria-hidden="true"><div class="tooltip-card"></div></div>
-  ${renderClientScript(now)}
+  ${renderClientScript()}
 </body>
 </html>`;
 }
@@ -343,7 +431,9 @@ function renderBody(
   views: MonitorView[],
   overall: { ok: boolean; downCount: number },
   now: number,
+  scale: Scale,
 ): string {
+  const config = SCALES[scale];
   const headerStatus = overall.ok
     ? `<div class="flex items-center gap-2.5">
          <span class="relative inline-flex">
@@ -358,8 +448,12 @@ function renderBody(
          <span class="text-red-400 font-medium">${overall.downCount} monitor${overall.downCount === 1 ? '' : 's'} down</span>
        </div>`;
 
-  const cards = views.map((v) => renderCard(v, now)).join('\n');
+  const cards = views.map((v) => renderCard(v, scale)).join('\n');
   const nextRefreshMs = computeNextRefreshMs(now);
+  const scaleOptions = SCALE_ORDER.map(
+    (key) =>
+      `<option value="${key}"${key === scale ? ' selected' : ''}>${escapeHtml(SCALES[key].label)}</option>`,
+  ).join('');
 
   return `
     <header class="mb-10">
@@ -369,22 +463,30 @@ function renderBody(
           <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight">kuma-lite</h1>
           <div class="mt-3 text-sm">${headerStatus}</div>
         </div>
-        <div class="flex items-center gap-3 text-xs text-slate-400" data-next-refresh="${nextRefreshMs}">
-          <svg class="w-10 h-10" viewBox="0 0 36 36" aria-hidden="true">
-            <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(148,163,184,0.18)" stroke-width="2"/>
-            <circle id="refresh-ring" class="refresh-ring" cx="18" cy="18" r="15" fill="none"
-                    stroke="rgba(34,197,94,0.85)" stroke-width="2"
-                    stroke-linecap="round" stroke-dasharray="94.2" stroke-dashoffset="94.2"
-                    transform="rotate(-90 18 18)"/>
-          </svg>
-          <div class="flex flex-col leading-tight">
-            <span class="text-slate-300">Updated</span>
-            <span class="text-slate-200 tabular-nums" data-jst-datetime="${now}">${formatJstDateTime(now)}</span>
-            <span class="mt-1 text-[11px] text-slate-500">
-              Next refresh
-              <span class="text-slate-400 tabular-nums" data-jst-time-secs="${nextRefreshMs}">${formatJstTimeSecs(nextRefreshMs)}</span>
-              · <span id="refresh-countdown" class="tabular-nums">—</span>s
-            </span>
+        <div class="flex items-center gap-4 flex-wrap">
+          <div class="flex items-center gap-2">
+            <label for="scale-select" class="text-[10px] uppercase tracking-wider text-slate-500">Range</label>
+            <select id="scale-select" class="scale-select" aria-label="Time scale">
+              ${scaleOptions}
+            </select>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-slate-400" data-next-refresh="${nextRefreshMs}">
+            <svg class="w-10 h-10" viewBox="0 0 36 36" aria-hidden="true">
+              <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(148,163,184,0.18)" stroke-width="2"/>
+              <circle id="refresh-ring" class="refresh-ring" cx="18" cy="18" r="15" fill="none"
+                      stroke="rgba(34,197,94,0.85)" stroke-width="2"
+                      stroke-linecap="round" stroke-dasharray="94.2" stroke-dashoffset="94.2"
+                      transform="rotate(-90 18 18)"/>
+            </svg>
+            <div class="flex flex-col leading-tight">
+              <span class="text-slate-300">Updated</span>
+              <span class="text-slate-200 tabular-nums" data-jst-datetime="${now}">${formatJstDateTime(now)}</span>
+              <span class="mt-1 text-[11px] text-slate-500">
+                Next refresh
+                <span class="text-slate-400 tabular-nums" data-jst-time-secs="${nextRefreshMs}">${formatJstTimeSecs(nextRefreshMs)}</span>
+                · <span id="refresh-countdown" class="tabular-nums">—</span>s
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -393,12 +495,13 @@ function renderBody(
       ${cards}
     </main>
     <footer class="mt-12 pt-6 border-t border-slate-800/50 text-xs text-slate-500 text-center">
-      Powered by kuma-lite on Cloudflare Workers
+      Powered by kuma-lite on Cloudflare Workers · ${escapeHtml(config.label)}
     </footer>
   `;
 }
 
-function renderCard(view: MonitorView, now: number): string {
+function renderCard(view: MonitorView, scale: Scale): string {
+  const config = SCALES[scale];
   const isUp = view.state === 'up';
   const badge = isUp
     ? `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
@@ -408,14 +511,11 @@ function renderCard(view: MonitorView, now: number): string {
          <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Down
        </span>`;
 
-  const uptimeText = view.uptime24h === null ? '—' : `${view.uptime24h.toFixed(2)}%`;
+  const uptimeText = view.uptime === null ? '—' : `${view.uptime.toFixed(2)}%`;
   const latencyText = view.latestLatency === null ? '—' : `${view.latestLatency} ms`;
   const lastCheck =
-    view.latestTs === null ? 'never' : `${formatRelative(now - view.latestTs)} ago`;
+    view.latestTs === null ? 'never' : `${formatRelative(Date.now() - view.latestTs)} ago`;
 
-  // Only buckets containing a failure are clickable. Healthy ("up") and
-  // empty ("none") buckets are decorative — there is no incident to inspect
-  // and a click target there would be a dead end.
   const monitorId = view.monitor.id;
   const bars = view.buckets
     .map((b) => {
@@ -437,8 +537,11 @@ function renderCard(view: MonitorView, now: number): string {
     })
     .join('');
 
-  const windowStart = view.buckets[0]?.fromMs ?? now - WINDOW_MS;
-  const windowEnd = view.buckets[view.buckets.length - 1]?.toMs ?? now;
+  const windowStart = view.buckets[0]?.fromMs ?? Date.now() - config.ms;
+  const windowEnd = view.buckets[view.buckets.length - 1]?.toMs ?? Date.now();
+  const useDateLabels = config.ms > 24 * 3_600_000;
+  const startLabel = useDateLabels ? formatJstShortDate(windowStart) : formatJstTime(windowStart);
+  const endLabel = useDateLabels ? formatJstShortDate(windowEnd) : formatJstTime(windowEnd);
 
   return `
     <article class="glass rounded-2xl p-5">
@@ -455,19 +558,19 @@ function renderCard(view: MonitorView, now: number): string {
 
       <div class="mt-5">
         <div class="bar-row" role="img"
-             aria-label="Last 90 minutes timeline for ${escapeAttr(view.monitor.name)}">
+             aria-label="${escapeAttr(config.label)} timeline for ${escapeAttr(view.monitor.name)}">
           ${bars}
         </div>
         <div class="mt-2 flex justify-between text-[10px] text-slate-500 font-mono tabular-nums">
-          <span data-jst-time="${windowStart}">${formatJstTime(windowStart)}</span>
-          <span class="text-slate-600">90 min window · JST</span>
-          <span data-jst-time="${windowEnd}">${formatJstTime(windowEnd)}</span>
+          <span data-jst-${useDateLabels ? 'shortdate' : 'time'}="${windowStart}">${startLabel}</span>
+          <span class="text-slate-600">${escapeHtml(config.label)} · JST</span>
+          <span data-jst-${useDateLabels ? 'shortdate' : 'time'}="${windowEnd}">${endLabel}</span>
         </div>
       </div>
 
       <div class="mt-4 grid grid-cols-3 gap-3 text-xs">
         <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">Uptime · 24h</div>
+          <div class="text-slate-500 uppercase tracking-wider text-[10px]">Uptime · ${escapeHtml(config.short)}</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${uptimeText}</div>
         </div>
         <div>
@@ -483,45 +586,54 @@ function renderCard(view: MonitorView, now: number): string {
   `;
 }
 
-function renderClientScript(now: number): string {
-  // The script is intentionally vanilla (no build step). It:
-  //   1. Wires the bar tooltip (hover on desktop, focus for keyboard)
-  //   2. Counts down to a server-supplied absolute target (cron-aligned).
-  //      User interaction does NOT reset the target; if the user is mid-
-  //      interaction when the target arrives, we defer to the *next* cron
-  //      mark. This keeps "Updated" and "Next refresh" in sync.
-  //   3. Animates the SVG ring as a countdown indicator over the most
-  //      recent 60-second window.
-  //   4. Re-formats [data-jst-*] timestamps client-side using
-  //      Intl.DateTimeFormat with the Asia/Tokyo timezone.
+function renderClientScript(): string {
+  // Pure vanilla, no build step. Wires:
+  //   1. The bar tooltip (hover + keyboard focus). Bucket-spanning windows
+  //      ≥ 1 day get a date-only label; sub-day ranges show HH:MM – HH:MM.
+  //      Healthy / no-data buckets get a clean two-liner with no CTA.
+  //   2. The cron-aligned auto-refresh timer (server-supplied target,
+  //      pause-on-interaction, ring countdown over 60s window).
+  //   3. The scale <select>: navigates to ?scale=… while preserving any
+  //      other query params.
+  //   4. Live JST timestamp formatting on [data-jst-*] attributes.
   const script = `
 (function () {
   const TZ = ${JSON.stringify(TIMEZONE)};
   const REFRESH_BUFFER_MS = ${REFRESH_BUFFER_MS};
   const RING_WINDOW_MS = 60000;
-  const RING_LEN = 94.2;       // 2 * pi * 15
-  const PAUSE_GRACE_MS = 2500; // user-interaction debounce
-  const jstDate = new Intl.DateTimeFormat('ja-JP', {
+  const RING_LEN = 94.2;
+  const PAUSE_GRACE_MS = 2500;
+  const ONE_DAY_MS = 86400000;
+  const ONE_HOUR_MS = 3600000;
+  const fmtDateTime = new Intl.DateTimeFormat('ja-JP', {
     timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
-  const jstTime = new Intl.DateTimeFormat('ja-JP', {
+  const fmtTime = new Intl.DateTimeFormat('ja-JP', {
     timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
   });
-  const jstTimeSecs = new Intl.DateTimeFormat('ja-JP', {
+  const fmtTimeSecs = new Intl.DateTimeFormat('ja-JP', {
     timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
+  const fmtShortDate = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: TZ, month: '2-digit', day: '2-digit',
+  });
+  const fmtFullDate = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+  });
   function formatDateTime(ts) {
-    const parts = jstDate.formatToParts(new Date(Number(ts)));
+    const parts = fmtDateTime.formatToParts(new Date(Number(ts)));
     const get = (t) => (parts.find((p) => p.type === t) || {}).value || '';
     return get('year') + '-' + get('month') + '-' + get('day') + ' ' +
            get('hour') + ':' + get('minute') + ':' + get('second') + ' JST';
   }
-  function formatTime(ts) {
-    return jstTime.format(new Date(Number(ts)));
+  function formatTime(ts) { return fmtTime.format(new Date(Number(ts))); }
+  function formatTimeSecs(ts) { return fmtTimeSecs.format(new Date(Number(ts))); }
+  function formatShortDate(ts) {
+    return fmtShortDate.format(new Date(Number(ts))).replace(/\\//g, '-');
   }
-  function formatTimeSecs(ts) {
-    return jstTimeSecs.format(new Date(Number(ts)));
+  function formatFullDate(ts) {
+    return fmtFullDate.format(new Date(Number(ts))).replace(/\\//g, '-');
   }
   function nextCronRefresh() {
     const now = Date.now();
@@ -546,16 +658,31 @@ function renderClientScript(now: number): string {
     partial: 'text-amber-300',
     none: 'text-slate-400',
   };
+  function formatBucketRange(fromTs, toTs) {
+    const span = toTs - fromTs;
+    if (span >= ONE_DAY_MS) {
+      // Day-scale bucket: show only the calendar date(s) it covers.
+      const start = formatFullDate(fromTs);
+      const end = formatFullDate(toTs - 1);
+      return start === end ? start : start + ' – ' + end;
+    }
+    if (span >= ONE_HOUR_MS) {
+      // Multi-hour bucket: include the date so users on a long scale can
+      // tell which day they're hovering.
+      return formatFullDate(fromTs) + ' ' + formatTime(fromTs) +
+             ' – ' + formatTime(toTs);
+    }
+    return formatTime(fromTs) + ' – ' + formatTime(toTs);
+  }
   function showTooltip(el, evt) {
     const state = el.dataset.state;
-    if (state === 'none') return;
     const fromTs = Number(el.dataset.from);
     const toTs = Number(el.dataset.to);
     const error = el.dataset.error;
     const isIncident = state === 'down' || state === 'partial';
     tipCard.innerHTML = [
       '<div class="text-slate-200 font-medium tabular-nums">' +
-        formatTime(fromTs) + ' – ' + formatTime(toTs) +
+        formatBucketRange(fromTs, toTs) +
       '</div>',
       '<div class="mt-1 ' + (STATE_COLOR[state] || '') + ' font-medium uppercase tracking-wider text-[10px]">' +
         (STATE_LABEL[state] || state) +
@@ -593,22 +720,18 @@ function renderClientScript(now: number): string {
     d.textContent = s;
     return d.innerHTML;
   }
-
   document.querySelectorAll('.bar').forEach((bar) => {
     bar.addEventListener('mouseenter', (e) => showTooltip(bar, e));
     bar.addEventListener('mousemove', positionTooltip);
     bar.addEventListener('mouseleave', hideTooltip);
-    bar.addEventListener('focus', (e) => {
+    bar.addEventListener('focus', () => {
       const r = bar.getBoundingClientRect();
       showTooltip(bar, { clientX: r.left + r.width / 2, clientY: r.top });
     });
     bar.addEventListener('blur', hideTooltip);
   });
 
-  // --- Auto-refresh aligned to the server-side cron schedule ---
-  // The server passes the next absolute reload target on the timer container
-  // (data-next-refresh). The client never resets this target on interaction —
-  // it only defers past it, so "Updated" and "Next refresh" stay in sync.
+  // --- Auto-refresh aligned to cron ---
   const refreshContainer = document.querySelector('[data-next-refresh]');
   const ring = document.getElementById('refresh-ring');
   const countdownEl = document.getElementById('refresh-countdown');
@@ -636,9 +759,6 @@ function renderClientScript(now: number): string {
         window.location.reload();
         return;
       }
-      // User is mid-interaction. Defer to the next cron mark and keep ticking;
-      // the displayed countdown jumps forward but the visible "Next refresh"
-      // time updates with it, so nothing is misleading.
       target = nextCronRefresh();
       updateNextRefreshLabel();
       return;
@@ -656,16 +776,24 @@ function renderClientScript(now: number): string {
     document.addEventListener(evt, () => { lastInteractionAt = Date.now(); }, { passive: true });
   });
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      // Discard any stale interaction marker; if the cron mark passed while
-      // hidden, the next tick will reload immediately.
-      lastInteractionAt = 0;
-    }
+    if (!document.hidden) lastInteractionAt = 0;
   });
+
+  // --- Scale selector ---
+  const scaleSelect = document.getElementById('scale-select');
+  if (scaleSelect) {
+    scaleSelect.addEventListener('change', function () {
+      const u = new URL(window.location.href);
+      u.searchParams.set('scale', this.value);
+      window.location.href = u.toString();
+    });
+  }
 
   // --- Live JST timestamp formatting ---
   document.querySelectorAll('[data-jst-datetime]').forEach((el) => {
-    el.textContent = formatDateTime(el.dataset.jstDatetime);
+    const v = el.dataset.jstDatetime;
+    if (!v || v === 'null') return;
+    el.textContent = formatDateTime(v);
   });
   document.querySelectorAll('[data-jst-time]').forEach((el) => {
     el.textContent = formatTime(el.dataset.jstTime);
@@ -673,12 +801,11 @@ function renderClientScript(now: number): string {
   document.querySelectorAll('[data-jst-time-secs]').forEach((el) => {
     el.textContent = formatTimeSecs(el.dataset.jstTimeSecs);
   });
+  document.querySelectorAll('[data-jst-shortdate]').forEach((el) => {
+    el.textContent = formatShortDate(el.dataset.jstShortdate);
+  });
 })();
 `;
-  // The `now` value is intentionally not interpolated into the script; the
-  // server-rendered timestamps inside `data-jst-*` attributes already carry
-  // the canonical times. We just expose `now` here for any future use.
-  void now;
   return `<script>${script}</script>`;
 }
 
@@ -687,8 +814,6 @@ function htmlResponse(html: string): Response {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      // Short cache so the page reflects the most recent cron tick on reload,
-      // while keeping CF edge cache benefit for bursty refresh storms.
       'Cache-Control': 'public, max-age=15',
     },
   });
@@ -742,6 +867,11 @@ export function formatJstTime(ts: number): string {
 export function formatJstTimeSecs(ts: number): string {
   const p = jstParts(ts);
   return `${p.hour}:${p.minute}:${p.second}`;
+}
+
+export function formatJstShortDate(ts: number): string {
+  const p = jstParts(ts);
+  return `${p.month}-${p.day}`;
 }
 
 function formatRelative(ms: number): string {

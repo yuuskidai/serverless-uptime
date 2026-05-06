@@ -38,7 +38,7 @@ export default {
     }
 
     if (url.pathname === '/' || url.pathname === '/status') {
-      return renderStatusPage(env);
+      return renderStatusPage(env, url);
     }
 
     if (url.pathname === '/incident') {
