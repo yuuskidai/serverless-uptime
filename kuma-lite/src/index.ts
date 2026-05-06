@@ -1,6 +1,7 @@
 import { handleApiRequest } from './api';
 import { renderIncidentPage } from './incident-page';
 import { cleanupOldChecks, runChecks } from './monitor';
+import { renderRssFeed } from './rss-feed';
 import { renderStatusPage } from './status-page';
 import { buildSlackBot } from './slack-bot';
 import type { Env } from './types';
@@ -43,6 +44,10 @@ export default {
 
     if (url.pathname === '/incident') {
       return renderIncidentPage(env, url);
+    }
+
+    if (url.pathname === '/rss.xml' || url.pathname === '/feed') {
+      return renderRssFeed(env, url);
     }
 
     return new Response('Not found', { status: 404 });

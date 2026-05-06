@@ -1,4 +1,5 @@
 import type { CheckRow, Env, Monitor, MonitorState } from './types';
+import { classify, KIND_COPY, type IncidentKind } from './kinds';
 
 const TIMEZONE = 'Asia/Tokyo';
 const MAX_ROWS = 200;
@@ -58,134 +59,6 @@ interface RenderArgs {
   from: number;
   to: number;
   failures: CheckRow[];
-}
-
-/**
- * Concrete failure categories. Headlines and details aim for the wording
- * a non-technical reader would actually use to describe what happened —
- * "サービス一時停止" rather than "判定しました". HTTP-code branches
- * (500 / 502 / 503 / 504, 401 / 403 / 404 / 429) carry meaningful
- * differences in operator response and are surfaced separately so the
- * detail page is genuinely informative.
- */
-type IncidentKind =
-  | 'http_500'
-  | 'http_502'
-  | 'http_503'
-  | 'http_504'
-  | 'http_5xx'
-  | 'http_401'
-  | 'http_403'
-  | 'http_404'
-  | 'http_429'
-  | 'http_4xx'
-  | 'http_other'
-  | 'timeout'
-  | 'dns'
-  | 'connection'
-  | 'tls'
-  | 'keyword_missing'
-  | 'unknown';
-
-interface KindCopy {
-  headline: string;
-  detail: string;
-}
-
-const KIND_COPY: Record<IncidentKind, KindCopy> = {
-  http_500: {
-    headline: 'システムエラー',
-    detail: 'サイト内部の処理でエラーが発生していました。',
-  },
-  http_502: {
-    headline: '連携先サーバーの不具合',
-    detail: '連携先サーバーから応答を受け取れない状態でした。',
-  },
-  http_503: {
-    headline: 'サービス一時停止',
-    detail: 'アクセス集中またはメンテナンスにより応答を停止していました。',
-  },
-  http_504: {
-    headline: '応答タイムアウト',
-    detail: 'サイトの応答処理が時間内に完了していませんでした。',
-  },
-  http_5xx: {
-    headline: 'サーバー側のエラー',
-    detail: 'サーバー側で問題が発生し、応答できない状態でした。',
-  },
-  http_401: {
-    headline: '認証エラー',
-    detail: 'アクセスに必要な認証が通っていない状態でした。',
-  },
-  http_403: {
-    headline: 'アクセス拒否',
-    detail: 'サーバーがアクセスを拒否していました。',
-  },
-  http_404: {
-    headline: 'ページ未発見',
-    detail: '指定のページがサーバーに存在しませんでした。',
-  },
-  http_429: {
-    headline: 'アクセス制限',
-    detail: '短時間に多数のアクセスが集中したため、一時的に制限されていました。',
-  },
-  http_4xx: {
-    headline: 'リクエストエラー',
-    detail: 'リクエスト内容に問題があり、正常に応答できませんでした。',
-  },
-  http_other: {
-    headline: '想定外の応答',
-    detail: 'サーバーから想定外の応答が返ってきていました。',
-  },
-  timeout: {
-    headline: '応答遅延',
-    detail: '応答が遅く、画面の読み込みが完了しない状態でした。',
-  },
-  dns: {
-    headline: 'ドメイン解決失敗',
-    detail: 'サイトのアドレスを特定できない状態でした。',
-  },
-  connection: {
-    headline: '接続失敗',
-    detail: 'サイトに接続できない状態でした。',
-  },
-  tls: {
-    headline: '暗号化通信失敗',
-    detail: '安全な通信を確立できない状態でした。',
-  },
-  keyword_missing: {
-    headline: 'ページ内容の異常',
-    detail: 'ページは表示されましたが、想定された内容ではありませんでした。',
-  },
-  unknown: {
-    headline: 'アクセス不可',
-    detail: 'サイトに正常にアクセスできない状態でした。',
-  },
-};
-
-function classify(error: string | null, statusCode: number | null): IncidentKind {
-  const s = (error ?? '').toLowerCase();
-  if (/timeout|timed out/.test(s)) return 'timeout';
-  if (/getaddrinfo|enotfound|dns/.test(s)) return 'dns';
-  if (/econnrefused|econnreset|ehostunreach|enetunreach|connect/.test(s)) {
-    return 'connection';
-  }
-  if (/certificate|cert_|ssl|tls|self.signed|hostname/.test(s)) return 'tls';
-  if (/keyword/.test(s)) return 'keyword_missing';
-  if (statusCode !== null) {
-    if (statusCode === 500) return 'http_500';
-    if (statusCode === 502) return 'http_502';
-    if (statusCode === 503) return 'http_503';
-    if (statusCode === 504) return 'http_504';
-    if (statusCode >= 500) return 'http_5xx';
-    if (statusCode === 401) return 'http_401';
-    if (statusCode === 403) return 'http_403';
-    if (statusCode === 404) return 'http_404';
-    if (statusCode === 429) return 'http_429';
-    if (statusCode >= 400) return 'http_4xx';
-    return 'http_other';
-  }
-  return 'unknown';
 }
 
 function dominantKind(failures: CheckRow[]): IncidentKind {
@@ -373,13 +246,15 @@ function errorBlock(message: string): string {
 }
 
 function shell(title: string, body: string): string {
+  void title;
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
-  <title>${escapeHtml(title)} · kuma-lite</title>
+  <title>status</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0f1c'/%3E%3Cpath d='M4 16 H10 L13 9 L16 23 L19 13 L22 18 H28' stroke='%2322c55e' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Noto+Sans+JP:wght@400;500;600&display=swap" rel="stylesheet">

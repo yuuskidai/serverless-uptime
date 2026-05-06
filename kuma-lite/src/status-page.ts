@@ -1,4 +1,5 @@
 import type { CheckStatus, Env, Monitor, MonitorState } from './types';
+import { classify, KIND_HEADLINE } from './kinds';
 
 const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
@@ -80,7 +81,15 @@ interface BucketView {
   state: BucketState;
   upCount: number;
   downCount: number;
-  sampleError: string | null;
+  /**
+   * Human-readable label for the dominant failure in this bucket
+   * (e.g. "システムエラー", "応答遅延"). Replaces the previous
+   * implementation that surfaced the raw error string — non-technical
+   * readers couldn't make sense of "Expected status 200, got 520:
+   * error code: 520" so we now classify the error and show the
+   * categorised wording instead.
+   */
+  sampleLabel: string | null;
 }
 
 interface MonitorView {
@@ -173,15 +182,22 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     m.set(row.bucket_idx, row);
   }
 
-  // Sample errors only fetched for short scales. For wider windows, a single
-  // sample error per bucket would conflate distinct incidents; the user can
-  // click through to /incident for the actual list.
-  const sampleErrorByKey = new Map<string, string>();
+  // Sample-error labels only fetched for short scales. For wider windows,
+  // one bucket can span hours-to-days of unrelated incidents and a single
+  // sample would mislead. Inside the supported window, we classify the
+  // most recent down check per (monitor, bucket) into a kind and store
+  // its human-readable headline ("システムエラー", "応答遅延", etc.).
+  const sampleLabelByKey = new Map<string, string>();
   if (windowMs <= SAMPLE_ERROR_MAX_SCALE_MS) {
-    type ErrRow = { monitor_id: number; error: string | null; ts: number };
+    type ErrRow = {
+      monitor_id: number;
+      error: string | null;
+      status_code: number | null;
+      ts: number;
+    };
     const errResult = await env.DB.prepare(
-      `SELECT monitor_id, error, ts FROM checks
-        WHERE ts >= ? AND status = 'down' AND error IS NOT NULL
+      `SELECT monitor_id, error, status_code, ts FROM checks
+        WHERE ts >= ? AND status = 'down'
               AND monitor_id IN (${placeholders})
         ORDER BY ts DESC
         LIMIT 5000`,
@@ -193,9 +209,9 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       if (idx < 0 || idx >= bucketCount) continue;
       const key = `${row.monitor_id}:${idx}`;
       // First seen is most recent because we sorted DESC by ts.
-      if (!sampleErrorByKey.has(key) && row.error) {
-        sampleErrorByKey.set(key, row.error);
-      }
+      if (sampleLabelByKey.has(key)) continue;
+      const kind = classify(row.error, row.status_code);
+      sampleLabelByKey.set(key, KIND_HEADLINE[kind]);
     }
   }
 
@@ -206,7 +222,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     const buckets = buildBuckets(
       monitor.id,
       monitorBuckets,
-      sampleErrorByKey,
+      sampleLabelByKey,
       sinceWindow,
       bucketMs,
       bucketCount,
@@ -254,7 +270,7 @@ function deriveEffState(currentStatus: CheckStatus, buckets: BucketView[]): Effe
 function buildBuckets(
   monitorId: number,
   rows: Map<number, { ups: number; downs: number; total: number }>,
-  sampleErrors: Map<string, string>,
+  sampleLabels: Map<string, string>,
   sinceWindow: number,
   bucketMs: number,
   bucketCount: number,
@@ -277,7 +293,7 @@ function buildBuckets(
       state,
       upCount: row?.ups ?? 0,
       downCount: row?.downs ?? 0,
-      sampleError: sampleErrors.get(`${monitorId}:${i}`) ?? null,
+      sampleLabel: sampleLabels.get(`${monitorId}:${i}`) ?? null,
     });
   }
   return out;
@@ -308,6 +324,7 @@ function computeOverall(views: MonitorView[]): OverallStatus {
 }
 
 function renderShell(title: string, body: string, now: number, scale: Scale): string {
+  void title;
   void now;
   return `<!DOCTYPE html>
 <html lang="ja">
@@ -315,7 +332,9 @@ function renderShell(title: string, body: string, now: number, scale: Scale): st
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
-  <title>${escapeHtml(title)} · kuma-lite</title>
+  <title>status</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0f1c'/%3E%3Cpath d='M4 16 H10 L13 9 L16 23 L19 13 L22 18 H28' stroke='%2322c55e' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="alternate" type="application/rss+xml" title="kuma-lite ステータスフィード" href="/rss.xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -590,13 +609,13 @@ function renderCard(view: MonitorView, scale: Scale): string {
       const role = isClickable
         ? ' role="button" tabindex="0"'
         : ' aria-hidden="true"';
-      const sampleError = b.sampleError
-        ? ` data-error="${escapeAttr(truncate(b.sampleError, 200))}"`
+      const sampleAttr = b.sampleLabel
+        ? ` data-label="${escapeAttr(b.sampleLabel)}"`
         : '';
       const cls = `bar bar-${b.state}${isClickable ? ' is-clickable' : ''}`;
       return `<${tag}${href} class="${cls}"${role}
         data-from="${b.fromMs}" data-to="${b.toMs}"
-        data-state="${b.state}"${sampleError}></${tag}>`;
+        data-state="${b.state}"${sampleAttr}></${tag}>`;
     })
     .join('');
 
@@ -746,7 +765,7 @@ function renderClientScript(): string {
     const state = el.dataset.state;
     const fromTs = Number(el.dataset.from);
     const toTs = Number(el.dataset.to);
-    const error = el.dataset.error;
+    const label = el.dataset.label; // pre-classified human-readable headline
     const isIncident = state === 'down' || state === 'partial';
     tipCard.innerHTML = [
       '<div class="text-slate-200 font-medium tabular-nums">' +
@@ -755,8 +774,8 @@ function renderClientScript(): string {
       '<div class="mt-1 ' + (STATE_COLOR[state] || '') + ' font-medium uppercase tracking-wider text-[10px]">' +
         (STATE_LABEL[state] || state) +
       '</div>',
-      isIncident && error
-        ? '<div class="mt-2 pt-2 border-t border-slate-700/60 text-slate-300 font-mono text-[11px] break-all">' + escapeText(error) + '</div>'
+      isIncident && label
+        ? '<div class="mt-2 pt-2 border-t border-slate-700/60 text-slate-200">原因: ' + escapeText(label) + '</div>'
         : '',
       isIncident
         ? '<div class="mt-2 text-[10px] text-slate-500">クリックして詳細を確認</div>'
@@ -899,9 +918,6 @@ function escapeAttr(s: string): string {
   return escapeHtml(s);
 }
 
-function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max)}…` : s;
-}
 
 function jstParts(ts: number): Record<Intl.DateTimeFormatPartTypes, string> {
   const fmt = new Intl.DateTimeFormat('ja-JP', {
