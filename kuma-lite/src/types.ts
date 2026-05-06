@@ -46,6 +46,8 @@ export interface MonitorState {
   consecutive_failures: number;
   last_notified_at: number | null;
   down_since: number | null;
+  /** Slack message ts of the open DOWN alert; null when monitor is up. */
+  slack_alert_ts: string | null;
 }
 
 export interface CheckResult {

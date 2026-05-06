@@ -72,22 +72,66 @@ async function renderStatusSummary(env: Env): Promise<string> {
     return 'No monitors are configured.';
   }
 
-  const downCount = monitors.filter((m) => m.current_status === 'down').length;
+  // DOWN first (longest-down at top so the most concerning shows highest),
+  // then UP grouped at the bottom and sorted by name for stable reading.
+  const down = monitors
+    .filter((m) => m.current_status === 'down')
+    .sort((a, b) => (a.down_since ?? 0) - (b.down_since ?? 0));
+  const up = monitors
+    .filter((m) => m.current_status !== 'down')
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const total = monitors.length;
   const header =
-    downCount === 0
-      ? `:large_green_circle: All ${monitors.length} monitor${monitors.length === 1 ? '' : 's'} up.`
-      : `:red_circle: ${downCount} of ${monitors.length} monitor${monitors.length === 1 ? '' : 's'} down.`;
+    down.length === 0
+      ? `:large_green_circle:  *All ${total} monitor${total === 1 ? '' : 's'} are operational.*`
+      : `:red_circle:  *${down.length} of ${total} monitor${total === 1 ? '' : 's'} ${down.length === 1 ? 'is' : 'are'} DOWN.*`;
 
-  const lines = monitors.map((m) => {
-    const icon = m.current_status === 'down' ? ':red_circle:' : ':large_green_circle:';
-    const downFor =
-      m.current_status === 'down' && m.down_since
-        ? ` (down for ${formatDuration(Date.now() - m.down_since)})`
-        : '';
-    return `${icon}  *${m.name}* — ${m.url}${downFor}`;
-  });
+  const sections: string[] = [header, ''];
 
-  return [header, '', ...lines].join('\n');
+  if (down.length > 0) {
+    sections.push(`*━━━━━ DOWN  (${down.length}) ━━━━━*`);
+    for (const m of down) {
+      const downFor = m.down_since
+        ? formatDuration(Date.now() - m.down_since)
+        : '—';
+      sections.push(
+        `:red_circle:  *${escapeMrkdwn(m.name)}*`,
+        `>  <${m.url}|${escapeMrkdwn(displayUrl(m.url))}>`,
+        `>  Down for *${downFor}*`,
+        '',
+      );
+    }
+  }
+
+  if (up.length > 0) {
+    sections.push(`*━━━━━ UP  (${up.length}) ━━━━━*`);
+    for (const m of up) {
+      sections.push(
+        `:large_green_circle:  *${escapeMrkdwn(m.name)}*  —  <${m.url}|${escapeMrkdwn(displayUrl(m.url))}>`,
+      );
+    }
+    sections.push('');
+  }
+
+  sections.push(`_as of ${new Date().toISOString()}_`);
+  return sections.join('\n');
+}
+
+function displayUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.host + (u.pathname === '/' ? '' : u.pathname);
+  } catch {
+    return url;
+  }
+}
+
+function escapeMrkdwn(s: string): string {
+  // Slack mrkdwn-safe: only `<`, `>`, `&` need escaping; bold/italic delimiters
+  // (`*`, `_`) are intentionally not escaped because monitor names with those
+  // chars are vanishingly rare and escaping them produces uglier output.
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function formatDuration(ms: number): string {

@@ -376,6 +376,11 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       // message replies in-thread, while sending without thread_ts would post
       // a new top-level message.
       thread_ts: threadTs || undefined,
+      // Bots posting alerts/status almost never want Slack to expand link
+      // previews — they crowd the channel with unrelated thumbnails. Default
+      // off; future config can re-enable per-message if needed.
+      unfurl_links: false,
+      unfurl_media: false,
     };
     if (blocks) args.blocks = blocks;
     const result = await this.client.postMessage(args);
@@ -402,7 +407,12 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       ? channelId.slice('slack:'.length)
       : channelId;
     const { text, blocks } = postableToText(message);
-    const args: Parameters<SlackClient['postMessage']>[0] = { channel, text };
+    const args: Parameters<SlackClient['postMessage']>[0] = {
+      channel,
+      text,
+      unfurl_links: false,
+      unfurl_media: false,
+    };
     if (blocks) args.blocks = blocks;
     const result = await this.client.postMessage(args);
     return {

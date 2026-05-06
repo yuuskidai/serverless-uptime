@@ -34,5 +34,9 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   consecutive_failures INTEGER DEFAULT 0,
   last_notified_at INTEGER,
   down_since INTEGER,
+  -- Slack message timestamp (chat.postMessage `ts`) for the open DOWN
+  -- alert. Used to thread the recovery message and to add a checkmark
+  -- reaction when the monitor recovers. Cleared on recovery.
+  slack_alert_ts TEXT,
   FOREIGN KEY (monitor_id) REFERENCES monitors(id)
 );

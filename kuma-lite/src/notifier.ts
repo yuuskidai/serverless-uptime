@@ -2,25 +2,43 @@ import type { Env, Monitor } from './types';
 import { encodeSlackThreadId } from './chat-adapters/slack';
 import { buildSlackBot } from './slack-bot';
 
-export async function notifyDown(env: Env, monitor: Monitor, error: string): Promise<void> {
-  await Promise.allSettled([
+export interface NotifyDownResult {
+  /**
+   * Slack message ts of the posted DOWN alert when the Slack post
+   * succeeded; null otherwise (Slack disabled, channel missing, post
+   * failed). Persisted as `monitor_state.slack_alert_ts` so the matching
+   * recovery can be threaded under it.
+   */
+  slackAlertTs: string | null;
+}
+
+export async function notifyDown(
+  env: Env,
+  monitor: Monitor,
+  error: string,
+): Promise<NotifyDownResult> {
+  const [, slackResult] = await Promise.allSettled([
     sendDiscordDown(env, monitor, error),
     sendSlackDown(env, monitor, error),
   ]);
+  const slackAlertTs =
+    slackResult.status === 'fulfilled' ? slackResult.value : null;
+  return { slackAlertTs };
 }
 
 export async function notifyUp(
   env: Env,
   monitor: Monitor,
   downDurationMs: number,
+  slackAlertTs: string | null,
 ): Promise<void> {
   await Promise.allSettled([
     sendDiscordUp(env, monitor, downDurationMs),
-    sendSlackUp(env, monitor, downDurationMs),
+    sendSlackUp(env, monitor, downDurationMs, slackAlertTs),
   ]);
 }
 
-// ── Discord (unchanged behavior) ────────────────────────────────────────
+// ── Discord (unchanged) ─────────────────────────────────────────────────
 
 async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
@@ -68,34 +86,73 @@ async function postWebhook(url: string, payload: unknown): Promise<void> {
 
 // ── Slack via chat-sdk ──────────────────────────────────────────────────
 
-async function sendSlackDown(env: Env, monitor: Monitor, error: string): Promise<void> {
-  await postToSlackChannel(
-    env,
-    `:red_circle: *DOWN:* ${monitor.name}\n${monitor.url}\n>${truncate(error, 800)}`,
-  );
+/**
+ * Post the top-level DOWN alert and return its ts. The recovery message
+ * later threads under this ts and adds a checkmark reaction to it.
+ */
+async function sendSlackDown(
+  env: Env,
+  monitor: Monitor,
+  error: string,
+): Promise<string | null> {
+  const bot = buildSlackBot(env);
+  if (!bot?.defaultChannelId) return null;
+
+  const text = [
+    `:red_circle:  *DOWN:* ${monitor.name}`,
+    `<${monitor.url}|${monitor.url}>`,
+    '',
+    `>  *Error:* \`${truncate(error, 500)}\``,
+    `>  _at ${new Date().toISOString()}_`,
+  ].join('\n');
+
+  const threadId = encodeSlackThreadId({ channel: bot.defaultChannelId, threadTs: '' });
+  const result = await bot.slack.postMessage(threadId, text);
+  return result.id || null;
 }
 
+/**
+ * Post the recovery message. When `slackAlertTs` is provided, the message
+ * is threaded under the open DOWN alert and a `:white_check_mark:` reaction
+ * is added to that DOWN message so the channel timeline shows resolved
+ * incidents at a glance.
+ */
 async function sendSlackUp(
   env: Env,
   monitor: Monitor,
   downDurationMs: number,
+  slackAlertTs: string | null,
 ): Promise<void> {
-  await postToSlackChannel(
-    env,
-    `:large_green_circle: *UP:* ${monitor.name}\n${monitor.url}\nRecovered after ${formatDuration(downDurationMs)}.`,
-  );
-}
-
-async function postToSlackChannel(env: Env, text: string): Promise<void> {
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return;
 
-  // Initialize is normally invoked by chat.webhooks.slack(...). For outbound
-  // posting we go directly to the adapter and skip the inbound dispatch path.
-  // postMessage just needs a channel-encoded thread id; threadTs left empty
-  // posts at the channel top level.
-  const threadId = encodeSlackThreadId({ channel: bot.defaultChannelId, threadTs: '' });
-  await bot.slack.postMessage(threadId, text);
+  const channel = bot.defaultChannelId;
+  const text = [
+    `:large_green_circle:  *RECOVERED:* ${monitor.name}`,
+    `<${monitor.url}|${monitor.url}>`,
+    '',
+    `>  *Down for:* ${formatDuration(downDurationMs)}`,
+    `>  _at ${new Date().toISOString()}_`,
+  ].join('\n');
+
+  // Reply in the same thread as the DOWN alert when we have its ts; fall
+  // back to a top-level post when the ts is missing (e.g., the DOWN was
+  // posted before slack_alert_ts was tracked).
+  const threadId = encodeSlackThreadId({
+    channel,
+    threadTs: slackAlertTs ?? '',
+  });
+
+  await Promise.allSettled([
+    bot.slack.postMessage(threadId, text),
+    slackAlertTs
+      ? bot.slack.addReaction(
+          encodeSlackThreadId({ channel, threadTs: '' }),
+          slackAlertTs,
+          'white_check_mark',
+        )
+      : Promise.resolve(),
+  ]);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
