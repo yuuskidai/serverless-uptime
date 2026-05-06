@@ -24,3 +24,8 @@ extra/exe-builder/obj
 
 .vs
 .vscode
+
+# Claude Code agent local state (lock files, transcripts, etc.).
+# Tracked rules for AI-assisted development live in .claude/CLAUDE.md only.
+.claude/*
+!.claude/CLAUDE.md
