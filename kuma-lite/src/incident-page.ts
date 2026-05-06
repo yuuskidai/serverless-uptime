@@ -1,4 +1,4 @@
-import type { CheckRow, Env, Monitor, MonitorState } from './types';
+import type { CheckRow, ComponentHealth, Env, Monitor, MonitorState } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
 
 const TIMEZONE = 'Asia/Tokyo';
@@ -44,7 +44,10 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     .bind(monitorId, from, to, MAX_ROWS)
     .all<CheckRow>();
   const checks = checksResult.results ?? [];
-  const failures = checks.filter((c) => c.status === 'down');
+  // Maintenance checks aren't incidents — visitors arriving via a bar
+  // click should still see the window context, but the failure list and
+  // headline drive off real failures only.
+  const failures = checks.filter((c) => c.status === 'down' && !c.in_maintenance);
 
   const html = shell(
     `${monitor.name} の状況詳細`,
@@ -87,6 +90,14 @@ function renderBody(args: RenderArgs): string {
   const firstFailureTs = failures[0]?.ts ?? null;
   const lastFailureTs = failures[failures.length - 1]?.ts ?? null;
   const isOngoing = state?.current_status === 'down';
+  // Pull the most recent structured reason from the failure window so
+  // the headline can be replaced with the site's own business-language
+  // explanation when present (e.g. "決済 (Stripe) で応答遅延が発生").
+  const latestStructured = pickLatestStructured(failures);
+  const headline = latestStructured?.reason ?? copy.headline;
+  const detail = latestStructured?.reason ? null : copy.detail;
+  const components = latestStructured?.components ?? [];
+  const version = latestStructured?.version ?? null;
 
   const verdict = isOngoing
     ? { tone: 'red' as const, label: '継続中' }
@@ -122,11 +133,9 @@ function renderBody(args: RenderArgs): string {
           ${escapeHtml(verdict.label)}
         </span>
         <h2 class="mt-4 text-lg sm:text-xl font-semibold text-slate-100 leading-snug">
-          ${escapeHtml(copy.headline)}
+          ${escapeHtml(headline)}
         </h2>
-        <p class="mt-2 text-sm text-slate-300">
-          ${escapeHtml(copy.detail)}
-        </p>
+        ${detail ? `<p class="mt-2 text-sm text-slate-300">${escapeHtml(detail)}</p>` : ''}
 
         <dl class="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
           <div>
@@ -142,8 +151,93 @@ function renderBody(args: RenderArgs): string {
             <dd class="mt-1 text-slate-100">${escapeHtml(durationCell)}</dd>
           </div>
         </dl>
+
+        ${renderComponentsBlock(components)}
+        ${version ? `<p class="mt-4 text-[11px] text-slate-500 font-mono">ビルド識別子: ${escapeHtml(version)}</p>` : ''}
       </section>
     </main>
+  `;
+}
+
+/**
+ * Walk the failure list newest-first looking for a row that captured
+ * structured /healthz output (a non-null healthz_components or
+ * healthz_reason). The most recent structured snapshot is the most
+ * useful for the visitor — it reflects what the site is currently
+ * reporting, not a stale earlier hypothesis.
+ */
+function pickLatestStructured(failures: CheckRow[]): {
+  reason: string | null;
+  components: ComponentHealth[];
+  version: string | null;
+} | null {
+  for (let i = failures.length - 1; i >= 0; i--) {
+    const f = failures[i];
+    if (!f) continue;
+    const hasReason = !!f.healthz_reason;
+    const components = parseComponents(f.healthz_components);
+    if (hasReason || components.length > 0 || f.healthz_version) {
+      return {
+        reason: f.healthz_reason,
+        components,
+        version: f.healthz_version,
+      };
+    }
+  }
+  return null;
+}
+
+function parseComponents(json: string | null): ComponentHealth[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((c) => c && typeof c === 'object' && typeof c.name === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function renderComponentsBlock(components: ComponentHealth[]): string {
+  if (components.length === 0) return '';
+  // Show *all* components (not just unhealthy) on the incident page — a
+  // visitor coming in from a red bar wants to see the full breakdown so
+  // they can tell which dependency is the problem and which are fine.
+  const rows = components
+    .map((c) => {
+      const dotColor =
+        c.status === 'down'
+          ? 'bg-red-400'
+          : c.status === 'degraded'
+          ? 'bg-amber-400'
+          : 'bg-green-400';
+      const statusLabel =
+        c.status === 'down' ? '停止' : c.status === 'degraded' ? '不調' : '正常';
+      const reason = c.reason ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(c.reason)}</div>` : '';
+      const latency =
+        typeof c.latency_ms === 'number'
+          ? `<span class="text-[11px] font-mono text-slate-500 ml-2 tabular-nums">${c.latency_ms} ms</span>`
+          : '';
+      return `<li class="flex items-start gap-2 py-2 border-t border-slate-700/50 first:border-t-0">
+        <span class="w-1.5 h-1.5 rounded-full ${dotColor} mt-2 shrink-0"></span>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline gap-2">
+            <span class="text-sm font-medium text-slate-100">${escapeHtml(c.name)}</span>
+            <span class="text-[10px] uppercase tracking-wider text-slate-400">${escapeHtml(statusLabel)}</span>
+            ${latency}
+          </div>
+          ${reason}
+        </div>
+      </li>`;
+    })
+    .join('\n');
+  return `
+    <div class="mt-6">
+      <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1">構成要素ごとの状態</div>
+      <ul class="rounded-lg bg-slate-950/40 px-3 border border-slate-700/40">
+        ${rows}
+      </ul>
+    </div>
   `;
 }
 

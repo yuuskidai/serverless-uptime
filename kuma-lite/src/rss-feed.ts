@@ -13,6 +13,13 @@ interface Incident {
   /** null when the incident is still ongoing. */
   endedAt: number | null;
   kind: IncidentKind;
+  /**
+   * Most recent business-language `reason` reported by the site's
+   * /healthz JSON during this incident. Replaces the kind headline in
+   * the RSS title when present so subscribers see the same wording as
+   * the status page.
+   */
+  reason: string | null;
 }
 
 /**
@@ -81,13 +88,32 @@ function deriveIncidents(monitor: Monitor, checks: CheckRow[]): Incident[] {
   // Track failure counts per kind within the current incident so we can
   // surface the dominant cause.
   let kindCounts: Map<IncidentKind, number> | null = null;
+  // Most recent structured reason captured during the current incident.
+  let latestReason: string | null = null;
 
   for (const c of checks) {
+    // Maintenance windows aren't incidents and shouldn't fire RSS items
+    // (per spec §2 — "DOWN 通知抑止" extends to the public feed).
+    if (c.in_maintenance) {
+      consecFails = 0;
+      if (inIncident && openIncident && kindCounts) {
+        openIncident.endedAt = c.ts;
+        openIncident.kind = pickDominant(kindCounts);
+        openIncident.reason = latestReason;
+        out.push(openIncident);
+        inIncident = false;
+        openIncident = null;
+        kindCounts = null;
+        latestReason = null;
+      }
+      continue;
+    }
     if (c.status === 'down') {
       consecFails += 1;
       if (!inIncident && consecFails >= threshold) {
         inIncident = true;
         kindCounts = new Map();
+        latestReason = null;
         openIncident = {
           monitor,
           // Mark the incident's start at the first of the consecutive
@@ -95,27 +121,34 @@ function deriveIncidents(monitor: Monitor, checks: CheckRow[]): Incident[] {
           startedAt: c.ts - (threshold - 1) * 60_000,
           endedAt: null,
           kind: 'unknown',
+          reason: null,
         };
       }
       if (inIncident && kindCounts) {
         const k = classify(c.error, c.status_code);
         kindCounts.set(k, (kindCounts.get(k) ?? 0) + 1);
+        if (c.healthz_reason && c.healthz_reason.trim()) {
+          latestReason = c.healthz_reason.trim();
+        }
       }
     } else {
       consecFails = 0;
       if (inIncident && openIncident && kindCounts) {
         openIncident.endedAt = c.ts;
         openIncident.kind = pickDominant(kindCounts);
+        openIncident.reason = latestReason;
         out.push(openIncident);
         inIncident = false;
         openIncident = null;
         kindCounts = null;
+        latestReason = null;
       }
     }
   }
   // Incident still open at end-of-window.
   if (inIncident && openIncident && kindCounts) {
     openIncident.kind = pickDominant(kindCounts);
+    openIncident.reason = latestReason;
     out.push(openIncident);
   }
   return out;
@@ -165,14 +198,18 @@ ${itemsXml}
 }
 
 function renderItem(inc: Incident, baseUrl: URL): string {
-  const { monitor, startedAt, endedAt, kind } = inc;
+  const { monitor, startedAt, endedAt, kind, reason } = inc;
   const copy = KIND_COPY[kind];
   const isOngoing = endedAt === null;
   const statusPrefix = isOngoing ? '[障害発生]' : '[復旧済]';
   const monitorLabel = monitor.description
     ? `${monitor.name} (${monitor.description})`
     : monitor.name;
-  const title = `${statusPrefix} ${monitorLabel} — ${copy.headline}`;
+  // Title prefers the site's own business-language reason when it sent
+  // one through /healthz; otherwise falls back to the kind-headline so
+  // pre-/healthz monitors still produce readable items.
+  const titleCause = reason ?? copy.headline;
+  const title = `${statusPrefix} ${monitorLabel} — ${titleCause}`;
 
   const linkFromMs = startedAt;
   const linkToMs = endedAt ?? Date.now();
@@ -185,7 +222,9 @@ function renderItem(inc: Incident, baseUrl: URL): string {
   const pubDateMs = endedAt ?? startedAt;
   const guid = `kuma-lite:incident:${monitor.id}:${startedAt}${endedAt ? `:${endedAt}` : ':ongoing'}`;
 
-  const descriptionLines = [copy.detail];
+  const descriptionLines: string[] = [];
+  if (reason) descriptionLines.push(reason);
+  descriptionLines.push(copy.detail);
   descriptionLines.push(`発生: ${formatJstFriendly(startedAt)}`);
   if (endedAt !== null) {
     descriptionLines.push(`復旧: ${formatJstFriendly(endedAt)}`);

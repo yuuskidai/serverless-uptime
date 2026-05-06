@@ -1,4 +1,10 @@
-import type { CheckStatus, Env, Monitor, MonitorState } from './types';
+import type {
+  CheckStatus,
+  ComponentHealth,
+  Env,
+  Monitor,
+  MonitorState,
+} from './types';
 import { classify, KIND_HEADLINE } from './kinds';
 
 const TIMEZONE = 'Asia/Tokyo';
@@ -55,24 +61,23 @@ function computeNextRefreshMs(now: number): number {
   return target;
 }
 
-type BucketState = 'up' | 'down' | 'partial' | 'none';
+/**
+ * Bucket-level visual state. Adds 'maintenance' (blue) which takes
+ * precedence over up/down for buckets that fell entirely inside a
+ * declared maintenance window, so calendar bars communicate "expected
+ * downtime" instead of "incident".
+ */
+type BucketState = 'up' | 'down' | 'partial' | 'maintenance' | 'none';
+
 /**
  * Effective state shown on the per-monitor badge and the global header.
- * Derived to match what the visitor sees on the *latest* bar of the
- * timeline:
- *   - `monitor_state.current_status === 'down'` → `down` (system has
- *     formally tripped past the retry threshold).
- *   - Latest non-empty bucket has any failure → `degraded` (amber bar
- *     just appeared).
- *   - Latest non-empty bucket is fully up → `up`.
- *
- * A previous version used a fixed 15-minute look-back, which kept the
- * badge amber for 15 minutes after a flap even when the latest bucket
- * was fully green — that drifted from the rightmost bar and confused
- * readers. The current rule keeps the badge in lock-step with the
- * latest bar.
+ * Tracks the structured /healthz status now that it lands on the
+ * monitor — 'degraded' fires when the latest healthz reports degraded
+ * (or when the fallback URL responded but the primary /healthz did
+ * not). 'maintenance' overrides everything when the monitor is inside
+ * a declared window.
  */
-type EffectiveState = 'up' | 'degraded' | 'down';
+type EffectiveState = 'up' | 'degraded' | 'down' | 'maintenance';
 
 interface BucketView {
   index: number;
@@ -92,6 +97,14 @@ interface BucketView {
   sampleLabel: string | null;
 }
 
+interface MaintenanceView {
+  fromMs: number;
+  toMs: number;
+  reason: string;
+  /** True when the current time is inside [fromMs, toMs). */
+  active: boolean;
+}
+
 interface MonitorView {
   monitor: Monitor;
   state: CheckStatus;
@@ -100,6 +113,12 @@ interface MonitorView {
   latestLatency: number | null;
   latestTs: number | null;
   buckets: BucketView[];
+  /** Latest healthz_reason captured from the most recent check. */
+  latestReason: string | null;
+  /** Latest healthz components (already parsed). */
+  latestComponents: ComponentHealth[];
+  latestVersion: string | null;
+  maintenance: MaintenanceView | null;
 }
 
 export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
@@ -134,7 +153,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
 
   const latestResult = await env.DB.prepare(
-    `SELECT c.monitor_id, c.latency_ms, c.ts
+    `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components, c.healthz_version
        FROM checks c
        JOIN (
          SELECT monitor_id, MAX(ts) AS max_ts
@@ -144,28 +163,53 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
        ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
   )
     .bind(...ids)
-    .all<{ monitor_id: number; latency_ms: number | null; ts: number }>();
-  const latestById = new Map<number, { latency_ms: number | null; ts: number }>();
+    .all<{
+      monitor_id: number;
+      latency_ms: number | null;
+      ts: number;
+      healthz_reason: string | null;
+      healthz_components: string | null;
+      healthz_version: string | null;
+    }>();
+  const latestById = new Map<
+    number,
+    {
+      latency_ms: number | null;
+      ts: number;
+      healthz_reason: string | null;
+      healthz_components: string | null;
+      healthz_version: string | null;
+    }
+  >();
   for (const row of latestResult.results ?? []) {
-    latestById.set(row.monitor_id, { latency_ms: row.latency_ms, ts: row.ts });
+    latestById.set(row.monitor_id, {
+      latency_ms: row.latency_ms,
+      ts: row.ts,
+      healthz_reason: row.healthz_reason,
+      healthz_components: row.healthz_components,
+      healthz_version: row.healthz_version,
+    });
   }
 
   // Aggregate per-bucket counts on the database side. Without this, a 30-day
   // window with one-minute checks would pull tens of thousands of rows back
-  // into the Worker just to bucket them in JS.
+  // into the Worker just to bucket them in JS. Maintenance checks are
+  // separated so the bar can be coloured blue and excluded from uptime %.
   type BucketRow = {
     monitor_id: number;
     bucket_idx: number;
     total: number;
     ups: number;
     downs: number;
+    maints: number;
   };
   const aggregateResult = await env.DB.prepare(
     `SELECT monitor_id,
             CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
             COUNT(*) AS total,
-            SUM(CASE WHEN status = 'up' THEN 1 ELSE 0 END) AS ups,
-            SUM(CASE WHEN status = 'down' THEN 1 ELSE 0 END) AS downs
+            SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
+            SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
+            SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
        FROM checks
       WHERE ts >= ? AND monitor_id IN (${placeholders})
       GROUP BY monitor_id, bucket_idx`,
@@ -186,18 +230,21 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   // one bucket can span hours-to-days of unrelated incidents and a single
   // sample would mislead. Inside the supported window, we classify the
   // most recent down check per (monitor, bucket) into a kind and store
-  // its human-readable headline ("システムエラー", "応答遅延", etc.).
+  // its human-readable headline ("システムエラー", "応答遅延", etc.). The
+  // healthz_reason takes precedence when present so the tooltip uses
+  // the business-language reason from the monitored site verbatim.
   const sampleLabelByKey = new Map<string, string>();
   if (windowMs <= SAMPLE_ERROR_MAX_SCALE_MS) {
     type ErrRow = {
       monitor_id: number;
       error: string | null;
       status_code: number | null;
+      healthz_reason: string | null;
       ts: number;
     };
     const errResult = await env.DB.prepare(
-      `SELECT monitor_id, error, status_code, ts FROM checks
-        WHERE ts >= ? AND status = 'down'
+      `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
+        WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
               AND monitor_id IN (${placeholders})
         ORDER BY ts DESC
         LIMIT 5000`,
@@ -210,8 +257,11 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       const key = `${row.monitor_id}:${idx}`;
       // First seen is most recent because we sorted DESC by ts.
       if (sampleLabelByKey.has(key)) continue;
-      const kind = classify(row.error, row.status_code);
-      sampleLabelByKey.set(key, KIND_HEADLINE[kind]);
+      const label =
+        row.healthz_reason && row.healthz_reason.trim()
+          ? row.healthz_reason.trim()
+          : KIND_HEADLINE[classify(row.error, row.status_code)];
+      sampleLabelByKey.set(key, label);
     }
   }
 
@@ -233,8 +283,9 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       totalChecks += b.upCount + b.downCount;
       totalUps += b.upCount;
     }
-    const state = stateRow?.current_status ?? 'up';
-    const effState = deriveEffState(state, buckets);
+    const state = (stateRow?.current_status ?? 'up') as CheckStatus;
+    const maintenance = parseMaintenance(stateRow, now);
+    const effState = deriveEffState(state, buckets, maintenance);
     return {
       monitor,
       state,
@@ -243,6 +294,10 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       latestLatency: latest?.latency_ms ?? null,
       latestTs: latest?.ts ?? null,
       buckets,
+      latestReason: latest?.healthz_reason ?? null,
+      latestComponents: parseComponents(latest?.healthz_components ?? null),
+      latestVersion: latest?.healthz_version ?? null,
+      maintenance,
     };
   });
 
@@ -251,13 +306,42 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   return htmlResponse(html);
 }
 
+function parseMaintenance(state: MonitorState | undefined, now: number): MaintenanceView | null {
+  if (!state) return null;
+  const from = state.maintenance_from;
+  const to = state.maintenance_to;
+  const reason = state.maintenance_reason;
+  if (!from || !to || !reason) return null;
+  // Auto-expire windows whose `to` is in the past, even if the cron
+  // hasn't yet refreshed the row.
+  if (to <= now) return null;
+  return { fromMs: from, toMs: to, reason, active: now >= from && now < to };
+}
+
+function parseComponents(json: string | null): ComponentHealth[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter((c) => c && typeof c === 'object' && typeof c.name === 'string');
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Pick the badge state from the latest non-empty bucket. Empty trailing
  * buckets (the very current minute that hasn't been written to yet) are
  * skipped so the badge doesn't go neutral mid-cron-cycle.
  */
-function deriveEffState(currentStatus: CheckStatus, buckets: BucketView[]): EffectiveState {
+function deriveEffState(
+  currentStatus: CheckStatus,
+  buckets: BucketView[],
+  maintenance: MaintenanceView | null,
+): EffectiveState {
+  if (maintenance?.active) return 'maintenance';
   if (currentStatus === 'down') return 'down';
+  if (currentStatus === 'degraded') return 'degraded';
   for (let i = buckets.length - 1; i >= 0; i--) {
     const b = buckets[i];
     if (!b || b.state === 'none') continue;
@@ -269,7 +353,7 @@ function deriveEffState(currentStatus: CheckStatus, buckets: BucketView[]): Effe
 
 function buildBuckets(
   monitorId: number,
-  rows: Map<number, { ups: number; downs: number; total: number }>,
+  rows: Map<number, { ups: number; downs: number; total: number; maints: number }>,
   sampleLabels: Map<string, string>,
   sinceWindow: number,
   bucketMs: number,
@@ -282,9 +366,18 @@ function buildBuckets(
     const row = rows.get(i);
     let state: BucketState = 'none';
     if (row && row.total > 0) {
-      if (row.downs === 0) state = 'up';
-      else if (row.ups === 0) state = 'down';
-      else state = 'partial';
+      const observed = row.ups + row.downs;
+      if (observed === 0 && row.maints > 0) {
+        state = 'maintenance';
+      } else if (observed === 0) {
+        state = 'none';
+      } else if (row.downs === 0) {
+        state = 'up';
+      } else if (row.ups === 0) {
+        state = 'down';
+      } else {
+        state = 'partial';
+      }
     }
     out.push({
       index: i,
@@ -310,17 +403,21 @@ function parseHidden(input: string | undefined): Set<number> {
 }
 
 interface OverallStatus {
-  status: 'ok' | 'degraded' | 'down';
+  status: 'ok' | 'degraded' | 'down' | 'maintenance';
   downCount: number;
   degradedCount: number;
+  maintenanceCount: number;
 }
 
 function computeOverall(views: MonitorView[]): OverallStatus {
   const downCount = views.filter((v) => v.effState === 'down').length;
   const degradedCount = views.filter((v) => v.effState === 'degraded').length;
-  const status: OverallStatus['status'] =
-    downCount > 0 ? 'down' : degradedCount > 0 ? 'degraded' : 'ok';
-  return { status, downCount, degradedCount };
+  const maintenanceCount = views.filter((v) => v.effState === 'maintenance').length;
+  let status: OverallStatus['status'] = 'ok';
+  if (downCount > 0) status = 'down';
+  else if (degradedCount > 0) status = 'degraded';
+  else if (maintenanceCount > 0) status = 'maintenance';
+  return { status, downCount, degradedCount, maintenanceCount };
 }
 
 function renderShell(title: string, body: string, now: number, scale: Scale): string {
@@ -405,10 +502,11 @@ function renderShell(title: string, body: string, now: number, scale: Scale): st
       outline: 2px solid rgba(148, 163, 184, 0.6);
       outline-offset: 2px;
     }
-    .bar-up      { background: linear-gradient(180deg, #34d399 0%, #16a34a 100%); }
-    .bar-down    { background: linear-gradient(180deg, #f87171 0%, #dc2626 100%); }
-    .bar-partial { background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%); }
-    .bar-none    { background: rgba(100, 116, 139, 0.18); }
+    .bar-up          { background: linear-gradient(180deg, #34d399 0%, #16a34a 100%); }
+    .bar-down        { background: linear-gradient(180deg, #f87171 0%, #dc2626 100%); }
+    .bar-partial     { background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%); }
+    .bar-maintenance { background: linear-gradient(180deg, #60a5fa 0%, #2563eb 100%); }
+    .bar-none        { background: rgba(100, 116, 139, 0.18); }
     select.scale-select {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid rgba(148, 163, 184, 0.18);
@@ -500,7 +598,8 @@ function renderBody(
 ): string {
   const headerStatus = renderHeaderStatus(overall);
 
-  const cards = views.map((v) => renderCard(v, scale)).join('\n');
+  const banner = renderMaintenanceBanner(views, now);
+  const cards = views.map((v) => renderCard(v, scale, now)).join('\n');
   const nextRefreshMs = computeNextRefreshMs(now);
   const scaleOptions = SCALE_ORDER.map(
     (key) =>
@@ -537,12 +636,54 @@ function renderBody(
         </div>
       </div>
     </header>
+    ${banner}
     <main class="space-y-4">
       ${cards}
     </main>
   `;
   // Footer intentionally omitted: the service name appears on each card
   // and the time range is already shown in the <select>.
+}
+
+/**
+ * Top-level banner shown when one or more monitors have an active or
+ * upcoming maintenance window. Lists each (monitor, reason, window)
+ * with a JST timestamp pair so visitors see exactly what's planned and
+ * when. Active windows render in saturated blue; upcoming ones use a
+ * lighter outline so they read as "heads-up, not happening yet."
+ */
+function renderMaintenanceBanner(views: MonitorView[], now: number): string {
+  const announcements = views
+    .filter((v) => v.maintenance !== null)
+    .map((v) => ({ view: v, m: v.maintenance! }));
+  if (announcements.length === 0) return '';
+  const items = announcements
+    .map(({ view, m }) => {
+      const when = `${formatJstDateTime(m.fromMs)} 〜 ${formatJstDateTime(m.toMs)}`;
+      const phase = m.active
+        ? `<span class="text-blue-200 font-medium">実施中</span>`
+        : `<span class="text-blue-300/80 font-medium">予定</span>（開始まで ${formatRelativeFuture(m.fromMs - now)}）`;
+      return `<li class="flex flex-col gap-0.5">
+        <div class="flex flex-wrap items-baseline gap-2">
+          <span class="text-blue-100 font-medium">${escapeHtml(view.monitor.name)}</span>
+          ${phase}
+        </div>
+        <div class="text-blue-200/90 text-xs">${escapeHtml(m.reason)}</div>
+        <div class="text-blue-200/60 text-[11px] tabular-nums" data-jst-range-from="${m.fromMs}" data-jst-range-to="${m.toMs}">${escapeHtml(when)}</div>
+      </li>`;
+    })
+    .join('\n');
+  return `
+    <section class="mb-6 rounded-2xl border border-blue-400/30 bg-blue-500/10 px-5 py-4 text-sm text-blue-50">
+      <div class="flex items-center gap-2 text-xs uppercase tracking-wider text-blue-200/80 mb-2">
+        <svg class="w-4 h-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M10 2a8 8 0 100 16 8 8 0 000-16zm.75 4a.75.75 0 00-1.5 0v4.5c0 .2.08.39.22.53l3 3a.75.75 0 101.06-1.06l-2.78-2.78V6z"/></svg>
+        計画メンテナンス
+      </div>
+      <ul class="space-y-3">
+        ${items}
+      </ul>
+    </section>
+  `;
 }
 
 function renderHeaderStatus(overall: OverallStatus): string {
@@ -561,7 +702,16 @@ function renderHeaderStatus(overall: OverallStatus): string {
          <span class="relative inline-flex">
            <span class="pulse-dot w-2.5 h-2.5 rounded-full text-amber-400 bg-amber-400"></span>
          </span>
-         <span class="text-amber-300 font-medium">${n}件 — 直近に一時的な不調がありました</span>
+         <span class="text-amber-300 font-medium">${n}件 — 一部機能が不調</span>
+       </div>`;
+  }
+  if (overall.status === 'maintenance') {
+    const n = overall.maintenanceCount;
+    return `<div class="flex items-center gap-2.5">
+         <span class="relative inline-flex">
+           <span class="pulse-dot w-2.5 h-2.5 rounded-full text-blue-400 bg-blue-400"></span>
+         </span>
+         <span class="text-blue-300 font-medium">${n}件 — メンテナンス中</span>
        </div>`;
   }
   return `<div class="flex items-center gap-2.5">
@@ -580,7 +730,12 @@ function renderBadge(effState: EffectiveState): string {
   }
   if (effState === 'degraded') {
     return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30">
-         <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> 直近に不調あり
+         <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> 一部不調
+       </span>`;
+  }
+  if (effState === 'maintenance') {
+    return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-300 border border-blue-500/30">
+         <span class="w-1.5 h-1.5 rounded-full bg-blue-400"></span> メンテ中
        </span>`;
   }
   return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
@@ -588,7 +743,7 @@ function renderBadge(effState: EffectiveState): string {
      </span>`;
 }
 
-function renderCard(view: MonitorView, scale: Scale): string {
+function renderCard(view: MonitorView, scale: Scale, now: number): string {
   const config = SCALES[scale];
   const badge = renderBadge(view.effState);
 
@@ -596,7 +751,7 @@ function renderCard(view: MonitorView, scale: Scale): string {
   const latencyText =
     view.latestLatency === null ? '—' : `${view.latestLatency} ミリ秒`;
   const lastCheck =
-    view.latestTs === null ? 'データなし' : formatRelative(Date.now() - view.latestTs);
+    view.latestTs === null ? 'データなし' : formatRelative(now - view.latestTs);
 
   const monitorId = view.monitor.id;
   const bars = view.buckets
@@ -619,8 +774,8 @@ function renderCard(view: MonitorView, scale: Scale): string {
     })
     .join('');
 
-  const windowStart = view.buckets[0]?.fromMs ?? Date.now() - config.ms;
-  const windowEnd = view.buckets[view.buckets.length - 1]?.toMs ?? Date.now();
+  const windowStart = view.buckets[0]?.fromMs ?? now - config.ms;
+  const windowEnd = view.buckets[view.buckets.length - 1]?.toMs ?? now;
   const useDateLabels = config.ms > 24 * 3_600_000;
   const startLabel = useDateLabels ? formatJstShortDate(windowStart) : formatJstTime(windowStart);
   const endLabel = useDateLabels ? formatJstShortDate(windowEnd) : formatJstTime(windowEnd);
@@ -629,11 +784,21 @@ function renderCard(view: MonitorView, scale: Scale): string {
     ? `<p class="mt-0.5 text-xs text-slate-300 leading-snug">${escapeHtml(view.monitor.description)}</p>`
     : '';
 
+  const reasonLine = renderLatestReason(view);
+  const componentsBlock = renderComponents(view.latestComponents);
+  const versionPill = view.latestVersion
+    ? `<span class="ml-2 inline-flex items-center gap-1 text-[10px] font-mono text-slate-500" title="ビルド識別子">
+         <span class="w-1 h-1 rounded-full bg-slate-600"></span>${escapeHtml(view.latestVersion)}
+       </span>`
+    : '';
+
   return `
     <article class="glass rounded-2xl p-5">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0 flex-1">
-          <h2 class="font-semibold text-slate-100 truncate">${escapeHtml(view.monitor.name)}</h2>
+          <h2 class="font-semibold text-slate-100 truncate inline-flex items-baseline">
+            ${escapeHtml(view.monitor.name)}${versionPill}
+          </h2>
           ${descriptionLine}
           <a href="${escapeAttr(view.monitor.url)}" target="_blank" rel="noopener noreferrer"
              class="mt-0.5 text-xs text-slate-500 hover:text-slate-300 truncate block transition-colors font-mono">
@@ -642,6 +807,8 @@ function renderCard(view: MonitorView, scale: Scale): string {
         </div>
         ${badge}
       </div>
+
+      ${reasonLine}
 
       <div class="mt-5">
         <div class="bar-row" role="img"
@@ -654,6 +821,8 @@ function renderCard(view: MonitorView, scale: Scale): string {
           <span data-jst-${useDateLabels ? 'shortdate' : 'time'}="${windowEnd}">${endLabel}</span>
         </div>
       </div>
+
+      ${componentsBlock}
 
       <div class="mt-4 grid grid-cols-3 gap-3 text-xs">
         <div>
@@ -670,6 +839,61 @@ function renderCard(view: MonitorView, scale: Scale): string {
         </div>
       </div>
     </article>
+  `;
+}
+
+/**
+ * Per-card "current reason" line. Only rendered when the monitored site
+ * has reported something non-trivial — `ok` checks suppress the line
+ * entirely so green cards stay clean. Maintenance windows take precedence
+ * with their declared reason so visitors don't double-count "down" with
+ * "planned maintenance".
+ */
+function renderLatestReason(view: MonitorView): string {
+  if (view.maintenance?.active) {
+    return `<p class="mt-2 text-xs text-blue-300/90 leading-snug">
+      <span class="font-medium">メンテナンス中:</span> ${escapeHtml(view.maintenance.reason)}
+    </p>`;
+  }
+  if (view.effState === 'up') return '';
+  if (!view.latestReason) return '';
+  const tone =
+    view.effState === 'down'
+      ? 'text-red-300'
+      : view.effState === 'degraded'
+      ? 'text-amber-300'
+      : 'text-slate-300';
+  return `<p class="mt-2 text-xs ${tone} leading-snug">${escapeHtml(view.latestReason)}</p>`;
+}
+
+/**
+ * Component breakdown only shown when at least one component is
+ * non-OK — listing five healthy components on a green card is just
+ * noise. Each row uses a small dot in the component status colour.
+ */
+function renderComponents(components: ComponentHealth[]): string {
+  if (components.length === 0) return '';
+  const unhealthy = components.filter((c) => c.status !== 'ok');
+  if (unhealthy.length === 0) return '';
+  const rows = unhealthy
+    .map((c) => {
+      const dotColor =
+        c.status === 'down'
+          ? 'bg-red-400'
+          : c.status === 'degraded'
+          ? 'bg-amber-400'
+          : 'bg-green-400';
+      const reason = c.reason ? ` — ${escapeHtml(c.reason)}` : '';
+      return `<li class="flex items-baseline gap-2 text-xs text-slate-300">
+        <span class="w-1.5 h-1.5 rounded-full ${dotColor} mt-1 shrink-0"></span>
+        <span><span class="font-medium text-slate-200">${escapeHtml(c.name)}</span>${reason}</span>
+      </li>`;
+    })
+    .join('\n');
+  return `
+    <ul class="mt-3 space-y-1 border-l-2 border-slate-700/60 pl-3">
+      ${rows}
+    </ul>
   `;
 }
 
@@ -737,12 +961,14 @@ function renderClientScript(): string {
     up: '正常',
     down: '停止',
     partial: '一部停止',
+    maintenance: 'メンテナンス',
     none: 'データなし',
   };
   const STATE_COLOR = {
     up: 'text-green-300',
     down: 'text-red-300',
     partial: 'text-amber-300',
+    maintenance: 'text-blue-300',
     none: 'text-slate-400',
   };
   function formatBucketRange(fromTs, toTs) {
@@ -890,6 +1116,12 @@ function renderClientScript(): string {
   document.querySelectorAll('[data-jst-shortdate]').forEach((el) => {
     el.textContent = formatShortDate(el.dataset.jstShortdate);
   });
+  document.querySelectorAll('[data-jst-range-from]').forEach((el) => {
+    const fromTs = el.dataset.jstRangeFrom;
+    const toTs = el.dataset.jstRangeTo;
+    if (!fromTs || !toTs) return;
+    el.textContent = formatDateTime(fromTs) + ' 〜 ' + formatDateTime(toTs);
+  });
 })();
 `;
   return `<script>${script}</script>`;
@@ -962,4 +1194,12 @@ function formatRelative(ms: number): string {
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}分前`;
   if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}時間前`;
   return `${Math.floor(ms / 86_400_000)}日前`;
+}
+
+function formatRelativeFuture(ms: number): string {
+  if (ms <= 0) return 'まもなく';
+  if (ms < 60_000) return `${Math.max(1, Math.floor(ms / 1000))}秒`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}分`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}時間`;
+  return `${Math.floor(ms / 86_400_000)}日`;
 }
