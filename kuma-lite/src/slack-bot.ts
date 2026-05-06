@@ -35,7 +35,7 @@ export function buildSlackBot(env: Env): SlackBot | null {
     logger: 'warn',
   });
 
-  chat.onSlashCommand('/status', async (event) => {
+  chat.onSlashCommand(['/kuma', '/kuma-status'], async (event) => {
     if (event.adapter.name !== 'slack') return;
     const summary = await renderStatusSummary(env);
     await event.channel.post(summary);
