@@ -18,6 +18,7 @@
     "wrangler": "^4.88.0"
   },
   "dependencies": {
+    "@chat-adapter/state-memory": "^4.27.0",
     "chat": "^4.27.0"
   }
 }

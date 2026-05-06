@@ -1,6 +1,28 @@
 import type { Env, Monitor } from './types';
+import { encodeSlackThreadId } from './chat-adapters/slack';
+import { buildSlackBot } from './slack-bot';
 
 export async function notifyDown(env: Env, monitor: Monitor, error: string): Promise<void> {
+  await Promise.allSettled([
+    sendDiscordDown(env, monitor, error),
+    sendSlackDown(env, monitor, error),
+  ]);
+}
+
+export async function notifyUp(
+  env: Env,
+  monitor: Monitor,
+  downDurationMs: number,
+): Promise<void> {
+  await Promise.allSettled([
+    sendDiscordUp(env, monitor, downDurationMs),
+    sendSlackUp(env, monitor, downDurationMs),
+  ]);
+}
+
+// ── Discord (unchanged behavior) ────────────────────────────────────────
+
+async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
   await postWebhook(env.DISCORD_WEBHOOK_URL, {
     embeds: [
@@ -14,7 +36,7 @@ export async function notifyDown(env: Env, monitor: Monitor, error: string): Pro
   });
 }
 
-export async function notifyUp(
+async function sendDiscordUp(
   env: Env,
   monitor: Monitor,
   downDurationMs: number,
@@ -43,6 +65,40 @@ async function postWebhook(url: string, payload: unknown): Promise<void> {
     throw new Error(`Discord webhook failed: ${response.status} ${body.slice(0, 200)}`);
   }
 }
+
+// ── Slack via chat-sdk ──────────────────────────────────────────────────
+
+async function sendSlackDown(env: Env, monitor: Monitor, error: string): Promise<void> {
+  await postToSlackChannel(
+    env,
+    `:red_circle: *DOWN:* ${monitor.name}\n${monitor.url}\n>${truncate(error, 800)}`,
+  );
+}
+
+async function sendSlackUp(
+  env: Env,
+  monitor: Monitor,
+  downDurationMs: number,
+): Promise<void> {
+  await postToSlackChannel(
+    env,
+    `:large_green_circle: *UP:* ${monitor.name}\n${monitor.url}\nRecovered after ${formatDuration(downDurationMs)}.`,
+  );
+}
+
+async function postToSlackChannel(env: Env, text: string): Promise<void> {
+  const bot = buildSlackBot(env);
+  if (!bot?.defaultChannelId) return;
+
+  // Initialize is normally invoked by chat.webhooks.slack(...). For outbound
+  // posting we go directly to the adapter and skip the inbound dispatch path.
+  // postMessage just needs a channel-encoded thread id; threadTs left empty
+  // posts at the channel top level.
+  const threadId = encodeSlackThreadId({ channel: bot.defaultChannelId, threadTs: '' });
+  await bot.slack.postMessage(threadId, text);
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
