@@ -3,8 +3,29 @@ import type { CheckRow, CheckStatus, Env, Monitor, MonitorState } from './types'
 const WINDOW_MS = 90 * 60 * 1000; // 90 minutes
 const BUCKET_MS = 3 * 60 * 1000; // 3 minutes
 const BUCKET_COUNT = WINDOW_MS / BUCKET_MS; // 30
-const REFRESH_MS = 60 * 1000;
+// Buffer between the cron tick (every minute at :00) and our reload, so the
+// new check has time to fetch + write into D1 before we pull fresh data.
+const REFRESH_BUFFER_MS = 5 * 1000;
 const TIMEZONE = 'Asia/Tokyo';
+
+/**
+ * Compute the next reload target aligned to the cron schedule, not to the
+ * client's page-load instant. The minute-aligned target shared by server
+ * and client guarantees that:
+ *   1. The countdown tracks real cron freshness, not a per-client phase.
+ *   2. The "Updated" timestamp on the next render is roughly 60s after
+ *      this one (the cron interval), so the two no longer drift.
+ *   3. Mouse activity defers the reload past the missed boundary instead
+ *      of resetting the timer relative to the user.
+ */
+function computeNextRefreshMs(now: number): number {
+  const nextMinute = Math.ceil(now / 60_000) * 60_000;
+  let target = nextMinute + REFRESH_BUFFER_MS;
+  // If the buffer window is closing in less than 3s, the freshly-baked
+  // cron data may still be in flight — push to the following minute.
+  if (target - now < 3_000) target += 60_000;
+  return target;
+}
 
 interface MonitorView {
   monitor: Monitor;
@@ -332,6 +353,7 @@ function renderBody(
        </div>`;
 
   const cards = views.map((v) => renderCard(v, now)).join('\n');
+  const nextRefreshMs = computeNextRefreshMs(now);
 
   return `
     <header class="mb-10">
@@ -341,18 +363,22 @@ function renderBody(
           <h1 class="text-3xl sm:text-4xl font-semibold tracking-tight">kuma-lite</h1>
           <div class="mt-3 text-sm">${headerStatus}</div>
         </div>
-        <div class="flex items-center gap-3 text-xs text-slate-400">
+        <div class="flex items-center gap-3 text-xs text-slate-400" data-next-refresh="${nextRefreshMs}">
           <svg class="w-10 h-10" viewBox="0 0 36 36" aria-hidden="true">
             <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(148,163,184,0.18)" stroke-width="2"/>
             <circle id="refresh-ring" class="refresh-ring" cx="18" cy="18" r="15" fill="none"
                     stroke="rgba(34,197,94,0.85)" stroke-width="2"
-                    stroke-linecap="round" stroke-dasharray="94.2" stroke-dashoffset="0"
+                    stroke-linecap="round" stroke-dasharray="94.2" stroke-dashoffset="94.2"
                     transform="rotate(-90 18 18)"/>
           </svg>
           <div class="flex flex-col leading-tight">
             <span class="text-slate-300">Updated</span>
             <span class="text-slate-200 tabular-nums" data-jst-datetime="${now}">${formatJstDateTime(now)}</span>
-            <span class="mt-1 text-[11px] text-slate-500">Auto-refresh: <span id="refresh-countdown">60</span>s</span>
+            <span class="mt-1 text-[11px] text-slate-500">
+              Next refresh
+              <span class="text-slate-400 tabular-nums" data-jst-time-secs="${nextRefreshMs}">${formatJstTimeSecs(nextRefreshMs)}</span>
+              · <span id="refresh-countdown" class="tabular-nums">—</span>s
+            </span>
           </div>
         </div>
       </div>
@@ -448,21 +474,30 @@ function renderCard(view: MonitorView, now: number): string {
 function renderClientScript(now: number): string {
   // The script is intentionally vanilla (no build step). It:
   //   1. Wires the bar tooltip (hover on desktop, focus for keyboard)
-  //   2. Pauses the auto-refresh while the user interacts (mouseover/focus)
-  //   3. Animates the SVG ring as a countdown indicator
-  //   4. Re-formats any [data-jst-*] timestamps client-side so the displayed
-  //      times match the user's perception (server already renders JST,
-  //      this re-render keeps a continuously-updating "Updated" stamp accurate).
+  //   2. Counts down to a server-supplied absolute target (cron-aligned).
+  //      User interaction does NOT reset the target; if the user is mid-
+  //      interaction when the target arrives, we defer to the *next* cron
+  //      mark. This keeps "Updated" and "Next refresh" in sync.
+  //   3. Animates the SVG ring as a countdown indicator over the most
+  //      recent 60-second window.
+  //   4. Re-formats [data-jst-*] timestamps client-side using
+  //      Intl.DateTimeFormat with the Asia/Tokyo timezone.
   const script = `
 (function () {
-  const REFRESH_MS = ${REFRESH_MS};
   const TZ = ${JSON.stringify(TIMEZONE)};
+  const REFRESH_BUFFER_MS = ${REFRESH_BUFFER_MS};
+  const RING_WINDOW_MS = 60000;
+  const RING_LEN = 94.2;       // 2 * pi * 15
+  const PAUSE_GRACE_MS = 2500; // user-interaction debounce
   const jstDate = new Intl.DateTimeFormat('ja-JP', {
     timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
   const jstTime = new Intl.DateTimeFormat('ja-JP', {
     timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const jstTimeSecs = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   });
   function formatDateTime(ts) {
     const parts = jstDate.formatToParts(new Date(Number(ts)));
@@ -472,6 +507,16 @@ function renderClientScript(now: number): string {
   }
   function formatTime(ts) {
     return jstTime.format(new Date(Number(ts)));
+  }
+  function formatTimeSecs(ts) {
+    return jstTimeSecs.format(new Date(Number(ts)));
+  }
+  function nextCronRefresh() {
+    const now = Date.now();
+    const nextMinute = Math.ceil(now / 60000) * 60000;
+    let target = nextMinute + REFRESH_BUFFER_MS;
+    if (target - now < 3000) target += 60000;
+    return target;
   }
 
   // --- Tooltip ---
@@ -552,51 +597,73 @@ function renderClientScript(now: number): string {
     bar.addEventListener('blur', hideTooltip);
   });
 
-  // --- Auto-refresh with pause-on-hover and ring countdown ---
+  // --- Auto-refresh aligned to the server-side cron schedule ---
+  // The server passes the next absolute reload target on the timer container
+  // (data-next-refresh). The client never resets this target on interaction —
+  // it only defers past it, so "Updated" and "Next refresh" stay in sync.
+  const refreshContainer = document.querySelector('[data-next-refresh]');
   const ring = document.getElementById('refresh-ring');
   const countdownEl = document.getElementById('refresh-countdown');
-  const RING_LEN = 94.2; // 2 * pi * 15
-  let startedAt = Date.now();
-  let paused = false;
-  let resumeTimer = null;
+  let target = refreshContainer ? Number(refreshContainer.dataset.nextRefresh) : NaN;
+  if (!Number.isFinite(target) || target <= Date.now()) {
+    target = nextCronRefresh();
+    if (refreshContainer) refreshContainer.dataset.nextRefresh = String(target);
+  }
+  let lastInteractionAt = 0;
+  function isInteracting() {
+    return Date.now() - lastInteractionAt < PAUSE_GRACE_MS;
+  }
+  function updateNextRefreshLabel() {
+    const el = document.querySelector('[data-jst-time-secs]');
+    if (el) {
+      el.dataset.jstTimeSecs = String(target);
+      el.textContent = formatTimeSecs(target);
+    }
+  }
   function tick() {
-    if (paused) return;
-    const elapsed = Date.now() - startedAt;
-    const remaining = Math.max(0, REFRESH_MS - elapsed);
-    if (countdownEl) countdownEl.textContent = String(Math.ceil(remaining / 1000));
-    if (ring) ring.setAttribute('stroke-dashoffset', String((elapsed / REFRESH_MS) * RING_LEN));
-    if (remaining <= 0) {
-      window.location.reload();
+    const now = Date.now();
+    const remainingMs = target - now;
+    if (remainingMs <= 0) {
+      if (!isInteracting()) {
+        window.location.reload();
+        return;
+      }
+      // User is mid-interaction. Defer to the next cron mark and keep ticking;
+      // the displayed countdown jumps forward but the visible "Next refresh"
+      // time updates with it, so nothing is misleading.
+      target = nextCronRefresh();
+      updateNextRefreshLabel();
+      return;
+    }
+    if (countdownEl) countdownEl.textContent = String(Math.ceil(remainingMs / 1000));
+    if (ring) {
+      const elapsed = Math.max(0, RING_WINDOW_MS - remainingMs);
+      const progress = Math.min(1, elapsed / RING_WINDOW_MS);
+      ring.setAttribute('stroke-dashoffset', String((1 - progress) * RING_LEN));
     }
   }
   setInterval(tick, 250);
-  function pauseRefresh() {
-    paused = true;
-    if (resumeTimer) clearTimeout(resumeTimer);
-    resumeTimer = setTimeout(() => {
-      // Reset the timer when interaction ends so a hovered card doesn't
-      // immediately reload the moment the cursor leaves.
-      startedAt = Date.now();
-      paused = false;
-    }, 2500);
-  }
+  tick();
   ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach((evt) => {
-    document.addEventListener(evt, pauseRefresh, { passive: true });
+    document.addEventListener(evt, () => { lastInteractionAt = Date.now(); }, { passive: true });
   });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
-      startedAt = Date.now();
-      paused = false;
+      // Discard any stale interaction marker; if the cron mark passed while
+      // hidden, the next tick will reload immediately.
+      lastInteractionAt = 0;
     }
   });
 
-  // --- Live JST timestamp formatting (so the "Updated" line matches user TZ
-  //     even if the user's clock differs slightly from the server's). ---
+  // --- Live JST timestamp formatting ---
   document.querySelectorAll('[data-jst-datetime]').forEach((el) => {
     el.textContent = formatDateTime(el.dataset.jstDatetime);
   });
   document.querySelectorAll('[data-jst-time]').forEach((el) => {
     el.textContent = formatTime(el.dataset.jstTime);
+  });
+  document.querySelectorAll('[data-jst-time-secs]').forEach((el) => {
+    el.textContent = formatTimeSecs(el.dataset.jstTimeSecs);
   });
 })();
 `;
@@ -662,6 +729,11 @@ export function formatJstDateTime(ts: number): string {
 export function formatJstTime(ts: number): string {
   const p = jstParts(ts);
   return `${p.hour}:${p.minute}`;
+}
+
+export function formatJstTimeSecs(ts: number): string {
+  const p = jstParts(ts);
+  return `${p.hour}:${p.minute}:${p.second}`;
 }
 
 function formatRelative(ms: number): string {
