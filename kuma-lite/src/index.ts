@@ -1,6 +1,7 @@
 import { handleApiRequest } from './api';
 import { cleanupOldChecks, runChecks } from './monitor';
 import { renderStatusPage } from './status-page';
+import { buildSlackBot } from './slack-bot';
 import type { Env } from './types';
 
 export type { Env };
@@ -14,7 +15,7 @@ export default {
     }
   },
 
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (url.pathname === '/healthz') {
@@ -23,6 +24,16 @@ export default {
 
     if (url.pathname.startsWith('/api/')) {
       return handleApiRequest(req, env);
+    }
+
+    if (url.pathname === '/slack/events') {
+      const bot = buildSlackBot(env);
+      if (!bot) {
+        return new Response('slack_not_configured', { status: 503 });
+      }
+      return bot.chat.webhooks.slack(req, {
+        waitUntil: (task) => ctx.waitUntil(task),
+      });
     }
 
     if (url.pathname === '/' || url.pathname === '/status') {
