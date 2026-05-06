@@ -3,6 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# Workers Logs (Observability). Captures console logs and runtime metadata
+# for every invocation, viewable in the Cloudflare dashboard under
+# Workers & Pages → kuma-lite → Logs. Free plan retains 3 days of logs;
+# paid plans retain 7 days. head_sampling_rate = 1 keeps 100% of requests.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # D1 database binding. Run `wrangler d1 create kuma-lite-db` and paste the
 # returned database_id below before deploying.
 [[d1_databases]]
