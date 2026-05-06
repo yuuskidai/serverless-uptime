@@ -1,8 +1,7 @@
-import type { CheckRow, CheckStatus, Env, Monitor, MonitorState } from './types';
+import type { CheckRow, Env, Monitor, MonitorState } from './types';
 import { formatJstDateTime, formatJstTime } from './status-page';
 
 const TIMEZONE = 'Asia/Tokyo';
-const CONTEXT_MS = 5 * 60 * 1000;
 const MAX_ROWS = 200;
 
 export async function renderIncidentPage(env: Env, url: URL): Promise<Response> {
@@ -36,23 +35,23 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     .bind(monitorId)
     .first<MonitorState>();
 
-  // Fetch the bucket itself plus a small leading/trailing context window so
-  // the surrounding behaviour (a recovery, a cascade) is visible.
-  const contextFrom = from - CONTEXT_MS;
-  const contextTo = to + CONTEXT_MS;
+  // Only fetch checks inside the selected window. Up/healthy buckets shouldn't
+  // reach this page (the status page only links to failure buckets), but if a
+  // user crafts a URL by hand we still answer cleanly.
   const checksResult = await env.DB.prepare(
     `SELECT * FROM checks
        WHERE monitor_id = ? AND ts >= ? AND ts < ?
        ORDER BY ts ASC
        LIMIT ?`,
   )
-    .bind(monitorId, contextFrom, contextTo, MAX_ROWS)
+    .bind(monitorId, from, to, MAX_ROWS)
     .all<CheckRow>();
   const checks = checksResult.results ?? [];
+  const failures = checks.filter((c) => c.status === 'down');
 
   const html = shell(
-    `Checks · ${monitor.name}`,
-    renderBody({ monitor, state, from, to, contextFrom, contextTo, checks }),
+    `Incident · ${monitor.name}`,
+    renderBody({ monitor, state, from, to, checks, failures }),
   );
   return htmlResponse(html, 200);
 }
@@ -62,31 +61,39 @@ interface RenderArgs {
   state: MonitorState | null;
   from: number;
   to: number;
-  contextFrom: number;
-  contextTo: number;
   checks: CheckRow[];
+  failures: CheckRow[];
 }
 
 function renderBody(args: RenderArgs): string {
-  const { monitor, state, from, to, contextFrom, contextTo, checks } = args;
-  const inBucket = checks.filter((c) => c.ts >= from && c.ts < to);
-  const ups = inBucket.filter((c) => c.status === 'up').length;
-  const downs = inBucket.length - ups;
+  const { monitor, state, from, to, checks, failures } = args;
 
-  const summary = renderSummary({
-    monitor,
-    state: state?.current_status ?? 'up',
-    ups,
-    downs,
-    from,
-    to,
-  });
+  const totalChecks = checks.length;
+  const failureCount = failures.length;
+  const verdict =
+    failureCount === 0
+      ? { tone: 'green' as const, label: 'No incident in this window' }
+      : failureCount === totalChecks
+      ? { tone: 'red' as const, label: 'Outage' }
+      : { tone: 'amber' as const, label: 'Partial outage' };
 
-  const table = checks.length
-    ? renderTable(checks, from, to)
-    : `<div class="glass rounded-2xl p-6 text-center text-slate-400 text-sm">
-         No checks recorded in this window.
-       </div>`;
+  const firstFailureTs = failures[0]?.ts ?? null;
+  const lastFailureTs = failures[failures.length - 1]?.ts ?? null;
+  const durationMs =
+    firstFailureTs !== null && lastFailureTs !== null
+      ? Math.max(0, lastFailureTs - firstFailureTs)
+      : 0;
+
+  const primaryError = mostFrequentError(failures);
+
+  const currentBadge =
+    state?.current_status === 'down'
+      ? `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
+           <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Currently down
+         </span>`
+      : `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
+           <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> Currently operational
+         </span>`;
 
   return `
     <header class="mb-8">
@@ -103,125 +110,90 @@ function renderBody(args: RenderArgs): string {
         ${escapeHtml(monitor.url)}
       </a>
     </header>
+
     <main class="space-y-6">
-      ${summary}
-      <section>
-        <h2 class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-3">
-          Checks · including ±5 min context
-        </h2>
-        ${table}
-        <p class="mt-2 text-[11px] text-slate-500">
-          Range:
-          <span class="tabular-nums" data-jst-datetime="${contextFrom}">${formatJstDateTime(contextFrom)}</span>
-          →
-          <span class="tabular-nums" data-jst-datetime="${contextTo}">${formatJstDateTime(contextTo)}</span>
-        </p>
+      <section class="glass rounded-2xl p-5 sm:p-6">
+        <div class="flex flex-wrap items-start justify-between gap-4">
+          <div class="min-w-0">
+            <span class="inline-flex items-center text-[11px] font-medium px-2.5 py-1 rounded-full border ${toneClass(verdict.tone)}">
+              ${escapeHtml(verdict.label)}
+            </span>
+            <p class="mt-3 text-sm text-slate-300">
+              <span class="text-slate-100 font-medium tabular-nums" data-jst-time="${from}">${formatJstTime(from)}</span>
+              <span class="text-slate-500 mx-1.5">–</span>
+              <span class="text-slate-100 font-medium tabular-nums" data-jst-time="${to}">${formatJstTime(to)}</span>
+              <span class="text-slate-500 ml-2 text-xs">JST</span>
+            </p>
+            <p class="mt-1 text-xs text-slate-400 tabular-nums" data-jst-datetime="${from}">
+              ${formatJstDateTime(from)}
+            </p>
+          </div>
+          <div class="text-right">
+            <p class="text-[10px] uppercase tracking-wider text-slate-500">Now</p>
+            <div class="mt-1">${currentBadge}</div>
+          </div>
+        </div>
+
+        ${
+          failureCount === 0
+            ? `<p class="mt-5 text-sm text-slate-400">
+                 No failures recorded in this window. Use the back link to return to the status page.
+               </p>`
+            : `
+        <div class="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">First failure</div>
+            <div class="mt-1 text-slate-100 font-medium tabular-nums" data-jst-datetime="${firstFailureTs}">
+              ${firstFailureTs !== null ? formatJstDateTime(firstFailureTs) : '—'}
+            </div>
+          </div>
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Last failure</div>
+            <div class="mt-1 text-slate-100 font-medium tabular-nums" data-jst-datetime="${lastFailureTs}">
+              ${lastFailureTs !== null ? formatJstDateTime(lastFailureTs) : '—'}
+            </div>
+          </div>
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">Duration</div>
+            <div class="mt-1 text-slate-100 font-medium tabular-nums">
+              ${durationMs > 0 ? formatDuration(durationMs) : 'instantaneous'}
+            </div>
+          </div>
+        </div>
+
+        ${
+          primaryError
+            ? `<div class="mt-5">
+                 <div class="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Most frequent error</div>
+                 <div class="bg-slate-950/60 border border-slate-800 rounded-lg px-3 py-2.5 text-xs font-mono text-slate-200 break-all">
+                   ${escapeHtml(primaryError)}
+                 </div>
+               </div>`
+            : ''
+        }
+        `
+        }
       </section>
+
+      ${failureCount > 0 ? renderFailureTimeline(failures) : ''}
     </main>
+
     <footer class="mt-12 pt-6 border-t border-slate-800/50 text-xs text-slate-500 text-center">
       Powered by kuma-lite on Cloudflare Workers
     </footer>
   `;
 }
 
-function renderSummary(args: {
-  monitor: Monitor;
-  state: CheckStatus;
-  ups: number;
-  downs: number;
-  from: number;
-  to: number;
-}): string {
-  const { state, ups, downs, from, to } = args;
-  const total = ups + downs;
-  const verdict = total === 0
-    ? { tone: 'slate', label: 'No data' }
-    : downs === 0
-    ? { tone: 'green', label: 'All up' }
-    : ups === 0
-    ? { tone: 'red', label: 'Outage' }
-    : { tone: 'amber', label: 'Partial outage' };
-
-  const toneRing = {
-    green: 'bg-green-500/10 text-green-300 border-green-500/30',
-    amber: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
-    red: 'bg-red-500/10 text-red-300 border-red-500/30',
-    slate: 'bg-slate-500/10 text-slate-300 border-slate-500/30',
-  }[verdict.tone];
-
-  const currentBadge = state === 'up'
-    ? `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-green-500/10 text-green-300 border border-green-500/30">
-         <span class="w-1.5 h-1.5 rounded-full bg-green-400"></span> Operational
-       </span>`
-    : `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
-         <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> Down
-       </span>`;
-
-  return `
-    <section class="glass rounded-2xl p-5 sm:p-6">
-      <div class="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
-            <span class="inline-flex items-center text-[11px] font-medium px-2.5 py-1 rounded-full border ${toneRing}">
-              ${escapeHtml(verdict.label)}
-            </span>
-            <span class="text-xs text-slate-500">in selected bucket</span>
-          </div>
-          <p class="mt-3 text-sm text-slate-300">
-            <span class="text-slate-100 font-medium tabular-nums" data-jst-time="${from}">${formatJstTime(from)}</span>
-            <span class="text-slate-500 mx-1.5">–</span>
-            <span class="text-slate-100 font-medium tabular-nums" data-jst-time="${to}">${formatJstTime(to)}</span>
-            <span class="text-slate-500 ml-2 text-xs">JST</span>
-          </p>
-          <p class="mt-1 text-xs text-slate-400 tabular-nums" data-jst-datetime="${from}">
-            ${formatJstDateTime(from)}
-          </p>
-        </div>
-        <div class="flex items-center gap-3">
-          <div class="text-right">
-            <p class="text-[10px] uppercase tracking-wider text-slate-500">Current</p>
-            <div class="mt-1">${currentBadge}</div>
-          </div>
-        </div>
-      </div>
-      <div class="mt-5 grid grid-cols-3 gap-4 text-sm">
-        <div>
-          <div class="text-[10px] uppercase tracking-wider text-slate-500">Total checks</div>
-          <div class="mt-1 text-slate-100 font-semibold tabular-nums">${total}</div>
-        </div>
-        <div>
-          <div class="text-[10px] uppercase tracking-wider text-slate-500">Up</div>
-          <div class="mt-1 text-green-300 font-semibold tabular-nums">${ups}</div>
-        </div>
-        <div>
-          <div class="text-[10px] uppercase tracking-wider text-slate-500">Down</div>
-          <div class="mt-1 text-red-300 font-semibold tabular-nums">${downs}</div>
-        </div>
-      </div>
-    </section>
-  `;
-}
-
-function renderTable(checks: CheckRow[], from: number, to: number): string {
-  const rows = checks
+function renderFailureTimeline(failures: CheckRow[]): string {
+  const rows = failures
     .map((c) => {
-      const inBucket = c.ts >= from && c.ts < to;
-      const isDown = c.status === 'down';
-      const statusBadge = isDown
-        ? `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/30">
-             <span class="w-1 h-1 rounded-full bg-red-400"></span> down
-           </span>`
-        : `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2 py-0.5 rounded bg-green-500/10 text-green-300 border border-green-500/30">
-             <span class="w-1 h-1 rounded-full bg-green-400"></span> up
-           </span>`;
-      const rowClass = inBucket ? 'bg-slate-900/40' : '';
       return `
-        <tr class="${rowClass}">
-          <td class="py-2.5 px-3 text-slate-300 font-mono tabular-nums whitespace-nowrap"
+        <tr>
+          <td class="py-2.5 px-3 text-slate-200 font-mono tabular-nums whitespace-nowrap"
               data-jst-datetime="${c.ts}">${formatJstDateTime(c.ts)}</td>
-          <td class="py-2.5 px-3">${statusBadge}</td>
-          <td class="py-2.5 px-3 text-slate-300 font-mono tabular-nums">${c.status_code ?? '—'}</td>
-          <td class="py-2.5 px-3 text-slate-300 font-mono tabular-nums">${c.latency_ms ?? '—'}</td>
+          <td class="py-2.5 px-3 text-slate-300 font-mono tabular-nums">
+            ${c.status_code !== null ? `HTTP ${c.status_code}` : 'TIMEOUT'}
+          </td>
           <td class="py-2.5 px-3 text-slate-300 font-mono text-[11px] break-all max-w-md">
             ${c.error ? escapeHtml(c.error) : '<span class="text-slate-600">—</span>'}
           </td>
@@ -230,25 +202,64 @@ function renderTable(checks: CheckRow[], from: number, to: number): string {
     .join('\n');
 
   return `
-    <div class="glass rounded-2xl overflow-hidden">
-      <div class="overflow-x-auto">
-        <table class="min-w-full text-xs">
-          <thead class="border-b border-slate-800/60">
-            <tr class="text-left text-[10px] uppercase tracking-wider text-slate-500">
-              <th class="py-2.5 px-3 font-medium">Time (JST)</th>
-              <th class="py-2.5 px-3 font-medium">Status</th>
-              <th class="py-2.5 px-3 font-medium">HTTP</th>
-              <th class="py-2.5 px-3 font-medium">Latency (ms)</th>
-              <th class="py-2.5 px-3 font-medium">Error</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-800/40">
-            ${rows}
-          </tbody>
-        </table>
+    <section>
+      <h2 class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-3">
+        Failures · ${failures.length} event${failures.length === 1 ? '' : 's'}
+      </h2>
+      <div class="glass rounded-2xl overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-xs">
+            <thead class="border-b border-slate-800/60">
+              <tr class="text-left text-[10px] uppercase tracking-wider text-slate-500">
+                <th class="py-2.5 px-3 font-medium">Time (JST)</th>
+                <th class="py-2.5 px-3 font-medium">Result</th>
+                <th class="py-2.5 px-3 font-medium">Error</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/40">
+              ${rows}
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    </section>
   `;
+}
+
+function mostFrequentError(failures: CheckRow[]): string | null {
+  if (failures.length === 0) return null;
+  const counts = new Map<string, number>();
+  for (const f of failures) {
+    if (!f.error) continue;
+    counts.set(f.error, (counts.get(f.error) ?? 0) + 1);
+  }
+  let best: { msg: string; n: number } | null = null;
+  for (const [msg, n] of counts) {
+    if (!best || n > best.n) best = { msg, n };
+  }
+  return best?.msg ?? failures[failures.length - 1]?.error ?? null;
+}
+
+function toneClass(tone: 'green' | 'amber' | 'red' | 'slate'): string {
+  return {
+    green: 'bg-green-500/10 text-green-300 border-green-500/30',
+    amber: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
+    red: 'bg-red-500/10 text-red-300 border-red-500/30',
+    slate: 'bg-slate-500/10 text-slate-300 border-slate-500/30',
+  }[tone];
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms} ms`;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts: string[] = [];
+  if (h) parts.push(`${h}h`);
+  if (m) parts.push(`${m}m`);
+  if (s || parts.length === 0) parts.push(`${s}s`);
+  return parts.join(' ');
 }
 
 function errorBlock(message: string): string {
@@ -329,7 +340,9 @@ function shell(title: string, body: string): string {
                get('hour') + ':' + get('minute') + ':' + get('second') + ' JST';
       }
       document.querySelectorAll('[data-jst-datetime]').forEach((el) => {
-        el.textContent = fmtDateTime(el.dataset.jstDatetime);
+        const v = el.dataset.jstDatetime;
+        if (!v || v === 'null') return;
+        el.textContent = fmtDateTime(v);
       });
       document.querySelectorAll('[data-jst-time]').forEach((el) => {
         el.textContent = t.format(new Date(Number(el.dataset.jstTime)));
@@ -362,3 +375,4 @@ function escapeHtml(s: string): string {
 function escapeAttr(s: string): string {
   return escapeHtml(s);
 }
+

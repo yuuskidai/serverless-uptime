@@ -249,14 +249,24 @@ function renderShell(title: string, body: string, now: number): string {
       0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
       50%      { box-shadow: 0 0 0 6px transparent; opacity: 0.6; }
     }
+    /* History bars: each bar takes an equal share of the row so the
+       30-bucket strip always spans the full card width. min/max keep
+       it sensible from mobile (≈8px) to wide screens (≈18px). */
+    .bar-row {
+      display: flex;
+      align-items: stretch;
+      gap: 3px;
+    }
     .bar {
-      width: 8px;
+      flex: 1 1 0;
+      min-width: 4px;
+      max-width: 18px;
       height: 36px;
       border-radius: 3px;
-      cursor: pointer;
       transition: transform 180ms ease, filter 180ms ease;
     }
-    .bar:hover {
+    .bar.is-clickable { cursor: pointer; }
+    .bar.is-clickable:hover {
       transform: scaleY(1.12);
       filter: brightness(1.25);
     }
@@ -267,11 +277,7 @@ function renderShell(title: string, body: string, now: number): string {
     .bar-up      { background: linear-gradient(180deg, #34d399 0%, #16a34a 100%); }
     .bar-down    { background: linear-gradient(180deg, #f87171 0%, #dc2626 100%); }
     .bar-partial { background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%); }
-    .bar-none {
-      background: rgba(148, 163, 184, 0.10);
-      cursor: default;
-    }
-    .bar-none:hover { transform: none; filter: none; }
+    .bar-none    { background: rgba(148, 163, 184, 0.10); }
     #tooltip {
       position: fixed;
       pointer-events: none;
@@ -407,21 +413,27 @@ function renderCard(view: MonitorView, now: number): string {
   const lastCheck =
     view.latestTs === null ? 'never' : `${formatRelative(now - view.latestTs)} ago`;
 
+  // Only buckets containing a failure are clickable. Healthy ("up") and
+  // empty ("none") buckets are decorative — there is no incident to inspect
+  // and a click target there would be a dead end.
   const monitorId = view.monitor.id;
   const bars = view.buckets
     .map((b) => {
-      const isClickable = b.state !== 'none';
+      const isClickable = b.state === 'down' || b.state === 'partial';
       const tag = isClickable ? 'a' : 'span';
       const href = isClickable
         ? ` href="/incident?monitor_id=${monitorId}&from=${b.fromMs}&to=${b.toMs}"`
         : '';
-      const role = isClickable ? ' role="button" tabindex="0"' : ' aria-hidden="true"';
+      const role = isClickable
+        ? ' role="button" tabindex="0"'
+        : ' aria-hidden="true"';
       const sampleError = b.sampleError
         ? ` data-error="${escapeAttr(truncate(b.sampleError, 200))}"`
         : '';
-      return `<${tag}${href} class="bar bar-${b.state}"${role}
+      const cls = `bar bar-${b.state}${isClickable ? ' is-clickable' : ''}`;
+      return `<${tag}${href} class="${cls}"${role}
         data-from="${b.fromMs}" data-to="${b.toMs}"
-        data-state="${b.state}" data-up="${b.upCount}" data-down="${b.downCount}"${sampleError}></${tag}>`;
+        data-state="${b.state}"${sampleError}></${tag}>`;
     })
     .join('');
 
@@ -442,7 +454,7 @@ function renderCard(view: MonitorView, now: number): string {
       </div>
 
       <div class="mt-5">
-        <div class="flex items-center gap-[3px]" role="img"
+        <div class="bar-row" role="img"
              aria-label="Last 90 minutes timeline for ${escapeAttr(view.monitor.name)}">
           ${bars}
         </div>
@@ -523,7 +535,7 @@ function renderClientScript(now: number): string {
   const tip = document.getElementById('tooltip');
   const tipCard = tip.firstElementChild;
   const STATE_LABEL = {
-    up: 'All checks passed',
+    up: 'Operating normally',
     down: 'Outage',
     partial: 'Partial outage',
     none: 'No data',
@@ -539,10 +551,8 @@ function renderClientScript(now: number): string {
     if (state === 'none') return;
     const fromTs = Number(el.dataset.from);
     const toTs = Number(el.dataset.to);
-    const up = el.dataset.up;
-    const down = el.dataset.down;
     const error = el.dataset.error;
-    const total = Number(up) + Number(down);
+    const isIncident = state === 'down' || state === 'partial';
     tipCard.innerHTML = [
       '<div class="text-slate-200 font-medium tabular-nums">' +
         formatTime(fromTs) + ' – ' + formatTime(toTs) +
@@ -550,14 +560,12 @@ function renderClientScript(now: number): string {
       '<div class="mt-1 ' + (STATE_COLOR[state] || '') + ' font-medium uppercase tracking-wider text-[10px]">' +
         (STATE_LABEL[state] || state) +
       '</div>',
-      '<div class="mt-1.5 text-slate-400">' + total + ' check' + (total === 1 ? '' : 's') +
-        ' · <span class="text-green-300">' + up + ' up</span>' +
-        ' · <span class="text-red-300">' + down + ' down</span>' +
-      '</div>',
-      error
+      isIncident && error
         ? '<div class="mt-2 pt-2 border-t border-slate-700/60 text-slate-300 font-mono text-[11px] break-all">' + escapeText(error) + '</div>'
         : '',
-      '<div class="mt-2 text-[10px] text-slate-500">Click to inspect</div>',
+      isIncident
+        ? '<div class="mt-2 text-[10px] text-slate-500">Click to inspect</div>'
+        : '',
     ].join('');
     positionTooltip(evt);
     tip.classList.add('show');
