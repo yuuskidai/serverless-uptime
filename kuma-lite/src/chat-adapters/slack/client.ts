@@ -150,6 +150,13 @@ export class SlackClient {
     channel: string;
     text?: string;
     thread_ts?: string;
+    /**
+     * When `thread_ts` is set, also surfaces the message at the channel
+     * top level (Slack labels it "Also sent to #channel"). Lets recovery
+     * notifications land in the channel timeline while still threading
+     * under the originating DOWN alert.
+     */
+    reply_broadcast?: boolean;
     blocks?: unknown[];
     attachments?: unknown[];
     metadata?: unknown;

@@ -448,7 +448,17 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
    */
   async postBlocks(
     channelOrThreadId: string,
-    args: { text: string; blocks: unknown[]; threadTs?: string },
+    args: {
+      text: string;
+      blocks: unknown[];
+      threadTs?: string;
+      /**
+       * When `threadTs` is set, also broadcast the message to the channel
+       * top level. Useful for recovery notifications so the channel
+       * timeline reflects resolution at a glance, not only the thread.
+       */
+      replyBroadcast?: boolean;
+    },
   ): Promise<{ ts: string; channel: string }> {
     const decoded = decodeChannelOrThread(channelOrThreadId);
     const result = await this.client.postMessage({
@@ -456,6 +466,7 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       text: args.text,
       blocks: args.blocks,
       thread_ts: args.threadTs,
+      reply_broadcast: args.threadTs ? args.replyBroadcast : undefined,
       unfurl_links: false,
       unfurl_media: false,
     });

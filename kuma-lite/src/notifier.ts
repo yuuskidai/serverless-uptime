@@ -170,6 +170,10 @@ async function sendSlackUp(
       text: fallback,
       blocks,
       threadTs: slackAlertTs ?? undefined,
+      // Threaded recoveries also broadcast to the channel timeline so the
+      // resolution is visible without expanding the thread. No-op when
+      // there's no thread (top-level fallback path).
+      replyBroadcast: Boolean(slackAlertTs),
     }),
     slackAlertTs
       ? bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark')
