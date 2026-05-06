@@ -1,2 +1,8 @@
 # language files
 src/lang/*.json
+
+# fork-added entries: kuma-lite is an independent sub-project with its own
+# conventions, and README.upstream.md is a verbatim mirror of the upstream
+# README that should not be reformatted.
+kuma-lite/
+README.upstream.md

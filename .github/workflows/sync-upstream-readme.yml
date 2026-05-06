@@ -1,0 +1,54 @@
+name: Sync upstream README
+
+on:
+  schedule:
+    # Weekly, Mondays 00:00 UTC
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch upstream README
+        run: |
+          curl -fsSL \
+            https://raw.githubusercontent.com/louislam/uptime-kuma/master/README.md \
+            -o README.upstream.md
+
+      - name: Detect changes
+        id: diff
+        run: |
+          if git diff --quiet -- README.upstream.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: sync README.upstream.md from upstream"
+          title: "chore: sync README.upstream.md from upstream Uptime Kuma"
+          body: |
+            Automated update of `README.upstream.md` to mirror the latest
+            `README.md` from [louislam/uptime-kuma](https://github.com/louislam/uptime-kuma).
+
+            This PR is opened by `.github/workflows/sync-upstream-readme.yml`.
+            Review the diff and merge to keep the upstream README snapshot
+            up to date in this fork.
+          branch: chore/sync-upstream-readme
+          delete-branch: true
+          add-paths: README.upstream.md

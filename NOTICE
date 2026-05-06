@@ -1,0 +1,30 @@
+serverless-uptime
+=================
+
+This repository is a fork of Uptime Kuma:
+
+    Uptime Kuma
+    https://github.com/louislam/uptime-kuma
+    Copyright (c) 2021 Louis Lam
+    Licensed under the MIT License (see LICENSE)
+
+The original Uptime Kuma source code, assets, and documentation are
+included unmodified except where noted. The MIT License terms (see
+the LICENSE file at the repository root) continue to apply to all
+upstream content; the upstream copyright notice is preserved in
+LICENSE as required.
+
+Modifications and additions in this fork
+----------------------------------------
+
+The following are added by the fork maintainers and are not part of
+upstream Uptime Kuma:
+
+* `kuma-lite/` — a new, independent monitoring service designed to
+  run on Cloudflare Workers + D1 + Cron Triggers. It does not reuse
+  Uptime Kuma source code; it is an original implementation
+  inspired by Uptime Kuma's user experience. It is also distributed
+  under the MIT License.
+
+All other directories and files in this repository remain the work
+of the upstream Uptime Kuma project and its contributors.
