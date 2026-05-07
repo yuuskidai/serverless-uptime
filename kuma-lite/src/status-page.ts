@@ -746,8 +746,6 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
   const uptimeText = view.uptime === null ? '—' : `${view.uptime.toFixed(2)}%`;
   const latencyText =
     view.latestLatency === null ? '—' : `${view.latestLatency} ミリ秒`;
-  const lastCheck =
-    view.latestTs === null ? 'データなし' : formatRelative(now - view.latestTs);
 
   const monitorId = view.monitor.id;
   const bars = view.buckets
@@ -818,7 +816,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 
       ${componentsBlock}
 
-      <div class="mt-4 grid grid-cols-3 gap-3 text-xs">
+      <div class="mt-4 grid grid-cols-2 gap-3 text-xs">
         <div>
           <div class="text-slate-500 uppercase tracking-wider text-[10px]">稼働率 · ${escapeHtml(config.short)}</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${uptimeText}</div>
@@ -826,10 +824,6 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
         <div>
           <div class="text-slate-500 uppercase tracking-wider text-[10px]">応答速度</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${latencyText}</div>
-        </div>
-        <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">最終確認</div>
-          <div class="text-slate-100 font-medium mt-1">${lastCheck}</div>
         </div>
       </div>
     </article>
@@ -1195,13 +1189,6 @@ export function formatJstTimeSecs(ts: number): string {
 export function formatJstShortDate(ts: number): string {
   const p = jstParts(ts);
   return `${p.month}-${p.day}`;
-}
-
-function formatRelative(ms: number): string {
-  if (ms < 60_000) return `${Math.max(1, Math.floor(ms / 1000))}秒前`;
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}分前`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}時間前`;
-  return `${Math.floor(ms / 86_400_000)}日前`;
 }
 
 function formatRelativeFuture(ms: number): string {
