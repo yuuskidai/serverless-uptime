@@ -646,5 +646,24 @@ async function safeNotifyUp(
 export async function cleanupOldChecks(env: Env): Promise<void> {
   const days = Number.parseInt(env.RETENTION_DAYS ?? '7', 10) || 7;
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  // Roll any completed days into daily_summary before pruning the raw
+  // rows that fed them. INSERT OR IGNORE so days already summarised
+  // (by a previous cron tick or by the migration's seed insert) are
+  // left alone — only newly-completed days get added. Computed first
+  // so a prune that races a summary insert can't leave a hole.
+  const todayMidnight = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO daily_summary (monitor_id, day_ms, ups, downs, maints)
+     SELECT monitor_id,
+            (ts / 86400000) * 86400000 AS day_ms,
+            SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END)
+       FROM checks
+      WHERE ts < ?
+      GROUP BY monitor_id, day_ms`,
+  )
+    .bind(todayMidnight)
+    .run();
   await env.DB.prepare(`DELETE FROM checks WHERE ts < ?`).bind(cutoff).run();
 }

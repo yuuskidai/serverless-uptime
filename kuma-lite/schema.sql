@@ -67,7 +67,30 @@ CREATE TABLE IF NOT EXISTS checks (
 
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_checks_ts ON checks(ts);
-CREATE INDEX IF NOT EXISTS idx_checks_healthz_status ON checks(monitor_id, healthz_status);
+-- Partial index targeting the down-check filter pattern used by the
+-- status-page error-sample query and the RSS feed's incident
+-- derivation. Trimmed to just down + non-maintenance rows so the
+-- planner walks true incidents rather than scanning candidates and
+-- filtering in JS.
+CREATE INDEX IF NOT EXISTS idx_checks_down_recent
+  ON checks(monitor_id, ts DESC)
+  WHERE status = 'down' AND in_maintenance = 0;
+
+-- Pre-computed per-monitor per-day up/down/maintenance counts. Backs
+-- the 30-day status-page aggregate so the long-scale render reads ~30
+-- rows per monitor instead of scanning every check in the window.
+-- Filled by the daily cleanup cron (see monitor.ts:cleanupOldChecks).
+-- `day_ms` is UTC-midnight ms-epoch of the day this row summarises.
+CREATE TABLE IF NOT EXISTS daily_summary (
+  monitor_id INTEGER NOT NULL,
+  day_ms INTEGER NOT NULL,
+  ups INTEGER NOT NULL DEFAULT 0,
+  downs INTEGER NOT NULL DEFAULT 0,
+  maints INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (monitor_id, day_ms)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_daily_summary_day ON daily_summary(day_ms);
 
 CREATE TABLE IF NOT EXISTS monitor_state (
   monitor_id INTEGER PRIMARY KEY,
