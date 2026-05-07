@@ -14,10 +14,10 @@ on:
     # unrelated to the changes here. Mixed pushes that touch upstream
     # files still trigger the full matrix.
     paths-ignore:
-      - 'kuma-lite/**'
+      - "kuma-lite/**"
   pull_request:
     paths-ignore:
-      - 'kuma-lite/**'
+      - "kuma-lite/**"
 permissions: {}
 
 jobs:
