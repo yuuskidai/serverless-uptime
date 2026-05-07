@@ -1,4 +1,4 @@
-import type { Env, Monitor } from './types';
+import type { ComponentHealth, Env, Monitor } from './types';
 import { buildSlackBot } from './slack-bot';
 import { publicFacingDisplay, publicFacingUrl } from './url-display';
 
@@ -12,14 +12,40 @@ export interface NotifyDownResult {
   slackAlertTs: string | null;
 }
 
+/**
+ * Operator-facing context attached to a DOWN or DEGRADED transition.
+ * Built by monitor.ts from the live `CheckResult` and rendered into
+ * Slack Block Kit / Discord embeds. We pass a typed bundle rather
+ * than a flat string so the webhook surfaces the same structured
+ * information visitors see on the status page (business-language
+ * reason, which component is unhealthy, what build SHA reported it).
+ */
+export interface IncidentDetail {
+  /**
+   * One-line headline for the alert. Prefer the site's own
+   * business-language `reason` from /healthz; fall back to the raw
+   * HTTP / network error string for legacy sites that don't speak
+   * the spec.
+   */
+  reason: string;
+  /**
+   * Unhealthy components (`status !== 'ok'`) reported by /healthz.
+   * Pre-filtered by the caller — the renderer assumes everything
+   * passed in is worth surfacing.
+   */
+  components: ComponentHealth[];
+  /** Short build SHA the monitored site reports under `version`. */
+  version: string | null;
+}
+
 export async function notifyDown(
   env: Env,
   monitor: Monitor,
-  error: string,
+  detail: IncidentDetail,
 ): Promise<NotifyDownResult> {
   const [, slackResult] = await Promise.allSettled([
-    sendDiscordDown(env, monitor, error),
-    sendSlackDown(env, monitor, error),
+    sendDiscordDown(env, monitor, detail),
+    sendSlackDown(env, monitor, detail),
   ]);
   const slackAlertTs =
     slackResult.status === 'fulfilled' ? slackResult.value : null;
@@ -46,25 +72,30 @@ export async function notifyUp(
 export async function notifyDegraded(
   env: Env,
   monitor: Monitor,
-  reason: string,
+  detail: IncidentDetail,
 ): Promise<void> {
   await Promise.allSettled([
-    sendDiscordDegraded(env, monitor, reason),
-    sendSlackDegraded(env, monitor, reason),
+    sendDiscordDegraded(env, monitor, detail),
+    sendSlackDegraded(env, monitor, detail),
   ]);
 }
 
-// ── Discord (unchanged) ─────────────────────────────────────────────────
+// ── Discord ────────────────────────────────────────────────────────────
 
-async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promise<void> {
+async function sendDiscordDown(
+  env: Env,
+  monitor: Monitor,
+  detail: IncidentDetail,
+): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
   await postWebhook(env.DISCORD_WEBHOOK_URL, {
     embeds: [
       {
         title: `🔴 DOWN: ${monitor.name}`,
-        description: `${publicFacingUrl(monitor.url)}\n\n**Error:** ${truncate(error, 800)}`,
+        description: discordIncidentBody(monitor, detail, 'Reason'),
         color: 0xff0000,
         timestamp: new Date().toISOString(),
+        footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
   });
@@ -73,16 +104,17 @@ async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promi
 async function sendDiscordDegraded(
   env: Env,
   monitor: Monitor,
-  reason: string,
+  detail: IncidentDetail,
 ): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
   await postWebhook(env.DISCORD_WEBHOOK_URL, {
     embeds: [
       {
         title: `🟡 DEGRADED: ${monitor.name}`,
-        description: `${publicFacingUrl(monitor.url)}\n\n**Reason:** ${truncate(reason, 800)}`,
+        description: discordIncidentBody(monitor, detail, 'Reason'),
         color: 0xfbbf24,
         timestamp: new Date().toISOString(),
+        footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
   });
@@ -106,6 +138,32 @@ async function sendDiscordUp(
   });
 }
 
+/**
+ * Common Discord description body for DOWN/DEGRADED — URL link,
+ * labelled reason, and the affected-components list (only when
+ * non-empty). Build SHA goes in the embed footer instead of the
+ * body so it sits in the small grey timestamp row, matching the
+ * "operator metadata" placement convention.
+ */
+function discordIncidentBody(
+  monitor: Monitor,
+  detail: IncidentDetail,
+  reasonLabel: string,
+): string {
+  const parts: string[] = [];
+  parts.push(publicFacingUrl(monitor.url));
+  parts.push('');
+  parts.push(`**${reasonLabel}:** ${truncate(detail.reason, 800)}`);
+  if (detail.components.length > 0) {
+    parts.push('');
+    parts.push('**Components**');
+    for (const c of detail.components) {
+      parts.push(`- ${formatComponentLine(c)}`);
+    }
+  }
+  return parts.join('\n');
+}
+
 async function postWebhook(url: string, payload: unknown): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
@@ -123,12 +181,12 @@ async function postWebhook(url: string, payload: unknown): Promise<void> {
 async function sendSlackDown(
   env: Env,
   monitor: Monitor,
-  error: string,
+  detail: IncidentDetail,
 ): Promise<string | null> {
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return null;
 
-  const fallback = `🔴 DOWN: ${monitor.name} — ${publicFacingUrl(monitor.url)}`;
+  const fallback = `🔴 DOWN: ${monitor.name} — ${detail.reason}`;
   const blocks: unknown[] = [
     {
       type: 'header',
@@ -137,26 +195,25 @@ async function sendSlackDown(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
-        { type: 'mrkdwn', text: `*Triggered*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
+        {
+          type: 'mrkdwn',
+          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
+        },
+        {
+          type: 'mrkdwn',
+          text: `*Triggered*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+        },
       ],
     },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Error*\n\`\`\`${slackEscape(truncate(error, 500))}\`\`\``,
+        text: `*Reason*\n${slackEscape(truncate(detail.reason, 500))}`,
       },
     },
-    {
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: `:warning:  Recovery will reply in this thread.`,
-        },
-      ],
-    },
+    ...componentsSlackBlocks(detail.components),
+    ...buildContextBlocks(detail.version, ':warning:  Recovery will reply in this thread.'),
   ];
 
   const result = await bot.slack.postBlocks(bot.defaultChannelId, {
@@ -169,12 +226,12 @@ async function sendSlackDown(
 async function sendSlackDegraded(
   env: Env,
   monitor: Monitor,
-  reason: string,
+  detail: IncidentDetail,
 ): Promise<void> {
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return;
 
-  const fallback = `🟡 DEGRADED: ${monitor.name} — ${reason}`;
+  const fallback = `🟡 DEGRADED: ${monitor.name} — ${detail.reason}`;
   const blocks: unknown[] = [
     {
       type: 'header',
@@ -183,17 +240,25 @@ async function sendSlackDegraded(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
-        { type: 'mrkdwn', text: `*Detected*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
+        {
+          type: 'mrkdwn',
+          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
+        },
+        {
+          type: 'mrkdwn',
+          text: `*Detected*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+        },
       ],
     },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Reason*\n${slackEscape(truncate(reason, 500))}`,
+        text: `*Reason*\n${slackEscape(truncate(detail.reason, 500))}`,
       },
     },
+    ...componentsSlackBlocks(detail.components),
+    ...buildContextBlocks(detail.version, null),
   ];
   await bot.slack.postBlocks(bot.defaultChannelId, { text: fallback, blocks });
 }
@@ -217,7 +282,10 @@ async function sendSlackUp(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
+        {
+          type: 'mrkdwn',
+          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
+        },
         { type: 'mrkdwn', text: `*Down for*\n${formatDuration(downDurationMs)}` },
       ],
     },
@@ -246,6 +314,66 @@ async function sendSlackUp(
       ? bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark')
       : Promise.resolve(),
   ]);
+}
+
+// ── Block Kit helpers ────────────────────────────────────────────────────
+
+/**
+ * Render a "Components" section block when the incident has any
+ * unhealthy components. Returns an empty array when there's nothing
+ * to show, so the caller can spread it inline without extra
+ * conditionals. The list is bullet-formatted via mrkdwn rather than
+ * built as separate blocks to keep the message compact.
+ */
+function componentsSlackBlocks(components: ComponentHealth[]): unknown[] {
+  if (components.length === 0) return [];
+  const lines = components.map((c) => `• ${formatComponentLine(c)}`).join('\n');
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Components*\n${slackEscape(lines)}`,
+      },
+    },
+  ];
+}
+
+/**
+ * Combine the optional build-SHA chip and a static guidance line
+ * (e.g. "Recovery will reply in this thread.") into a single
+ * context block. Returns at most one block — empty array when
+ * neither piece of context is present.
+ */
+function buildContextBlocks(version: string | null, guidance: string | null): unknown[] {
+  const elements: unknown[] = [];
+  if (version) {
+    elements.push({ type: 'mrkdwn', text: `:gear:  build \`${slackEscape(version)}\`` });
+  }
+  if (guidance) {
+    elements.push({ type: 'mrkdwn', text: guidance });
+  }
+  if (elements.length === 0) return [];
+  return [{ type: 'context', elements }];
+}
+
+function formatComponentLine(c: ComponentHealth): string {
+  const status = statusLabel(c.status);
+  const latency =
+    typeof c.latency_ms === 'number' && Number.isFinite(c.latency_ms) ? `, ${c.latency_ms}ms` : '';
+  const reason = c.reason ? ` — ${c.reason}` : '';
+  return `${c.name} (${status}${latency})${reason}`;
+}
+
+function statusLabel(s: ComponentHealth['status']): string {
+  switch (s) {
+    case 'down':
+      return 'down';
+    case 'degraded':
+      return 'degraded';
+    default:
+      return 'ok';
+  }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
