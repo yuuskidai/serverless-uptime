@@ -7,7 +7,17 @@ concurrency:
 on:
   push:
     branches: [master, 1.23.X, 3.0.0]
+    # Skip the upstream uptime-kuma test suite (backend + e2e + ARMv7
+    # + linter) when a push or PR only touches the kuma-lite/
+    # sub-project, since none of those tests exercise kuma-lite code
+    # and several depend on external network reachability that is
+    # unrelated to the changes here. Mixed pushes that touch upstream
+    # files still trigger the full matrix.
+    paths-ignore:
+      - 'kuma-lite/**'
   pull_request:
+    paths-ignore:
+      - 'kuma-lite/**'
 permissions: {}
 
 jobs:
