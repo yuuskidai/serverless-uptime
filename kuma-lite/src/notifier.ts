@@ -1,5 +1,6 @@
 import type { Env, Monitor } from './types';
 import { buildSlackBot } from './slack-bot';
+import { publicFacingDisplay, publicFacingUrl } from './url-display';
 
 export interface NotifyDownResult {
   /**
@@ -61,7 +62,7 @@ async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promi
     embeds: [
       {
         title: `🔴 DOWN: ${monitor.name}`,
-        description: `${monitor.url}\n\n**Error:** ${truncate(error, 800)}`,
+        description: `${publicFacingUrl(monitor.url)}\n\n**Error:** ${truncate(error, 800)}`,
         color: 0xff0000,
         timestamp: new Date().toISOString(),
       },
@@ -79,7 +80,7 @@ async function sendDiscordDegraded(
     embeds: [
       {
         title: `🟡 DEGRADED: ${monitor.name}`,
-        description: `${monitor.url}\n\n**Reason:** ${truncate(reason, 800)}`,
+        description: `${publicFacingUrl(monitor.url)}\n\n**Reason:** ${truncate(reason, 800)}`,
         color: 0xfbbf24,
         timestamp: new Date().toISOString(),
       },
@@ -97,7 +98,7 @@ async function sendDiscordUp(
     embeds: [
       {
         title: `🟢 UP: ${monitor.name}`,
-        description: `${monitor.url}\n\n**Recovered after:** ${formatDuration(downDurationMs)}`,
+        description: `${publicFacingUrl(monitor.url)}\n\n**Recovered after:** ${formatDuration(downDurationMs)}`,
         color: 0x00cc66,
         timestamp: new Date().toISOString(),
       },
@@ -127,7 +128,7 @@ async function sendSlackDown(
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return null;
 
-  const fallback = `🔴 DOWN: ${monitor.name} — ${monitor.url}`;
+  const fallback = `🔴 DOWN: ${monitor.name} — ${publicFacingUrl(monitor.url)}`;
   const blocks: unknown[] = [
     {
       type: 'header',
@@ -136,7 +137,7 @@ async function sendSlackDown(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
         { type: 'mrkdwn', text: `*Triggered*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
       ],
     },
@@ -182,7 +183,7 @@ async function sendSlackDegraded(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
         { type: 'mrkdwn', text: `*Detected*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
       ],
     },
@@ -216,7 +217,7 @@ async function sendSlackUp(
     {
       type: 'section',
       fields: [
-        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>` },
         { type: 'mrkdwn', text: `*Down for*\n${formatDuration(downDurationMs)}` },
       ],
     },
@@ -255,15 +256,6 @@ function unixSec(): number {
 
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
-}
-
-function displayUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.host + (u.pathname === '/' ? '' : u.pathname);
-  } catch {
-    return url;
-  }
 }
 
 function slackEscape(s: string): string {

@@ -6,6 +6,7 @@ import type {
   MonitorState,
 } from './types';
 import { classify, KIND_HEADLINE } from './kinds';
+import { publicFacingUrl } from './url-display';
 
 const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
@@ -800,10 +801,13 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
             ${escapeHtml(view.monitor.name)}${versionPill}
           </h2>
           ${descriptionLine}
-          <a href="${escapeAttr(view.monitor.url)}" target="_blank" rel="noopener noreferrer"
+          ${(() => {
+            const display = publicFacingUrl(view.monitor.url);
+            return `<a href="${escapeAttr(display)}" target="_blank" rel="noopener noreferrer"
              class="mt-0.5 text-xs text-slate-500 hover:text-slate-300 truncate block transition-colors font-mono">
-            ${escapeHtml(view.monitor.url)}
-          </a>
+            ${escapeHtml(display)}
+          </a>`;
+          })()}
         </div>
         ${badge}
       </div>
