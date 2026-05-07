@@ -71,6 +71,8 @@ async function getMonitor(env: Env, id: number): Promise<Response> {
 interface CreateBody {
   name?: unknown;
   url?: unknown;
+  description?: unknown;
+  fallback_url?: unknown;
   method?: unknown;
   expected_status?: unknown;
   keyword?: unknown;
@@ -78,6 +80,17 @@ interface CreateBody {
   interval_minutes?: unknown;
   retry_threshold?: unknown;
   enabled?: unknown;
+}
+
+const DESCRIPTION_MAX_LENGTH = 500;
+
+function asDescription(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const trimmed = v.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.length > DESCRIPTION_MAX_LENGTH
+    ? trimmed.slice(0, DESCRIPTION_MAX_LENGTH)
+    : trimmed;
 }
 
 async function createMonitor(req: Request, env: Env): Promise<Response> {
@@ -89,6 +102,12 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
   if (!name || !url) return jsonError(400, 'name and url are required');
   if (!isHttpUrl(url)) return jsonError(400, 'url must be http(s)');
 
+  const description = asDescription(body.description);
+  const fallbackRaw = asString(body.fallback_url);
+  if (fallbackRaw && !isHttpUrl(fallbackRaw)) {
+    return jsonError(400, 'fallback_url must be http(s)');
+  }
+  const fallbackUrl = fallbackRaw;
   const method = (asString(body.method) ?? 'GET').toUpperCase();
   const expected = asInt(body.expected_status, 200);
   const keyword = asString(body.keyword);
@@ -99,10 +118,23 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
 
   const now = Date.now();
   const result = await env.DB.prepare(
-    `INSERT INTO monitors (name, url, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO monitors (name, url, description, fallback_url, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(name, url, method, expected, keyword, timeout, interval, enabled, retry, now)
+    .bind(
+      name,
+      url,
+      description,
+      fallbackUrl,
+      method,
+      expected,
+      keyword,
+      timeout,
+      interval,
+      enabled,
+      retry,
+      now,
+    )
     .run();
 
   const insertedId = (result.meta as { last_row_id?: number }).last_row_id;
@@ -131,6 +163,18 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
     const v = asString(body.url);
     if (!v || !isHttpUrl(v)) return jsonError(400, 'url must be http(s)');
     fields.push('url = ?');
+    values.push(v);
+  }
+  if ('description' in body) {
+    fields.push('description = ?');
+    values.push(asDescription(body.description));
+  }
+  if ('fallback_url' in body) {
+    const v = asString(body.fallback_url);
+    if (v !== null && !isHttpUrl(v)) {
+      return jsonError(400, 'fallback_url must be http(s)');
+    }
+    fields.push('fallback_url = ?');
     values.push(v);
   }
   if ('method' in body) {

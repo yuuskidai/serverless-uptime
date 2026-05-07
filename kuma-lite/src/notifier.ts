@@ -37,6 +37,22 @@ export async function notifyUp(
   ]);
 }
 
+/**
+ * Soft warning when a monitor transitions up → degraded based on the
+ * /healthz JSON. Quieter than DOWN: amber color, no @here, single
+ * line. Suppressed by the caller while inside a maintenance window.
+ */
+export async function notifyDegraded(
+  env: Env,
+  monitor: Monitor,
+  reason: string,
+): Promise<void> {
+  await Promise.allSettled([
+    sendDiscordDegraded(env, monitor, reason),
+    sendSlackDegraded(env, monitor, reason),
+  ]);
+}
+
 // ── Discord (unchanged) ─────────────────────────────────────────────────
 
 async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promise<void> {
@@ -47,6 +63,24 @@ async function sendDiscordDown(env: Env, monitor: Monitor, error: string): Promi
         title: `🔴 DOWN: ${monitor.name}`,
         description: `${monitor.url}\n\n**Error:** ${truncate(error, 800)}`,
         color: 0xff0000,
+        timestamp: new Date().toISOString(),
+      },
+    ],
+  });
+}
+
+async function sendDiscordDegraded(
+  env: Env,
+  monitor: Monitor,
+  reason: string,
+): Promise<void> {
+  if (!env.DISCORD_WEBHOOK_URL) return;
+  await postWebhook(env.DISCORD_WEBHOOK_URL, {
+    embeds: [
+      {
+        title: `🟡 DEGRADED: ${monitor.name}`,
+        description: `${monitor.url}\n\n**Reason:** ${truncate(reason, 800)}`,
+        color: 0xfbbf24,
         timestamp: new Date().toISOString(),
       },
     ],
@@ -129,6 +163,38 @@ async function sendSlackDown(
     blocks,
   });
   return result.ts || null;
+}
+
+async function sendSlackDegraded(
+  env: Env,
+  monitor: Monitor,
+  reason: string,
+): Promise<void> {
+  const bot = buildSlackBot(env);
+  if (!bot?.defaultChannelId) return;
+
+  const fallback = `🟡 DEGRADED: ${monitor.name} — ${reason}`;
+  const blocks: unknown[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `🟡  DEGRADED — ${monitor.name}`, emoji: true },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*URL*\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` },
+        { type: 'mrkdwn', text: `*Detected*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>` },
+      ],
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Reason*\n${slackEscape(truncate(reason, 500))}`,
+      },
+    },
+  ];
+  await bot.slack.postBlocks(bot.defaultChannelId, { text: fallback, blocks });
 }
 
 async function sendSlackUp(

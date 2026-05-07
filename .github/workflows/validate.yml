@@ -3,10 +3,18 @@ on:
   push:
     branches:
       - master
+    # The validate jobs check upstream uptime-kuma artifacts
+    # (language JSON, knex migrations, package.json). kuma-lite/ has
+    # its own toolchain (tsc + wrangler) and shares none of those
+    # artifacts, so kuma-lite-only changes skip this workflow.
+    paths-ignore:
+      - "kuma-lite/**"
   pull_request:
     branches:
       - master
       - 1.23.X
+    paths-ignore:
+      - "kuma-lite/**"
   workflow_dispatch:
 permissions: {}
 

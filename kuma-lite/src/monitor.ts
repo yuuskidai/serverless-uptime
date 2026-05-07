@@ -1,5 +1,16 @@
-import type { CheckResult, CheckStatus, Env, Monitor, MonitorState } from './types';
-import { notifyDown, notifyUp } from './notifier';
+import type {
+  CheckBinaryStatus,
+  CheckResult,
+  CheckStatus,
+  ComponentHealth,
+  Env,
+  HealthzPayload,
+  HealthzStatus,
+  MaintenanceWindow,
+  Monitor,
+  MonitorState,
+} from './types';
+import { notifyDegraded, notifyDown, notifyUp } from './notifier';
 
 const BATCH_SIZE = 40;
 
@@ -27,80 +38,162 @@ function isDue(monitor: Monitor, now: number): boolean {
 
 async function checkAndRecord(env: Env, monitor: Monitor, ts: number): Promise<void> {
   const result = await performCheck(monitor);
+  const inMaintenance = isInsideMaintenance(result.maintenance, ts);
 
   await env.DB.prepare(
-    `INSERT INTO checks (monitor_id, status, status_code, latency_ms, error, ts)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO checks (
+       monitor_id, status, status_code, latency_ms, error, ts,
+       healthz_status, healthz_reason, healthz_components, healthz_version,
+       used_fallback, in_maintenance
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(monitor.id, result.status, result.status_code, result.latency_ms, result.error, ts)
+    .bind(
+      monitor.id,
+      result.status,
+      result.status_code,
+      result.latency_ms,
+      result.error,
+      ts,
+      result.healthz_status,
+      result.healthz_reason,
+      result.healthz_components,
+      result.healthz_version,
+      result.used_fallback ? 1 : 0,
+      inMaintenance ? 1 : 0,
+    )
     .run();
 
-  await reconcileState(env, monitor, result, ts);
+  await reconcileState(env, monitor, result, ts, inMaintenance);
 }
 
+/**
+ * Runs the structured `/healthz` probe with a fallback chain:
+ *   1. Fetch `monitor.url` (typically /healthz).
+ *   2. If JSON parse succeeds, trust it (per spec §1.3, JSON wins over
+ *      HTTP code mismatch).
+ *   3. If the response is non-JSON, parse failed, timed out, or returned
+ *      an unexpected non-spec status, fall through to `monitor.fallback_url`
+ *      (when configured) and run the legacy "did the site itself respond"
+ *      check.
+ *   4. If neither succeeds, the monitor is `down`.
+ *
+ * The fallback path keeps us blind-resistant: an app-layer /healthz bug
+ * shouldn't make the rest of the monitoring loop go silent. When fallback
+ * succeeds while /healthz failed, we record `degraded` so the badge
+ * surfaces the problem without firing a full DOWN alert.
+ */
 export async function performCheck(monitor: Monitor): Promise<CheckResult> {
+  const primary = await probe(monitor.url, monitor.method || 'GET', monitor.timeout_ms ?? 10_000);
+
+  // Path A: primary returned a body we could parse as the spec'd JSON.
+  if (primary.parsedHealthz) {
+    return resultFromHealthz(monitor, primary);
+  }
+
+  // Path B: primary returned a body, but it didn't speak the spec. Treat
+  // it as a legacy site — fall back to the simple status-code + keyword
+  // logic against the same URL.
+  if (primary.bodySample !== null && !primary.networkFailure) {
+    return resultFromLegacy(monitor, primary);
+  }
+
+  // Path C: primary failed at the network/parse level. Try the fallback
+  // URL if one is configured.
+  if (monitor.fallback_url) {
+    const fb = await probe(
+      monitor.fallback_url,
+      monitor.method || 'GET',
+      monitor.timeout_ms ?? 10_000,
+    );
+
+    if (fb.networkFailure || fb.statusCode === null) {
+      return downResult(primary, fb, true, '監視対象に接続できません');
+    }
+
+    // Fallback URL responded → site is at least partially alive. Mark
+    // degraded so the badge changes color but the bars stay green for
+    // the fallback success.
+    if (fb.statusCode >= 200 && fb.statusCode < 400) {
+      return {
+        status: 'up',
+        status_code: fb.statusCode,
+        latency_ms: fb.latencyMs,
+        error: null,
+        healthz_status: 'down',
+        healthz_reason: 'ヘルスチェック応答なし、サイト本体は応答',
+        healthz_components: null,
+        healthz_version: null,
+        used_fallback: true,
+        maintenance: null,
+      };
+    }
+
+    // Fallback URL returned an error code too → site genuinely down.
+    return {
+      status: 'down',
+      status_code: fb.statusCode,
+      latency_ms: fb.latencyMs,
+      error: `Fallback URL returned ${fb.statusCode}`,
+      healthz_status: 'down',
+      healthz_reason: 'サイトが応答していません',
+      healthz_components: null,
+      healthz_version: null,
+      used_fallback: true,
+      maintenance: null,
+    };
+  }
+
+  // No fallback configured and primary failed → genuine down.
+  return downResult(primary, null, false, primary.error ?? 'unknown error');
+}
+
+interface ProbeOutcome {
+  statusCode: number | null;
+  latencyMs: number | null;
+  /** First ~4KB of body (or null on read failure / empty body). */
+  bodySample: string | null;
+  /** Parsed Healthz payload if the body was JSON shaped to spec. */
+  parsedHealthz: HealthzPayload | null;
+  /** True when the fetch threw before completing (DNS, TCP, TLS, abort). */
+  networkFailure: boolean;
+  /** Free-form error string for legacy persistence / classification. */
+  error: string | null;
+}
+
+async function probe(url: string, method: string, timeoutMs: number): Promise<ProbeOutcome> {
   const controller = new AbortController();
-  const timeoutMs = monitor.timeout_ms ?? 10_000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = Date.now();
 
   try {
-    const response = await fetch(monitor.url, {
-      method: monitor.method || 'GET',
+    const response = await fetch(url, {
+      method,
       signal: controller.signal,
       redirect: 'follow',
-      headers: {
-        'User-Agent': 'kuma-lite/0.1 (uptime monitor)',
-      },
+      headers: { 'User-Agent': 'kuma-lite/0.2 (uptime monitor)' },
     });
     const latency = Date.now() - start;
-
-    if (response.status !== monitor.expected_status) {
-      const body = await safeReadBody(response);
-      return {
-        status: 'down',
-        status_code: response.status,
-        latency_ms: latency,
-        error: `Expected status ${monitor.expected_status}, got ${response.status}${body ? `: ${body.slice(0, 120)}` : ''}`,
-      };
-    }
-
-    if (monitor.keyword) {
-      const body = await safeReadBody(response);
-      if (body === null) {
-        return {
-          status: 'down',
-          status_code: response.status,
-          latency_ms: latency,
-          error: 'Failed to read response body for keyword check',
-        };
-      }
-      if (!body.includes(monitor.keyword)) {
-        return {
-          status: 'down',
-          status_code: response.status,
-          latency_ms: latency,
-          error: `Keyword "${monitor.keyword}" not found in response`,
-        };
-      }
-    } else {
-      // Drain body so the connection can close cleanly.
-      await safeReadBody(response);
-    }
+    const body = await safeReadBody(response);
+    const parsed = body ? tryParseHealthz(body, response.headers.get('content-type')) : null;
 
     return {
-      status: 'up',
-      status_code: response.status,
-      latency_ms: latency,
+      statusCode: response.status,
+      latencyMs: latency,
+      bodySample: body,
+      parsedHealthz: parsed,
+      networkFailure: false,
       error: null,
     };
   } catch (err) {
     const latency = Date.now() - start;
     const aborted = (err as Error)?.name === 'AbortError';
     return {
-      status: 'down',
-      status_code: null,
-      latency_ms: latency,
+      statusCode: null,
+      latencyMs: latency,
+      bodySample: null,
+      parsedHealthz: null,
+      networkFailure: true,
       error: aborted ? `Timeout after ${timeoutMs}ms` : errorMessage(err),
     };
   } finally {
@@ -108,9 +201,184 @@ export async function performCheck(monitor: Monitor): Promise<CheckResult> {
   }
 }
 
+function tryParseHealthz(body: string, contentType: string | null): HealthzPayload | null {
+  // Be permissive: some sites set `application/json` without a charset
+  // suffix, others set `text/plain` for /healthz. We try parse-first,
+  // and only require Content-Type when the body itself doesn't look
+  // like JSON.
+  const trimmed = body.trim();
+  const looksJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+  if (!looksJson && !(contentType ?? '').toLowerCase().includes('json')) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  // Heuristic: must look like a Healthz payload, not just any JSON.
+  // We accept either an explicit `status` field with a known value, or
+  // a `components` array — at least one of those tells us it's spec-shaped.
+  const status = obj.status;
+  const knownStatus = status === 'ok' || status === 'degraded' || status === 'down';
+  const hasComponents = Array.isArray(obj.components);
+  if (!knownStatus && !hasComponents) return null;
+  return obj as HealthzPayload;
+}
+
+function resultFromHealthz(monitor: Monitor, p: ProbeOutcome): CheckResult {
+  const payload = p.parsedHealthz!;
+  const healthzStatus: HealthzStatus = normaliseHealthzStatus(payload.status);
+  const components = sanitiseComponents(payload.components);
+  const componentsJson = components.length > 0 ? JSON.stringify(components) : null;
+  const version = typeof payload.version === 'string' ? payload.version.slice(0, 64) : null;
+  const maintenance = parseMaintenance(payload.maintenance ?? null);
+  const reason = typeof payload.reason === 'string' && payload.reason.trim()
+    ? payload.reason.trim()
+    : null;
+
+  // Spec §1.3 — JSON wins over HTTP code mismatch. We drive `status`
+  // entirely off `healthzStatus`. degraded → still 'up' for binary
+  // bookkeeping (the bars stay green); the nuance lives on the badge.
+  const binary: CheckBinaryStatus = healthzStatus === 'down' ? 'down' : 'up';
+  void monitor; // kept for future per-monitor overrides
+  return {
+    status: binary,
+    status_code: p.statusCode,
+    latency_ms: p.latencyMs,
+    error: binary === 'down' ? reason ?? 'healthz reported down' : null,
+    healthz_status: healthzStatus,
+    healthz_reason: reason,
+    healthz_components: componentsJson,
+    healthz_version: version,
+    used_fallback: false,
+    maintenance,
+  };
+}
+
+function resultFromLegacy(monitor: Monitor, p: ProbeOutcome): CheckResult {
+  // Legacy site path: status code + keyword check, no structured info.
+  const expected = monitor.expected_status ?? 200;
+  if (p.statusCode !== expected) {
+    return {
+      status: 'down',
+      status_code: p.statusCode,
+      latency_ms: p.latencyMs,
+      error: `Expected status ${expected}, got ${p.statusCode}${
+        p.bodySample ? `: ${p.bodySample.slice(0, 120)}` : ''
+      }`,
+      healthz_status: null,
+      healthz_reason: null,
+      healthz_components: null,
+      healthz_version: null,
+      used_fallback: false,
+      maintenance: null,
+    };
+  }
+  if (monitor.keyword && p.bodySample !== null && !p.bodySample.includes(monitor.keyword)) {
+    return {
+      status: 'down',
+      status_code: p.statusCode,
+      latency_ms: p.latencyMs,
+      error: `Keyword "${monitor.keyword}" not found in response`,
+      healthz_status: null,
+      healthz_reason: null,
+      healthz_components: null,
+      healthz_version: null,
+      used_fallback: false,
+      maintenance: null,
+    };
+  }
+  return {
+    status: 'up',
+    status_code: p.statusCode,
+    latency_ms: p.latencyMs,
+    error: null,
+    healthz_status: null,
+    healthz_reason: null,
+    healthz_components: null,
+    healthz_version: null,
+    used_fallback: false,
+    maintenance: null,
+  };
+}
+
+function downResult(
+  primary: ProbeOutcome,
+  fallback: ProbeOutcome | null,
+  usedFallback: boolean,
+  reason: string,
+): CheckResult {
+  const errParts: string[] = [];
+  if (primary.error) errParts.push(`primary: ${primary.error}`);
+  if (fallback?.error) errParts.push(`fallback: ${fallback.error}`);
+  return {
+    status: 'down',
+    status_code: fallback?.statusCode ?? primary.statusCode,
+    latency_ms: fallback?.latencyMs ?? primary.latencyMs,
+    error: errParts.length > 0 ? errParts.join(' / ') : reason,
+    healthz_status: 'down',
+    healthz_reason: reason,
+    healthz_components: null,
+    healthz_version: null,
+    used_fallback: usedFallback,
+    maintenance: null,
+  };
+}
+
+function normaliseHealthzStatus(input: unknown): HealthzStatus {
+  if (input === 'ok' || input === 'degraded' || input === 'down') return input;
+  return 'ok';
+}
+
+function sanitiseComponents(input: unknown): ComponentHealth[] {
+  if (!Array.isArray(input)) return [];
+  const out: ComponentHealth[] = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const name = typeof r.name === 'string' ? r.name.slice(0, 200) : null;
+    if (!name) continue;
+    const status = normaliseHealthzStatus(r.status);
+    const latency =
+      typeof r.latency_ms === 'number' && Number.isFinite(r.latency_ms)
+        ? Math.max(0, Math.floor(r.latency_ms))
+        : undefined;
+    const reason =
+      typeof r.reason === 'string' && r.reason.trim() ? r.reason.trim().slice(0, 500) : null;
+    out.push({ name, status, latency_ms: latency, reason });
+    if (out.length >= 20) break; // sanity cap; spec doesn't bound this
+  }
+  return out;
+}
+
+function parseMaintenance(input: HealthzPayload['maintenance']): MaintenanceWindow | null {
+  if (!input || typeof input !== 'object') return null;
+  const from = typeof input.from === 'string' ? input.from : null;
+  const to = typeof input.to === 'string' ? input.to : null;
+  const reason = typeof input.reason === 'string' && input.reason.trim()
+    ? input.reason.trim().slice(0, 500)
+    : null;
+  if (!from || !to || !reason) return null;
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) return null;
+  return { from, to, reason, from_ms: fromMs, to_ms: toMs };
+}
+
+function isInsideMaintenance(window: MaintenanceWindow | null, ts: number): boolean {
+  if (!window) return false;
+  return ts >= window.from_ms && ts < window.to_ms;
+}
+
 async function safeReadBody(response: Response): Promise<string | null> {
   try {
-    return await response.text();
+    const text = await response.text();
+    // Cap to avoid pulling unbounded HTML pages into memory.
+    return text.length > 8192 ? text.slice(0, 8192) : text;
   } catch {
     return null;
   }
@@ -126,6 +394,7 @@ async function reconcileState(
   monitor: Monitor,
   result: CheckResult,
   ts: number,
+  inMaintenance: boolean,
 ): Promise<void> {
   const previous = await env.DB.prepare(
     `SELECT * FROM monitor_state WHERE monitor_id = ?`,
@@ -146,15 +415,52 @@ async function reconcileState(
   let nextSlackAlertTs = prevSlackAlertTs;
 
   const threshold = Math.max(1, monitor.retry_threshold ?? 1);
+  // Effective status from the latest check, before threshold smoothing:
+  //   - binary down → 'down'
+  //   - healthz_status === 'degraded' → 'degraded'
+  //   - otherwise → 'up'
+  const observed: CheckStatus =
+    result.status === 'down'
+      ? 'down'
+      : result.healthz_status === 'degraded'
+      ? 'degraded'
+      : 'up';
 
   if (result.status === 'down') {
     nextFailures = prevFailures + 1;
-    if (prevStatus === 'up' && nextFailures >= threshold) {
+    if (prevStatus !== 'down' && nextFailures >= threshold) {
       nextStatus = 'down';
       nextDownSince = ts;
       nextNotifiedAt = ts;
-      const r = await safeNotifyDown(env, monitor, result.error ?? 'unknown error');
-      nextSlackAlertTs = r?.slackAlertTs ?? null;
+      // Suppress Slack/Discord alerts while inside a declared maintenance
+      // window (per spec §2). The state still flips so the page shows a
+      // blue maintenance bar.
+      if (!inMaintenance) {
+        const r = await safeNotifyDown(
+          env,
+          monitor,
+          result.healthz_reason ?? result.error ?? 'unknown error',
+        );
+        nextSlackAlertTs = r?.slackAlertTs ?? null;
+      }
+    }
+  } else if (observed === 'degraded') {
+    nextFailures = 0;
+    if (prevStatus === 'up') {
+      nextStatus = 'degraded';
+      nextNotifiedAt = ts;
+      if (!inMaintenance) {
+        await safeNotifyDegraded(env, monitor, result.healthz_reason ?? '一部の機能が不調');
+      }
+    } else if (prevStatus === 'down') {
+      nextStatus = 'degraded';
+      const downDurationMs = prevDownSince ? ts - prevDownSince : 0;
+      nextDownSince = null;
+      nextNotifiedAt = ts;
+      if (!inMaintenance) {
+        await safeNotifyUp(env, monitor, downDurationMs, prevSlackAlertTs);
+      }
+      nextSlackAlertTs = null;
     }
   } else {
     nextFailures = 0;
@@ -163,20 +469,42 @@ async function reconcileState(
       const downDurationMs = prevDownSince ? ts - prevDownSince : 0;
       nextDownSince = null;
       nextNotifiedAt = ts;
-      await safeNotifyUp(env, monitor, downDurationMs, prevSlackAlertTs);
+      if (!inMaintenance) {
+        await safeNotifyUp(env, monitor, downDurationMs, prevSlackAlertTs);
+      }
       nextSlackAlertTs = null;
+    } else if (prevStatus === 'degraded') {
+      nextStatus = 'up';
+      nextNotifiedAt = ts;
     }
   }
 
+  // Maintenance fields: store latest declaration verbatim. Cleared
+  // (NULL) when site stops declaring or the window has expired.
+  let maintenanceFrom: number | null = null;
+  let maintenanceTo: number | null = null;
+  let maintenanceReason: string | null = null;
+  if (result.maintenance && result.maintenance.to_ms > ts) {
+    maintenanceFrom = result.maintenance.from_ms;
+    maintenanceTo = result.maintenance.to_ms;
+    maintenanceReason = result.maintenance.reason;
+  }
+
   await env.DB.prepare(
-    `INSERT INTO monitor_state (monitor_id, current_status, consecutive_failures, last_notified_at, down_since, slack_alert_ts)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO monitor_state (
+       monitor_id, current_status, consecutive_failures, last_notified_at,
+       down_since, slack_alert_ts, maintenance_from, maintenance_to, maintenance_reason
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(monitor_id) DO UPDATE SET
        current_status = excluded.current_status,
        consecutive_failures = excluded.consecutive_failures,
        last_notified_at = excluded.last_notified_at,
        down_since = excluded.down_since,
-       slack_alert_ts = excluded.slack_alert_ts`,
+       slack_alert_ts = excluded.slack_alert_ts,
+       maintenance_from = excluded.maintenance_from,
+       maintenance_to = excluded.maintenance_to,
+       maintenance_reason = excluded.maintenance_reason`,
   )
     .bind(
       monitor.id,
@@ -185,6 +513,9 @@ async function reconcileState(
       nextNotifiedAt,
       nextDownSince,
       nextSlackAlertTs,
+      maintenanceFrom,
+      maintenanceTo,
+      maintenanceReason,
     )
     .run();
 }
@@ -199,6 +530,14 @@ async function safeNotifyDown(
   } catch (err) {
     console.error('notifyDown failed:', errorMessage(err));
     return null;
+  }
+}
+
+async function safeNotifyDegraded(env: Env, monitor: Monitor, reason: string): Promise<void> {
+  try {
+    await notifyDegraded(env, monitor, reason);
+  } catch (err) {
+    console.error('notifyDegraded failed:', errorMessage(err));
   }
 }
 
