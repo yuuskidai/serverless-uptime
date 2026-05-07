@@ -73,6 +73,7 @@ interface CreateBody {
   url?: unknown;
   description?: unknown;
   fallback_url?: unknown;
+  service_binding?: unknown;
   method?: unknown;
   expected_status?: unknown;
   keyword?: unknown;
@@ -108,6 +109,11 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
     return jsonError(400, 'fallback_url must be http(s)');
   }
   const fallbackUrl = fallbackRaw;
+  const bindingRaw = asString(body.service_binding);
+  if (bindingRaw && !isValidBindingName(bindingRaw)) {
+    return jsonError(400, 'service_binding must be uppercase ASCII letters, digits, or underscore');
+  }
+  const serviceBinding = bindingRaw;
   const method = (asString(body.method) ?? 'GET').toUpperCase();
   const expected = asInt(body.expected_status, 200);
   const keyword = asString(body.keyword);
@@ -118,14 +124,15 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
 
   const now = Date.now();
   const result = await env.DB.prepare(
-    `INSERT INTO monitors (name, url, description, fallback_url, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO monitors (name, url, description, fallback_url, service_binding, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       name,
       url,
       description,
       fallbackUrl,
+      serviceBinding,
       method,
       expected,
       keyword,
@@ -175,6 +182,17 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
       return jsonError(400, 'fallback_url must be http(s)');
     }
     fields.push('fallback_url = ?');
+    values.push(v);
+  }
+  if ('service_binding' in body) {
+    const v = asString(body.service_binding);
+    if (v !== null && !isValidBindingName(v)) {
+      return jsonError(
+        400,
+        'service_binding must be uppercase ASCII letters, digits, or underscore',
+      );
+    }
+    fields.push('service_binding = ?');
     values.push(v);
   }
   if ('method' in body) {
@@ -241,6 +259,18 @@ function isHttpUrl(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Service binding identifiers in wrangler.toml are conventionally
+ * uppercase, alphanumeric with underscores (e.g., `PARTNER_PORTAL`).
+ * Constraining the API to that shape keeps casual typos from
+ * silently disabling a monitor (the worker logs a warning when it
+ * can't resolve the binding, but the monitor would still be
+ * recorded as up/down on whatever the bare fetch returned).
+ */
+function isValidBindingName(s: string): boolean {
+  return /^[A-Z][A-Z0-9_]{0,63}$/.test(s);
 }
 
 function asString(v: unknown): string | null {
