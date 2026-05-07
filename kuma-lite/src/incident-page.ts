@@ -98,7 +98,6 @@ function renderBody(args: RenderArgs): string {
   const headline = latestStructured?.reason ?? copy.headline;
   const detail = latestStructured?.reason ? null : copy.detail;
   const components = latestStructured?.components ?? [];
-  const version = latestStructured?.version ?? null;
 
   const verdict = isOngoing
     ? { tone: 'red' as const, label: '継続中' }
@@ -154,7 +153,6 @@ function renderBody(args: RenderArgs): string {
         </dl>
 
         ${renderComponentsBlock(components)}
-        ${version ? `<p class="mt-4 text-[11px] text-slate-500 font-mono">ビルド識別子: ${escapeHtml(version)}</p>` : ''}
       </section>
     </main>
   `;
@@ -170,18 +168,16 @@ function renderBody(args: RenderArgs): string {
 function pickLatestStructured(failures: CheckRow[]): {
   reason: string | null;
   components: ComponentHealth[];
-  version: string | null;
 } | null {
   for (let i = failures.length - 1; i >= 0; i--) {
     const f = failures[i];
     if (!f) continue;
     const hasReason = !!f.healthz_reason;
     const components = parseComponents(f.healthz_components);
-    if (hasReason || components.length > 0 || f.healthz_version) {
+    if (hasReason || components.length > 0) {
       return {
         reason: f.healthz_reason,
         components,
-        version: f.healthz_version,
       };
     }
   }
