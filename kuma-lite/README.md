@@ -356,13 +356,13 @@ Binding はデプロイ完了後に有効になります。
 ### 3. monitor 側で binding を指定
 
 ```bash
-curl -X PATCH https://kuma-lite.opus-system.workers.dev/api/monitors/5 \
+curl -X PATCH https://kuma-lite.<subdomain>.workers.dev/api/monitors/5 \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"service_binding": "PARTNER_PORTAL"}'
 ```
 
-`url` は引き続き元の URL (`https://partner-portal.opus-system.workers.dev/healthz`)
+`url` は引き続き元の URL (`https://<your-domain>/healthz`)
 で OK。Service binding は HTTP path / method / headers をそのまま転送
 するため、コード側の変更は不要です。
 
@@ -380,13 +380,13 @@ npx wrangler d1 execute kuma-lite-db \
 npx wrangler deploy
 
 # 3. 既存 monitor の url を /healthz に切り替え、fallback_url にトップ URL を入れる
-#    (例: id=1 が partner-portal.opus-system.workers.dev を見ているケース)
+#    (例: id=1 が <your-domain> を見ているケース)
 curl -X PATCH https://kuma-lite.<subdomain>.workers.dev/api/monitors/1 \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://partner-portal.opus-system.workers.dev/healthz",
-    "fallback_url": "https://partner-portal.opus-system.workers.dev/"
+    "url": "https://<your-domain>/healthz",
+    "fallback_url": "https://<your-domain>/"
   }'
 ```
 

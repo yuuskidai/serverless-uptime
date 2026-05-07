@@ -17,12 +17,16 @@ compatibility_flags = ["nodejs_compat"]
 enabled = true
 head_sampling_rate = 0.1
 
-# D1 database binding. Run `wrangler d1 create kuma-lite-db` and paste the
-# returned database_id below before deploying.
+# D1 database binding. Run `wrangler d1 create kuma-lite-db` and paste
+# the returned database_id below before deploying. The placeholder
+# value here is intentional — committing a real id would point fork
+# deploys at the upstream owner's database (the deploy still fails
+# because the fork lacks credentials, but the binding metadata is
+# misleading).
 [[d1_databases]]
 binding = "DB"
 database_name = "kuma-lite-db"
-database_id = "2f9aa24f-2a0d-496b-ab08-1cd76dcf04cc"
+database_id = "<your-d1-database-id>"
 
 # Service bindings to monitored Workers that share this Cloudflare
 # account. A bare `fetch()` to *.workers.dev on the same account is
@@ -33,13 +37,14 @@ database_id = "2f9aa24f-2a0d-496b-ab08-1cd76dcf04cc"
 # `monitors.service_binding` column in D1; the `service` value must
 # match the destination Worker's name as registered with Workers
 # Builds (see `wrangler whoami` / dashboard for current names).
-[[services]]
-binding = "PARTNER_PORTAL"
-service = "partner-portal"
-
-[[services]]
-binding = "CORE_OS"
-service = "core-os"
+#
+# Uncomment and fill in one block per Worker you want to monitor.
+# `binding` is your choice (it becomes the env key your monitor row
+# references); `service` must match a Worker name in your account.
+#
+#   [[services]]
+#   binding = "MY_API"
+#   service = "<your-worker-name>"
 
 # 1st cron: run checks every minute
 # 2nd cron: clean up old `checks` rows daily at 03:00 UTC
