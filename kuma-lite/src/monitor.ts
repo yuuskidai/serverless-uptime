@@ -10,7 +10,7 @@ import type {
   Monitor,
   MonitorState,
 } from './types';
-import { notifyDegraded, notifyDown, notifyUp } from './notifier';
+import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp } from './notifier';
 
 const BATCH_SIZE = 40;
 
@@ -483,7 +483,7 @@ async function reconcileState(
         const r = await safeNotifyDown(
           env,
           monitor,
-          result.healthz_reason ?? result.error ?? 'unknown error',
+          buildIncidentDetail(result, 'unknown error'),
         );
         nextSlackAlertTs = r?.slackAlertTs ?? null;
       }
@@ -494,7 +494,7 @@ async function reconcileState(
       nextStatus = 'degraded';
       nextNotifiedAt = ts;
       if (!inMaintenance) {
-        await safeNotifyDegraded(env, monitor, result.healthz_reason ?? '一部の機能が不調');
+        await safeNotifyDegraded(env, monitor, buildIncidentDetail(result, '一部の機能が不調'));
       }
     } else if (prevStatus === 'down') {
       nextStatus = 'degraded';
@@ -567,22 +567,67 @@ async function reconcileState(
 async function safeNotifyDown(
   env: Env,
   monitor: Monitor,
-  error: string,
+  detail: IncidentDetail,
 ): Promise<{ slackAlertTs: string | null } | null> {
   try {
-    return await notifyDown(env, monitor, error);
+    return await notifyDown(env, monitor, detail);
   } catch (err) {
     console.error('notifyDown failed:', errorMessage(err));
     return null;
   }
 }
 
-async function safeNotifyDegraded(env: Env, monitor: Monitor, reason: string): Promise<void> {
+async function safeNotifyDegraded(
+  env: Env,
+  monitor: Monitor,
+  detail: IncidentDetail,
+): Promise<void> {
   try {
-    await notifyDegraded(env, monitor, reason);
+    await notifyDegraded(env, monitor, detail);
   } catch (err) {
     console.error('notifyDegraded failed:', errorMessage(err));
   }
+}
+
+/**
+ * Construct the IncidentDetail bundle that the webhook renderer
+ * expects from the live `CheckResult`. Walks three sources of
+ * truth in order — the structured `healthz_reason`, then the raw
+ * monitor `error`, then a caller-provided fallback ("unknown error"
+ * / "一部の機能が不調") — so spec-conformant sites get business
+ * language while legacy sites still produce a usable headline.
+ *
+ * `components` is filtered to *unhealthy* entries (status !== 'ok')
+ * because the webhook renderer assumes everything passed in is
+ * worth surfacing — listing five healthy components on a DOWN
+ * alert is just noise.
+ */
+function buildIncidentDetail(result: CheckResult, fallbackReason: string): IncidentDetail {
+  const reason = result.healthz_reason ?? result.error ?? fallbackReason;
+  let unhealthy: ComponentHealth[] = [];
+  if (result.healthz_components) {
+    try {
+      const parsed = JSON.parse(result.healthz_components);
+      if (Array.isArray(parsed)) {
+        unhealthy = parsed.filter(
+          (c): c is ComponentHealth =>
+            c &&
+            typeof c === 'object' &&
+            typeof c.name === 'string' &&
+            (c.status === 'down' || c.status === 'degraded'),
+        );
+      }
+    } catch {
+      // Stored JSON should always parse — sanitiseComponents writes it —
+      // but if it ever doesn't, omit the components rather than crash
+      // the alert path.
+    }
+  }
+  return {
+    reason,
+    components: unhealthy,
+    version: result.healthz_version,
+  };
 }
 
 async function safeNotifyUp(
