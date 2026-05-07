@@ -67,7 +67,14 @@ CREATE TABLE IF NOT EXISTS checks (
 
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_checks_ts ON checks(ts);
-CREATE INDEX IF NOT EXISTS idx_checks_healthz_status ON checks(monitor_id, healthz_status);
+-- Partial index targeting the down-check filter pattern used by the
+-- status-page error-sample query and the RSS feed's incident
+-- derivation. Trimmed to just down + non-maintenance rows so the
+-- planner walks true incidents rather than scanning candidates and
+-- filtering in JS.
+CREATE INDEX IF NOT EXISTS idx_checks_down_recent
+  ON checks(monitor_id, ts DESC)
+  WHERE status = 'down' AND in_maintenance = 0;
 
 CREATE TABLE IF NOT EXISTS monitor_state (
   monitor_id INTEGER PRIMARY KEY,

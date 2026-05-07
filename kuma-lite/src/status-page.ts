@@ -144,32 +144,84 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const ids = monitors.map((m) => m.id);
   const placeholders = ids.map(() => '?').join(',');
 
-  const statesResult = await env.DB.prepare(
-    `SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`,
-  )
-    .bind(...ids)
-    .all<MonitorState>();
+  // Aggregate per-bucket counts on the database side. Without this, a 30-day
+  // window with one-minute checks would pull tens of thousands of rows back
+  // into the Worker just to bucket them in JS. Maintenance checks are
+  // separated so the bar can be coloured blue and excluded from uptime %.
+  type BucketRow = {
+    monitor_id: number;
+    bucket_idx: number;
+    total: number;
+    ups: number;
+    downs: number;
+    maints: number;
+  };
+  type LatestRow = {
+    monitor_id: number;
+    latency_ms: number | null;
+    ts: number;
+    healthz_reason: string | null;
+    healthz_components: string | null;
+  };
+  type ErrRow = {
+    monitor_id: number;
+    error: string | null;
+    status_code: number | null;
+    healthz_reason: string | null;
+    ts: number;
+  };
+
+  // Fan out the four monitor-id-dependent reads in parallel. They are
+  // independent of each other and previously ran sequentially, stacking
+  // four D1 round-trips on the hot path. Running them concurrently
+  // collapses that to a single round-trip's worth of wall time.
+  // The error-sample query is gated by scale (see SAMPLE_ERROR_MAX_SCALE_MS
+  // for why); when we skip it we resolve to null in place.
+  const [statesResult, latestResult, aggregateResult, errResult] = await Promise.all([
+    env.DB.prepare(`SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`)
+      .bind(...ids)
+      .all<MonitorState>(),
+    env.DB.prepare(
+      `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
+         FROM checks c
+         JOIN (
+           SELECT monitor_id, MAX(ts) AS max_ts
+             FROM checks
+            WHERE monitor_id IN (${placeholders})
+            GROUP BY monitor_id
+         ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
+    )
+      .bind(...ids)
+      .all<LatestRow>(),
+    env.DB.prepare(
+      `SELECT monitor_id,
+              CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
+              COUNT(*) AS total,
+              SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
+              SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
+              SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
+         FROM checks
+        WHERE ts >= ? AND monitor_id IN (${placeholders})
+        GROUP BY monitor_id, bucket_idx`,
+    )
+      .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
+      .all<BucketRow>(),
+    windowMs <= SAMPLE_ERROR_MAX_SCALE_MS
+      ? env.DB.prepare(
+          `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
+            WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
+                  AND monitor_id IN (${placeholders})
+            ORDER BY ts DESC
+            LIMIT 5000`,
+        )
+          .bind(sinceWindow, ...ids)
+          .all<ErrRow>()
+      : Promise.resolve(null),
+  ]);
+
   const stateById = new Map<number, MonitorState>();
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
 
-  const latestResult = await env.DB.prepare(
-    `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
-       FROM checks c
-       JOIN (
-         SELECT monitor_id, MAX(ts) AS max_ts
-           FROM checks
-          WHERE monitor_id IN (${placeholders})
-          GROUP BY monitor_id
-       ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
-  )
-    .bind(...ids)
-    .all<{
-      monitor_id: number;
-      latency_ms: number | null;
-      ts: number;
-      healthz_reason: string | null;
-      healthz_components: string | null;
-    }>();
   const latestById = new Map<
     number,
     {
@@ -188,31 +240,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     });
   }
 
-  // Aggregate per-bucket counts on the database side. Without this, a 30-day
-  // window with one-minute checks would pull tens of thousands of rows back
-  // into the Worker just to bucket them in JS. Maintenance checks are
-  // separated so the bar can be coloured blue and excluded from uptime %.
-  type BucketRow = {
-    monitor_id: number;
-    bucket_idx: number;
-    total: number;
-    ups: number;
-    downs: number;
-    maints: number;
-  };
-  const aggregateResult = await env.DB.prepare(
-    `SELECT monitor_id,
-            CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
-            COUNT(*) AS total,
-            SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
-            SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
-            SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
-       FROM checks
-      WHERE ts >= ? AND monitor_id IN (${placeholders})
-      GROUP BY monitor_id, bucket_idx`,
-  )
-    .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
-    .all<BucketRow>();
   const bucketsByMonitor = new Map<number, Map<number, BucketRow>>();
   for (const row of aggregateResult.results ?? []) {
     let m = bucketsByMonitor.get(row.monitor_id);
@@ -231,23 +258,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   // healthz_reason takes precedence when present so the tooltip uses
   // the business-language reason from the monitored site verbatim.
   const sampleLabelByKey = new Map<string, string>();
-  if (windowMs <= SAMPLE_ERROR_MAX_SCALE_MS) {
-    type ErrRow = {
-      monitor_id: number;
-      error: string | null;
-      status_code: number | null;
-      healthz_reason: string | null;
-      ts: number;
-    };
-    const errResult = await env.DB.prepare(
-      `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
-        WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
-              AND monitor_id IN (${placeholders})
-        ORDER BY ts DESC
-        LIMIT 5000`,
-    )
-      .bind(sinceWindow, ...ids)
-      .all<ErrRow>();
+  if (errResult) {
     for (const row of errResult.results ?? []) {
       const idx = Math.floor((row.ts - sinceWindow) / bucketMs);
       if (idx < 0 || idx >= bucketCount) continue;

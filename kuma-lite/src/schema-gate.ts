@@ -39,19 +39,31 @@ let cached: SchemaCheck | null = null;
 export async function ensureSchema(env: Env): Promise<SchemaCheck> {
   if (cached?.ok) return cached;
 
+  // Dedupe by table so we PRAGMA each table once even when multiple
+  // required columns share it, and run the PRAGMA calls in parallel
+  // so the cold-isolate gate is one round-trip's worth of latency
+  // instead of REQUIRED_COLUMNS.length.
+  const tables = Array.from(new Set(REQUIRED_COLUMNS.map((c) => c.table)));
+  const colsByTable = new Map<string, Set<string> | null>();
+  await Promise.all(
+    tables.map(async (table) => {
+      try {
+        const result = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+        colsByTable.set(table, new Set((result.results ?? []).map((r) => r.name)));
+      } catch (err) {
+        // The table itself might be missing on a totally fresh DB.
+        // Treat that as a missing-column signal rather than crashing
+        // the gate.
+        colsByTable.set(table, null);
+        console.error(`schema gate: PRAGMA table_info(${table}) failed`, err);
+      }
+    }),
+  );
+
   const missing: string[] = [];
   for (const { table, column } of REQUIRED_COLUMNS) {
-    try {
-      const result = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
-      const cols = new Set((result.results ?? []).map((r) => r.name));
-      if (!cols.has(column)) missing.push(`${table}.${column}`);
-    } catch (err) {
-      // The table itself might be missing on a totally fresh DB.
-      // Treat that as a missing-column signal rather than crashing
-      // the gate.
-      missing.push(`${table}.${column}`);
-      console.error(`schema gate: PRAGMA table_info(${table}) failed`, err);
-    }
+    const cols = colsByTable.get(table);
+    if (!cols || !cols.has(column)) missing.push(`${table}.${column}`);
   }
   const next: SchemaCheck = { ok: missing.length === 0, missing };
   if (next.ok) cached = next; // cache only successful results so we self-heal

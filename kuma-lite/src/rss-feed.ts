@@ -43,17 +43,40 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
   const monitors = monitorsResult.results ?? [];
 
   const incidents: Incident[] = [];
-  for (const monitor of monitors) {
+  if (monitors.length > 0) {
+    const ids = monitors.map((m) => m.id);
+    const placeholders = ids.map(() => '?').join(',');
+    // One round-trip for every monitor's checks instead of N. Also pulled
+    // SELECT down to the columns deriveIncidents actually reads — most
+    // notably skipping `healthz_components` (up to 8 KB of JSON per row,
+    // unused on this path).
+    type FeedRow = Pick<
+      CheckRow,
+      'monitor_id' | 'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
+    >;
     const checksResult = await env.DB.prepare(
-      `SELECT * FROM checks
-         WHERE monitor_id = ? AND ts >= ?
-         ORDER BY ts ASC`,
+      `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance
+         FROM checks
+        WHERE ts >= ? AND monitor_id IN (${placeholders})
+        ORDER BY monitor_id ASC, ts ASC`,
     )
-      .bind(monitor.id, since)
-      .all<CheckRow>();
-    const checks = checksResult.results ?? [];
-    const monitorIncidents = deriveIncidents(monitor, checks);
-    for (const inc of monitorIncidents) incidents.push(inc);
+      .bind(since, ...ids)
+      .all<FeedRow>();
+    const rows = checksResult.results ?? [];
+    const checksByMonitor = new Map<number, FeedRow[]>();
+    for (const row of rows) {
+      let arr = checksByMonitor.get(row.monitor_id);
+      if (!arr) {
+        arr = [];
+        checksByMonitor.set(row.monitor_id, arr);
+      }
+      arr.push(row);
+    }
+    for (const monitor of monitors) {
+      const checks = checksByMonitor.get(monitor.id) ?? [];
+      const monitorIncidents = deriveIncidents(monitor, checks);
+      for (const inc of monitorIncidents) incidents.push(inc);
+    }
   }
 
   // Most recent incidents first; cap to MAX_ITEMS.
@@ -73,13 +96,18 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
   });
 }
 
+type IncidentCheck = Pick<
+  CheckRow,
+  'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
+>;
+
 /**
  * Walk per-monitor checks chronologically and emit one incident per
  * transition that crossed `retry_threshold` consecutive failures. The
  * threshold mirrors the live notifier in monitor.ts so RSS items only
  * fire for the same events that triggered Slack/Discord alerts.
  */
-function deriveIncidents(monitor: Monitor, checks: CheckRow[]): Incident[] {
+function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] {
   const out: Incident[] = [];
   const threshold = Math.max(1, monitor.retry_threshold ?? 1);
   let consecFails = 0;
