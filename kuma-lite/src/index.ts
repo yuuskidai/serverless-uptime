@@ -1,4 +1,5 @@
 import { handleApiRequest } from './api';
+import { withEdgeCache } from './edge-cache';
 import { renderIncidentPage } from './incident-page';
 import { cleanupOldChecks, runChecks } from './monitor';
 import { renderRssFeed } from './rss-feed';
@@ -73,15 +74,15 @@ export default {
     }
 
     if (url.pathname === '/' || url.pathname === '/status') {
-      return renderStatusPage(env, url);
+      return withEdgeCache(req, ctx, () => renderStatusPage(env, url));
     }
 
     if (url.pathname === '/incident') {
-      return renderIncidentPage(env, url);
+      return withEdgeCache(req, ctx, () => renderIncidentPage(env, url));
     }
 
     if (url.pathname === '/rss.xml' || url.pathname === '/feed') {
-      return renderRssFeed(env, url);
+      return withEdgeCache(req, ctx, () => renderRssFeed(env, url));
     }
 
     return new Response('Not found', { status: 404 });
