@@ -118,7 +118,6 @@ interface MonitorView {
   latestReason: string | null;
   /** Latest healthz components (already parsed). */
   latestComponents: ComponentHealth[];
-  latestVersion: string | null;
   maintenance: MaintenanceView | null;
 }
 
@@ -154,7 +153,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
 
   const latestResult = await env.DB.prepare(
-    `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components, c.healthz_version
+    `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
        FROM checks c
        JOIN (
          SELECT monitor_id, MAX(ts) AS max_ts
@@ -170,7 +169,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       ts: number;
       healthz_reason: string | null;
       healthz_components: string | null;
-      healthz_version: string | null;
     }>();
   const latestById = new Map<
     number,
@@ -179,7 +177,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       ts: number;
       healthz_reason: string | null;
       healthz_components: string | null;
-      healthz_version: string | null;
     }
   >();
   for (const row of latestResult.results ?? []) {
@@ -188,7 +185,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       ts: row.ts,
       healthz_reason: row.healthz_reason,
       healthz_components: row.healthz_components,
-      healthz_version: row.healthz_version,
     });
   }
 
@@ -297,7 +293,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       buckets,
       latestReason: latest?.healthz_reason ?? null,
       latestComponents: parseComponents(latest?.healthz_components ?? null),
-      latestVersion: latest?.healthz_version ?? null,
       maintenance,
     };
   });
@@ -787,18 +782,13 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 
   const reasonLine = renderLatestReason(view);
   const componentsBlock = renderComponents(view.latestComponents);
-  const versionPill = view.latestVersion
-    ? `<span class="ml-2 inline-flex items-center gap-1 text-[10px] font-mono text-slate-500" title="ビルド識別子">
-         <span class="w-1 h-1 rounded-full bg-slate-600"></span>${escapeHtml(view.latestVersion)}
-       </span>`
-    : '';
 
   return `
     <article class="glass rounded-2xl p-5">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0 flex-1">
-          <h2 class="font-semibold text-slate-100 truncate inline-flex items-baseline">
-            ${escapeHtml(view.monitor.name)}${versionPill}
+          <h2 class="font-semibold text-slate-100 truncate">
+            ${escapeHtml(view.monitor.name)}
           </h2>
           ${descriptionLine}
           ${(() => {
