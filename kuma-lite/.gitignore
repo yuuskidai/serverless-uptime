@@ -6,3 +6,10 @@ node_modules/
 dist/
 .env
 .env.local
+
+# Internal-only documentation. Operator runbooks and integration
+# specs name the Cloudflare account id, D1 database UUID, and the
+# service hostnames specific to this deployment. They have no value
+# to public readers / forkers of this fork; keep them local.
+docs/ops-*.md
+docs/integration-spec.md
