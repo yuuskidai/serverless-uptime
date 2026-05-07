@@ -6,10 +6,16 @@ compatibility_flags = ["nodejs_compat"]
 # Workers Logs (Observability). Captures console logs and runtime metadata
 # for every invocation, viewable in the Cloudflare dashboard under
 # Workers & Pages → kuma-lite → Logs. Free plan retains 3 days of logs;
-# paid plans retain 7 days. head_sampling_rate = 1 keeps 100% of requests.
+# paid plans retain 7 days.
+#
+# head_sampling_rate only applies to fetch invocations — scheduled (cron)
+# invocations are always recorded at 100% regardless of this value. Sampling
+# the public-page traffic at 10% is enough to spot recurring issues while
+# leaving headroom against the 20M-logs/month included quota when /status
+# gets linked publicly.
 [observability]
 enabled = true
-head_sampling_rate = 1
+head_sampling_rate = 0.1
 
 # D1 database binding. Run `wrangler d1 create kuma-lite-db` and paste the
 # returned database_id below before deploying.
