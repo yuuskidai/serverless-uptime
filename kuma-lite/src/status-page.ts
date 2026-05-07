@@ -80,6 +80,19 @@ type BucketState = 'up' | 'down' | 'partial' | 'maintenance' | 'none';
  */
 type EffectiveState = 'up' | 'degraded' | 'down' | 'maintenance';
 
+// Aggregate per-bucket counts on the database side. Without this, a 30-day
+// window with one-minute checks would pull tens of thousands of rows back
+// into the Worker just to bucket them in JS. Maintenance checks are
+// separated so the bar can be coloured blue and excluded from uptime %.
+interface BucketRow {
+  monitor_id: number;
+  bucket_idx: number;
+  total: number;
+  ups: number;
+  downs: number;
+  maints: number;
+}
+
 interface BucketView {
   index: number;
   fromMs: number;
@@ -122,17 +135,37 @@ interface MonitorView {
 }
 
 export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
-  const now = Date.now();
+  const renderStartedAt = Date.now();
+  const now = renderStartedAt;
   const scale = parseScale(url.searchParams.get('scale'));
   const config = SCALES[scale];
   const windowMs = config.ms;
   const bucketCount = config.buckets;
   const bucketMs = Math.floor(windowMs / bucketCount);
-  const sinceWindow = now - windowMs;
+  // For the 30-day scale we anchor the window to UTC midnight so the
+  // 30 daily buckets line up exactly with `daily_summary.day_ms`
+  // entries (one row per past day, plus a raw scan for today). Other
+  // scales keep the rolling-from-now anchor that the bar visualisation
+  // was originally designed around.
+  const useDailySummary = scale === '30d';
+  const todayMidnight = Math.floor(now / 86_400_000) * 86_400_000;
+  const sinceWindow = useDailySummary
+    ? todayMidnight - (bucketCount - 1) * 86_400_000
+    : now - windowMs;
 
   const hidden = parseHidden(env.HIDDEN_MONITOR_IDS);
 
-  const monitorsResult = await env.DB.prepare(
+  // Bind the read-only render path to a Sessions API session so D1
+  // can route subsequent reads to the nearest replica when the
+  // database has read replication enabled. Public status views
+  // tolerate a few seconds of staleness — the cron writes once per
+  // minute and the page auto-refreshes on the same cadence — so
+  // 'first-unconstrained' (first query goes anywhere, replicas after)
+  // is safe. With replication disabled (current default), all reads
+  // still hit the primary and behaviour is unchanged.
+  const db = env.DB.withSession('first-unconstrained');
+
+  const monitorsResult = await db.prepare(
     `SELECT * FROM monitors WHERE enabled = 1 ORDER BY id ASC`,
   ).all<Monitor>();
   const monitors = (monitorsResult.results ?? []).filter((m) => !hidden.has(m.id));
@@ -144,32 +177,78 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const ids = monitors.map((m) => m.id);
   const placeholders = ids.map(() => '?').join(',');
 
-  const statesResult = await env.DB.prepare(
-    `SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`,
-  )
-    .bind(...ids)
-    .all<MonitorState>();
+  // BucketRow / LatestRow / ErrRow are declared at module scope so the
+  // 30d-summary helper below can name them without duplicating shapes.
+  type LatestRow = {
+    monitor_id: number;
+    latency_ms: number | null;
+    ts: number;
+    healthz_reason: string | null;
+    healthz_components: string | null;
+  };
+  type ErrRow = {
+    monitor_id: number;
+    error: string | null;
+    status_code: number | null;
+    healthz_reason: string | null;
+    ts: number;
+  };
+
+  // Fan out the four monitor-id-dependent reads in parallel. They are
+  // independent of each other and previously ran sequentially, stacking
+  // four D1 round-trips on the hot path. Running them concurrently
+  // collapses that to a single round-trip's worth of wall time.
+  // The error-sample query is gated by scale (see SAMPLE_ERROR_MAX_SCALE_MS
+  // for why); when we skip it we resolve to null in place.
+  const dbStartedAt = Date.now();
+  const [statesResult, latestResult, aggregateResult, errResult] = await Promise.all([
+    db.prepare(`SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`)
+      .bind(...ids)
+      .all<MonitorState>(),
+    db.prepare(
+      `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
+         FROM checks c
+         JOIN (
+           SELECT monitor_id, MAX(ts) AS max_ts
+             FROM checks
+            WHERE monitor_id IN (${placeholders})
+            GROUP BY monitor_id
+         ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
+    )
+      .bind(...ids)
+      .all<LatestRow>(),
+    useDailySummary
+      ? loadDailySummaryAggregate(db, ids, placeholders, sinceWindow, todayMidnight, bucketCount)
+      : db
+          .prepare(
+            `SELECT monitor_id,
+                    CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
+                    SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
+                    SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
+               FROM checks
+              WHERE ts >= ? AND monitor_id IN (${placeholders})
+              GROUP BY monitor_id, bucket_idx`,
+          )
+          .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
+          .all<BucketRow>(),
+    windowMs <= SAMPLE_ERROR_MAX_SCALE_MS
+      ? db.prepare(
+          `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
+            WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
+                  AND monitor_id IN (${placeholders})
+            ORDER BY ts DESC
+            LIMIT 5000`,
+        )
+          .bind(sinceWindow, ...ids)
+          .all<ErrRow>()
+      : Promise.resolve(null),
+  ]);
+
   const stateById = new Map<number, MonitorState>();
   for (const row of statesResult.results ?? []) stateById.set(row.monitor_id, row);
 
-  const latestResult = await env.DB.prepare(
-    `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
-       FROM checks c
-       JOIN (
-         SELECT monitor_id, MAX(ts) AS max_ts
-           FROM checks
-          WHERE monitor_id IN (${placeholders})
-          GROUP BY monitor_id
-       ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
-  )
-    .bind(...ids)
-    .all<{
-      monitor_id: number;
-      latency_ms: number | null;
-      ts: number;
-      healthz_reason: string | null;
-      healthz_components: string | null;
-    }>();
   const latestById = new Map<
     number,
     {
@@ -188,31 +267,6 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     });
   }
 
-  // Aggregate per-bucket counts on the database side. Without this, a 30-day
-  // window with one-minute checks would pull tens of thousands of rows back
-  // into the Worker just to bucket them in JS. Maintenance checks are
-  // separated so the bar can be coloured blue and excluded from uptime %.
-  type BucketRow = {
-    monitor_id: number;
-    bucket_idx: number;
-    total: number;
-    ups: number;
-    downs: number;
-    maints: number;
-  };
-  const aggregateResult = await env.DB.prepare(
-    `SELECT monitor_id,
-            CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
-            COUNT(*) AS total,
-            SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
-            SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
-            SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
-       FROM checks
-      WHERE ts >= ? AND monitor_id IN (${placeholders})
-      GROUP BY monitor_id, bucket_idx`,
-  )
-    .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
-    .all<BucketRow>();
   const bucketsByMonitor = new Map<number, Map<number, BucketRow>>();
   for (const row of aggregateResult.results ?? []) {
     let m = bucketsByMonitor.get(row.monitor_id);
@@ -231,23 +285,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   // healthz_reason takes precedence when present so the tooltip uses
   // the business-language reason from the monitored site verbatim.
   const sampleLabelByKey = new Map<string, string>();
-  if (windowMs <= SAMPLE_ERROR_MAX_SCALE_MS) {
-    type ErrRow = {
-      monitor_id: number;
-      error: string | null;
-      status_code: number | null;
-      healthz_reason: string | null;
-      ts: number;
-    };
-    const errResult = await env.DB.prepare(
-      `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
-        WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
-              AND monitor_id IN (${placeholders})
-        ORDER BY ts DESC
-        LIMIT 5000`,
-    )
-      .bind(sinceWindow, ...ids)
-      .all<ErrRow>();
+  if (errResult) {
     for (const row of errResult.results ?? []) {
       const idx = Math.floor((row.ts - sinceWindow) / bucketMs);
       if (idx < 0 || idx >= bucketCount) continue;
@@ -273,6 +311,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       sinceWindow,
       bucketMs,
       bucketCount,
+      now,
     );
     let totalChecks = 0;
     let totalUps = 0;
@@ -297,9 +336,109 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     };
   });
 
+  const dbMs = Date.now() - dbStartedAt;
   const overall = computeOverall(views);
   const html = renderShell('Status', renderBody(views, overall, now, scale), now, scale);
+  // Structured timing line for Workers Logs. Sampled at the deployment
+  // level (head_sampling_rate=0.1) so the overhead stays bounded even
+  // when /status is linked publicly. The keys mirror those used by the
+  // other render paths for cross-route comparison.
+  console.log(
+    JSON.stringify({
+      route: 'status',
+      scale,
+      monitors: monitors.length,
+      dbMs,
+      totalMs: Date.now() - renderStartedAt,
+    }),
+  );
   return htmlResponse(html);
+}
+
+/**
+ * 30-day aggregate variant that reads pre-computed daily totals from
+ * `daily_summary` (one row per past full day) plus a small raw scan
+ * for today's partial bucket. Returns the same `{results: BucketRow[]}`
+ * shape as the raw aggregate query so the caller stays uniform.
+ *
+ * Past 29 buckets come from summary rows keyed by UTC-midnight `day_ms`;
+ * bucket index is `(day_ms - sinceWindow) / 86_400_000` because
+ * sinceWindow is also UTC-midnight aligned for this scale. The 30th
+ * bucket (today, partial) is filled from a per-monitor count over the
+ * 1,440 raw rows worst-case — one cron tick per minute since midnight.
+ *
+ * If summary has gaps (e.g. fresh deploy before the cleanup cron runs
+ * for the first time, despite the migration's seed insert), affected
+ * buckets render as "no data" rather than crashing the page.
+ */
+async function loadDailySummaryAggregate(
+  db: D1DatabaseSession,
+  ids: number[],
+  placeholders: string,
+  sinceWindow: number,
+  todayMidnight: number,
+  bucketCount: number,
+): Promise<{ results: BucketRow[] }> {
+  type SummaryRow = {
+    monitor_id: number;
+    day_ms: number;
+    ups: number;
+    downs: number;
+    maints: number;
+  };
+  type TodayRow = {
+    monitor_id: number;
+    total: number;
+    ups: number;
+    downs: number;
+    maints: number;
+  };
+  const [summaryResult, todayResult] = await Promise.all([
+    db
+      .prepare(
+        `SELECT monitor_id, day_ms, ups, downs, maints
+           FROM daily_summary
+          WHERE day_ms >= ? AND day_ms < ? AND monitor_id IN (${placeholders})`,
+      )
+      .bind(sinceWindow, todayMidnight, ...ids)
+      .all<SummaryRow>(),
+    db
+      .prepare(
+        `SELECT monitor_id,
+                COUNT(*) AS total,
+                SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
+                SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
+                SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
+           FROM checks
+          WHERE ts >= ? AND monitor_id IN (${placeholders})
+          GROUP BY monitor_id`,
+      )
+      .bind(todayMidnight, ...ids)
+      .all<TodayRow>(),
+  ]);
+  const out: BucketRow[] = [];
+  for (const row of summaryResult.results ?? []) {
+    out.push({
+      monitor_id: row.monitor_id,
+      bucket_idx: Math.floor((row.day_ms - sinceWindow) / 86_400_000),
+      total: row.ups + row.downs + row.maints,
+      ups: row.ups,
+      downs: row.downs,
+      maints: row.maints,
+    });
+  }
+  const todayBucketIdx = bucketCount - 1;
+  for (const row of todayResult.results ?? []) {
+    out.push({
+      monitor_id: row.monitor_id,
+      bucket_idx: todayBucketIdx,
+      total: row.total,
+      ups: row.ups,
+      downs: row.downs,
+      maints: row.maints,
+    });
+  }
+  return { results: out };
 }
 
 function parseMaintenance(state: MonitorState | undefined, now: number): MaintenanceView | null {
@@ -354,11 +493,17 @@ function buildBuckets(
   sinceWindow: number,
   bucketMs: number,
   bucketCount: number,
+  now: number,
 ): BucketView[] {
   const out: BucketView[] = [];
   for (let i = 0; i < bucketCount; i++) {
     const fromMs = sinceWindow + i * bucketMs;
-    const toMs = sinceWindow + (i + 1) * bucketMs;
+    let toMs = sinceWindow + (i + 1) * bucketMs;
+    // The last bucket can extend past `now` when bucket boundaries are
+    // anchored to a calendar grid (e.g. 30d scale anchored to UTC
+    // midnight). Cap the rendered end so the right-edge date label and
+    // the bucket-range tooltip don't claim future timestamps.
+    if (i === bucketCount - 1 && toMs > now) toMs = now;
     const row = rows.get(i);
     let state: BucketState = 'none';
     if (row && row.total > 0) {
@@ -1134,7 +1279,11 @@ function htmlResponse(html: string): Response {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=15',
+      // 50s — comfortably under the 60s cron cycle and auto-refresh
+      // (which fires at minute boundary + 5s buffer), so the cache hit
+      // window absorbs burst traffic between cron writes without ever
+      // serving a page older than the next render would have produced.
+      'Cache-Control': 'public, max-age=50',
     },
   });
 }
