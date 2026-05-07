@@ -12,6 +12,16 @@ export interface Env {
   SLACK_BOT_TOKEN?: string;
   SLACK_SIGNING_SECRET?: string;
   SLACK_DEFAULT_CHANNEL?: string;
+
+  // Service bindings for monitored Workers that share the same
+  // Cloudflare account. A bare fetch() to a same-account *.workers.dev
+  // URL is rejected by the runtime with `error code: 1042` (same-zone
+  // recursion guard), so for those targets we route the probe through
+  // an explicit service binding declared in wrangler.toml. The binding
+  // name on a `monitors` row (`monitors.service_binding`) is looked up
+  // here at probe time.
+  PARTNER_PORTAL?: Fetcher;
+  CORE_OS?: Fetcher;
 }
 
 /**
@@ -51,6 +61,16 @@ export interface Monitor {
    * still responding" from "site fully down".
    */
   fallback_url: string | null;
+  /**
+   * Optional name of a service binding declared in wrangler.toml
+   * (e.g., `"PARTNER_PORTAL"`). When set, the probe routes through
+   * `env[service_binding].fetch(...)` instead of the global `fetch`.
+   * Required for monitored Workers that share the same Cloudflare
+   * account as kuma-lite, since same-zone subrequests via
+   * `*.workers.dev` are blocked by the runtime with `error code:
+   * 1042`. NULL for cross-account / non-Cloudflare targets.
+   */
+  service_binding: string | null;
   method: string;
   expected_status: number;
   keyword: string | null;

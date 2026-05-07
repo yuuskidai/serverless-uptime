@@ -37,7 +37,7 @@ function isDue(monitor: Monitor, now: number): boolean {
 }
 
 async function checkAndRecord(env: Env, monitor: Monitor, ts: number): Promise<void> {
-  const result = await performCheck(monitor);
+  const result = await performCheck(env, monitor);
   const inMaintenance = isInsideMaintenance(result.maintenance, ts);
 
   await env.DB.prepare(
@@ -83,8 +83,14 @@ async function checkAndRecord(env: Env, monitor: Monitor, ts: number): Promise<v
  * succeeds while /healthz failed, we record `degraded` so the badge
  * surfaces the problem without firing a full DOWN alert.
  */
-export async function performCheck(monitor: Monitor): Promise<CheckResult> {
-  const primary = await probe(monitor.url, monitor.method || 'GET', monitor.timeout_ms ?? 10_000);
+export async function performCheck(env: Env, monitor: Monitor): Promise<CheckResult> {
+  const fetcher = resolveFetcher(env, monitor);
+  const primary = await probe(
+    fetcher,
+    monitor.url,
+    monitor.method || 'GET',
+    monitor.timeout_ms ?? 10_000,
+  );
 
   // Path A: primary returned a body we could parse as the spec'd JSON.
   if (primary.parsedHealthz) {
@@ -102,6 +108,7 @@ export async function performCheck(monitor: Monitor): Promise<CheckResult> {
   // URL if one is configured.
   if (monitor.fallback_url) {
     const fb = await probe(
+      fetcher,
       monitor.fallback_url,
       monitor.method || 'GET',
       monitor.timeout_ms ?? 10_000,
@@ -161,13 +168,50 @@ interface ProbeOutcome {
   error: string | null;
 }
 
-async function probe(url: string, method: string, timeoutMs: number): Promise<ProbeOutcome> {
+/**
+ * Pick the fetch implementation used to probe a given monitor.
+ *
+ * For monitored Workers that share the same Cloudflare account as
+ * kuma-lite, a bare `fetch()` to their `*.workers.dev` URL is
+ * blocked by the runtime with `error code: 1042` (same-zone
+ * recursion guard) — the request never reaches the destination, no
+ * Cloudflare Access policy or DNS trick can rescue it. The
+ * documented escape hatch is a service binding declared in
+ * wrangler.toml. The `monitors.service_binding` column names which
+ * binding to use; we look it up on `env` and use that binding's
+ * `.fetch()` method, which is API-compatible with the global
+ * fetch.
+ *
+ * If the binding name doesn't resolve (typo, or wrangler.toml
+ * hasn't shipped the binding yet), we fall back to global `fetch`.
+ * The probe will then likely fail with whatever the runtime gives
+ * back (1042 for same-zone targets), which is a clearer signal than
+ * silently skipping the check.
+ */
+function resolveFetcher(env: Env, monitor: Monitor): Fetcher {
+  if (!monitor.service_binding) return { fetch: globalThis.fetch.bind(globalThis) } as Fetcher;
+  const bound = (env as unknown as Record<string, Fetcher | undefined>)[monitor.service_binding];
+  if (!bound) {
+    console.warn(
+      `monitor ${monitor.id} references service_binding=${monitor.service_binding} but no such binding exists on env; falling back to global fetch`,
+    );
+    return { fetch: globalThis.fetch.bind(globalThis) } as Fetcher;
+  }
+  return bound;
+}
+
+async function probe(
+  fetcher: Fetcher,
+  url: string,
+  method: string,
+  timeoutMs: number,
+): Promise<ProbeOutcome> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const start = Date.now();
 
   try {
-    const response = await fetch(url, {
+    const response = await fetcher.fetch(url, {
       method,
       signal: controller.signal,
       redirect: 'follow',

@@ -298,6 +298,7 @@ RSS リーダーは `<head>` の `<link rel="alternate" type="application/rss+xm
 | `url`              | string   | —       | 必須、`http(s)://…` のみ受け付け。構造化 `/healthz` を返すサイトでは末尾を `/healthz` にしておく |
 | `description`      | string   | `null`  | 任意。業務機能名や説明文 (例: `ログイン・認証 API`)。最大 500 文字。ステータスページのカードと障害詳細ページに `name` の下に表示され、非技術者でも何のサービスか把握しやすくなる |
 | `fallback_url`     | string   | `null`  | 任意、`http(s)://…`。`url` が JSON で応答しない／到達不能のときに代わりにプローブする。構造化ヘルスチェックが落ちてもサイト本体の死活監視を継続できる |
+| `service_binding`  | string   | `null`  | 任意。同一 Cloudflare アカウント内の別 Worker を監視するときに、`wrangler.toml` で宣言した service binding 名（例: `PARTNER_PORTAL`）を指定。同一アカウント内 Worker への bare fetch は Cloudflare ランタイムが `error code: 1042` で遮断するため、その回避手段として使う。binding 自体は `wrangler.toml` 側で `[[services]]` を追加し再デプロイ後に有効になる |
 | `method`           | string   | `GET`   |                                      |
 | `expected_status`  | number   | `200`   |                                      |
 | `keyword`          | string   | `null`  | 指定時はレスポンスに含まれる必要あり |
@@ -324,6 +325,46 @@ npx wrangler dev
 # Cron ハンドラを手動で発火：
 curl "http://localhost:8787/__scheduled?cron=*+*+*+*+*"
 ```
+
+## 同一 Cloudflare アカウント内の Worker を監視する場合
+
+監視対象が kuma-lite と同じ Cloudflare アカウントの Worker の場合、bare
+`fetch()` で `*.workers.dev` URL を叩くと Cloudflare ランタイムが
+`error code: 1042` (同一 zone 再帰防止ガード) を返して失敗します。
+これは Cloudflare Access の Bypass を設定しても回避できません。
+
+回避策: `wrangler.toml` で対象 Worker への service binding を宣言し、
+monitor row の `service_binding` 列に binding 名をセットします。
+
+### 1. `wrangler.toml` に binding を追加
+
+```toml
+[[services]]
+binding = "PARTNER_PORTAL"
+service = "partner-portal"   # 対象 Worker の名前 (dashboard で確認)
+
+[[services]]
+binding = "CORE_OS"
+service = "core-os"
+```
+
+### 2. デプロイ
+
+`master` への push で Cloudflare Workers Builds が自動デプロイします。
+Binding はデプロイ完了後に有効になります。
+
+### 3. monitor 側で binding を指定
+
+```bash
+curl -X PATCH https://kuma-lite.opus-system.workers.dev/api/monitors/5 \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"service_binding": "PARTNER_PORTAL"}'
+```
+
+`url` は引き続き元の URL (`https://partner-portal.opus-system.workers.dev/healthz`)
+で OK。Service binding は HTTP path / method / headers をそのまま転送
+するため、コード側の変更は不要です。
 
 ## 既存環境を `/healthz` 構造化監視に切り替える手順
 
