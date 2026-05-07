@@ -16,6 +16,13 @@ CREATE TABLE IF NOT EXISTS monitors (
   -- retries against `fallback_url` to distinguish "app-layer healthz
   -- broken but site still serves" from "site fully down". Optional.
   fallback_url TEXT,
+  -- Optional service binding name (e.g., "PARTNER_PORTAL") declared
+  -- in wrangler.toml. When set, the probe routes through
+  -- env[service_binding].fetch(...) instead of global fetch().
+  -- Required for monitored Workers that share the same Cloudflare
+  -- account as kuma-lite, since same-zone *.workers.dev fetches are
+  -- blocked by the runtime with error code 1042.
+  service_binding TEXT,
   method TEXT DEFAULT 'GET',
   expected_status INTEGER DEFAULT 200,
   keyword TEXT,
