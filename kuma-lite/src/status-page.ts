@@ -343,6 +343,11 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   // level (head_sampling_rate=0.1) so the overhead stays bounded even
   // when /status is linked publicly. The keys mirror those used by the
   // other render paths for cross-route comparison.
+  // d1Region / d1Primary come from the Sessions API meta on any one of
+  // the parallel reads — they tell us whether the request was served
+  // from a nearby replica (`d1Primary: false`) or fell back to the
+  // primary (`d1Primary: true`). Operators check this to confirm read
+  // replication is actually routing traffic after enabling auto mode.
   console.log(
     JSON.stringify({
       route: 'status',
@@ -350,6 +355,8 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       monitors: monitors.length,
       dbMs,
       totalMs: Date.now() - renderStartedAt,
+      d1Region: statesResult.meta?.served_by_region ?? null,
+      d1Primary: statesResult.meta?.served_by_primary ?? null,
     }),
   );
   return htmlResponse(html);

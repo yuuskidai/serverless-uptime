@@ -67,6 +67,8 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
       checks: checks.length,
       dbMs,
       totalMs: Date.now() - renderStartedAt,
+      d1Region: checksResult.meta?.served_by_region ?? null,
+      d1Primary: checksResult.meta?.served_by_primary ?? null,
     }),
   );
   return htmlResponse(html, 200);

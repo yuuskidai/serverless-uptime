@@ -99,6 +99,8 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
       incidents: items.length,
       dbMs,
       totalMs: Date.now() - renderStartedAt,
+      d1Region: monitorsResult.meta?.served_by_region ?? null,
+      d1Primary: monitorsResult.meta?.served_by_primary ?? null,
     }),
   );
   return new Response(xml, {
