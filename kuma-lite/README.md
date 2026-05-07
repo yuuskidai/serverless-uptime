@@ -153,11 +153,18 @@ Cloudflare の認証フローに飛びます。承認すると以下のツール
 
 ## セットアップ
 
-### 1. 依存パッケージのインストールと D1 データベースの作成
+### 1. 依存パッケージのインストールと wrangler 設定の作成
 
 ```bash
 cd kuma-lite
 npm install
+cp wrangler.toml.example wrangler.toml
+```
+
+`wrangler.toml` は gitignore されており、各環境の値はローカル限定で管理します。
+テンプレートからコピーした上で、以下の手順で自分の環境の値を埋めていきます。
+
+```bash
 npx wrangler d1 create kuma-lite-db
 ```
 
