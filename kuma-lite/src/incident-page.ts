@@ -1,5 +1,6 @@
 import type { CheckRow, ComponentHealth, Env, Monitor, MonitorState } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
+import { publicFacingUrl } from './url-display';
 
 const TIMEZONE = 'Asia/Tokyo';
 const MAX_ROWS = 200;
@@ -278,10 +279,13 @@ function renderHeader(monitor: Monitor): string {
       <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">状況レポート</p>
       <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-100">${escapeHtml(monitor.name)}</h1>
       ${descriptionLine}
-      <a href="${escapeAttr(monitor.url)}" target="_blank" rel="noopener noreferrer"
+      ${(() => {
+        const display = publicFacingUrl(monitor.url);
+        return `<a href="${escapeAttr(display)}" target="_blank" rel="noopener noreferrer"
          class="mt-1 inline-block text-xs text-slate-500 hover:text-slate-300 transition-colors break-all font-mono">
-        ${escapeHtml(monitor.url)}
-      </a>
+        ${escapeHtml(display)}
+      </a>`;
+      })()}
     </header>
   `;
 }
