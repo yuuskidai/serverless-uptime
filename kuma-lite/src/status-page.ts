@@ -1067,11 +1067,25 @@ function renderClientScript(): string {
        same thing more concisely, so the label is intentionally a no-op
        — kept as a hook in case we want to revive it. */
   }
+  // Once a reload has been triggered, stop ticking. Without this guard
+  // setInterval keeps firing every 250ms while the navigation is in
+  // flight; each tick still sees remainingMs <= 0 and calls reload()
+  // again, which the browser interprets as "cancel the pending
+  // navigation and start a new one." The result is a long string of
+  // (canceled) document requests in DevTools (one per tick) before
+  // the page finally manages to load. The flag closes that loop —
+  // the first reload wins and subsequent ticks are no-ops until the
+  // new page replaces this script entirely.
+  let reloadInFlight = false;
+  let tickHandle = 0;
   function tick() {
+    if (reloadInFlight) return;
     const now = Date.now();
     const remainingMs = target - now;
     if (remainingMs <= 0) {
       if (!isInteracting()) {
+        reloadInFlight = true;
+        if (tickHandle) clearInterval(tickHandle);
         window.location.reload();
         return;
       }
@@ -1086,7 +1100,7 @@ function renderClientScript(): string {
       ring.setAttribute('stroke-dashoffset', String((1 - progress) * RING_LEN));
     }
   }
-  setInterval(tick, 250);
+  tickHandle = setInterval(tick, 250);
   tick();
   ['mousemove', 'mousedown', 'keydown', 'touchstart'].forEach((evt) => {
     document.addEventListener(evt, () => { lastInteractionAt = Date.now(); }, { passive: true });
