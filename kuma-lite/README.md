@@ -153,11 +153,18 @@ Cloudflare の認証フローに飛びます。承認すると以下のツール
 
 ## セットアップ
 
-### 1. 依存パッケージのインストールと D1 データベースの作成
+### 1. 依存パッケージのインストールと wrangler 設定の作成
 
 ```bash
 cd kuma-lite
 npm install
+cp wrangler.toml.example wrangler.toml
+```
+
+`wrangler.toml` は gitignore されており、各環境の値はローカル限定で管理します。
+テンプレートからコピーした上で、以下の手順で自分の環境の値を埋めていきます。
+
+```bash
 npx wrangler d1 create kuma-lite-db
 ```
 
@@ -362,7 +369,7 @@ curl -X PATCH https://kuma-lite.<subdomain>.workers.dev/api/monitors/5 \
   -d '{"service_binding": "PARTNER_PORTAL"}'
 ```
 
-`url` は引き続き元の URL (`https://partner-portal.<subdomain>.workers.dev/healthz`)
+`url` は引き続き元の URL (`https://<your-domain>/healthz`)
 で OK。Service binding は HTTP path / method / headers をそのまま転送
 するため、コード側の変更は不要です。
 
@@ -380,13 +387,13 @@ npx wrangler d1 execute kuma-lite-db \
 npx wrangler deploy
 
 # 3. 既存 monitor の url を /healthz に切り替え、fallback_url にトップ URL を入れる
-#    (例: id=1 が partner-portal.<subdomain>.workers.dev を見ているケース)
+#    (例: id=1 が <your-domain> を見ているケース)
 curl -X PATCH https://kuma-lite.<subdomain>.workers.dev/api/monitors/1 \
   -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://partner-portal.<subdomain>.workers.dev/healthz",
-    "fallback_url": "https://partner-portal.<subdomain>.workers.dev/"
+    "url": "https://<your-domain>/healthz",
+    "fallback_url": "https://<your-domain>/"
   }'
 ```
 

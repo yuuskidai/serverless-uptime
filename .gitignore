@@ -25,7 +25,8 @@ extra/exe-builder/obj
 .vs
 .vscode
 
-# Claude Code agent local state (lock files, transcripts, etc.).
-# Tracked rules for AI-assisted development live in .claude/CLAUDE.md only.
-.claude/*
-!.claude/CLAUDE.md
+# Claude Code agent local state, including the AI assistant's project
+# rules file. Kept local-only because it names internal identifiers
+# (Cloudflare account, D1 database id, deployed Worker URL) that have
+# no value to public readers of this fork.
+.claude/

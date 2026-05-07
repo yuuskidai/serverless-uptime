@@ -6,3 +6,17 @@ node_modules/
 dist/
 .env
 .env.local
+
+# Per-deploy wrangler config. Tracked template lives in
+# wrangler.toml.example; copy it on first checkout, fill in your own
+# values, and keep your real config local-only:
+#
+#   cp wrangler.toml.example wrangler.toml
+wrangler.toml
+
+# Internal-only documentation. Operator runbooks and integration
+# specs name the Cloudflare account id, D1 database UUID, and the
+# service hostnames specific to this deployment. They have no value
+# to public readers / forkers of this fork; keep them local.
+docs/ops-*.md
+docs/integration-spec.md
