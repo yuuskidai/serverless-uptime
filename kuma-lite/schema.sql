@@ -76,6 +76,22 @@ CREATE INDEX IF NOT EXISTS idx_checks_down_recent
   ON checks(monitor_id, ts DESC)
   WHERE status = 'down' AND in_maintenance = 0;
 
+-- Pre-computed per-monitor per-day up/down/maintenance counts. Backs
+-- the 30-day status-page aggregate so the long-scale render reads ~30
+-- rows per monitor instead of scanning every check in the window.
+-- Filled by the daily cleanup cron (see monitor.ts:cleanupOldChecks).
+-- `day_ms` is UTC-midnight ms-epoch of the day this row summarises.
+CREATE TABLE IF NOT EXISTS daily_summary (
+  monitor_id INTEGER NOT NULL,
+  day_ms INTEGER NOT NULL,
+  ups INTEGER NOT NULL DEFAULT 0,
+  downs INTEGER NOT NULL DEFAULT 0,
+  maints INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (monitor_id, day_ms)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_daily_summary_day ON daily_summary(day_ms);
+
 CREATE TABLE IF NOT EXISTS monitor_state (
   monitor_id INTEGER PRIMARY KEY,
   -- Three-valued: 'up' | 'degraded' | 'down'. 'degraded' was added when

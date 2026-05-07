@@ -6,6 +6,7 @@ const TIMEZONE = 'Asia/Tokyo';
 const MAX_ROWS = 200;
 
 export async function renderIncidentPage(env: Env, url: URL): Promise<Response> {
+  const renderStartedAt = Date.now();
   const monitorId = Number.parseInt(url.searchParams.get('monitor_id') ?? '', 10);
   const from = Number.parseInt(url.searchParams.get('from') ?? '', 10);
   const to = Number.parseInt(url.searchParams.get('to') ?? '', 10);
@@ -17,7 +18,12 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     );
   }
 
-  const monitor = await env.DB.prepare(
+  // See status-page.ts for the rationale on 'first-unconstrained' —
+  // incident pages are public, read-only, and tolerate replica lag.
+  const db = env.DB.withSession('first-unconstrained');
+
+  const dbStartedAt = Date.now();
+  const monitor = await db.prepare(
     `SELECT * FROM monitors WHERE id = ?`,
   )
     .bind(monitorId)
@@ -30,29 +36,38 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     );
   }
 
-  const state = await env.DB.prepare(
-    `SELECT * FROM monitor_state WHERE monitor_id = ?`,
-  )
-    .bind(monitorId)
-    .first<MonitorState>();
-
-  const checksResult = await env.DB.prepare(
-    `SELECT * FROM checks
-       WHERE monitor_id = ? AND ts >= ? AND ts < ?
-       ORDER BY ts ASC
-       LIMIT ?`,
-  )
-    .bind(monitorId, from, to, MAX_ROWS)
-    .all<CheckRow>();
+  const [state, checksResult] = await Promise.all([
+    db.prepare(`SELECT * FROM monitor_state WHERE monitor_id = ?`)
+      .bind(monitorId)
+      .first<MonitorState>(),
+    db.prepare(
+      `SELECT * FROM checks
+         WHERE monitor_id = ? AND ts >= ? AND ts < ?
+         ORDER BY ts ASC
+         LIMIT ?`,
+    )
+      .bind(monitorId, from, to, MAX_ROWS)
+      .all<CheckRow>(),
+  ]);
   const checks = checksResult.results ?? [];
   // Maintenance checks aren't incidents — visitors arriving via a bar
   // click should still see the window context, but the failure list and
   // headline drive off real failures only.
   const failures = checks.filter((c) => c.status === 'down' && !c.in_maintenance);
 
+  const dbMs = Date.now() - dbStartedAt;
   const html = shell(
     `${monitor.name} の状況詳細`,
     renderBody({ monitor, state, from, to, failures }),
+  );
+  console.log(
+    JSON.stringify({
+      route: 'incident',
+      monitorId,
+      checks: checks.length,
+      dbMs,
+      totalMs: Date.now() - renderStartedAt,
+    }),
   );
   return htmlResponse(html, 200);
 }
@@ -408,7 +423,8 @@ function htmlResponse(html: string, status: number): Response {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'public, max-age=15',
+      // See status-page.ts for the 50s rationale — same constraint set.
+      'Cache-Control': 'public, max-age=50',
     },
   });
 }

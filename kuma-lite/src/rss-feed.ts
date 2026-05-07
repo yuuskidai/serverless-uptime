@@ -34,10 +34,16 @@ interface Incident {
  * cause description in each item.
  */
 export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
-  const now = Date.now();
+  const renderStartedAt = Date.now();
+  const now = renderStartedAt;
   const since = now - HISTORY_WINDOW_MS;
 
-  const monitorsResult = await env.DB.prepare(
+  // See status-page.ts for the rationale on 'first-unconstrained' —
+  // RSS is a public, read-only feed and tolerates replica lag.
+  const db = env.DB.withSession('first-unconstrained');
+
+  const dbStartedAt = Date.now();
+  const monitorsResult = await db.prepare(
     `SELECT * FROM monitors WHERE enabled = 1 ORDER BY id ASC`,
   ).all<Monitor>();
   const monitors = monitorsResult.results ?? [];
@@ -54,7 +60,7 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
       CheckRow,
       'monitor_id' | 'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
     >;
-    const checksResult = await env.DB.prepare(
+    const checksResult = await db.prepare(
       `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance
          FROM checks
         WHERE ts >= ? AND monitor_id IN (${placeholders})
@@ -79,11 +85,22 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
     }
   }
 
+  const dbMs = Date.now() - dbStartedAt;
+
   // Most recent incidents first; cap to MAX_ITEMS.
   incidents.sort((a, b) => b.startedAt - a.startedAt);
   const items = incidents.slice(0, MAX_ITEMS);
 
   const xml = renderRssXml(items, baseUrl, now, monitors.length);
+  console.log(
+    JSON.stringify({
+      route: 'rss',
+      monitors: monitors.length,
+      incidents: items.length,
+      dbMs,
+      totalMs: Date.now() - renderStartedAt,
+    }),
+  );
   return new Response(xml, {
     status: 200,
     headers: {
