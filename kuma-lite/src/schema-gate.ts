@@ -32,6 +32,7 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'checks', column: 'healthz_status' },
   { table: 'checks', column: 'in_maintenance' },
   { table: 'monitor_state', column: 'maintenance_from' },
+  { table: 'monitor_state', column: 'consecutive_degraded' },
   { table: 'daily_summary', column: 'day_ms' },
 ];
 

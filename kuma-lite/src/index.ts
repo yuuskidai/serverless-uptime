@@ -17,9 +17,10 @@ export type { Env };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Daily cleanup runs in parallel with the minute check so 03:00
+    // UTC isn't a one-minute hole in the bar history.
     if (event.cron === '0 3 * * *') {
       ctx.waitUntil(cleanupOldChecks(env));
-      return;
     }
     // The minute cron writes to `checks` and `monitor_state` using
     // the latest column set; if the migration hasn't been applied,
@@ -33,6 +34,12 @@ export default {
           logSchemaProblem(check, 'scheduled cron');
           return;
         }
+        // Cron triggers fire on the :00 second boundary, which is
+        // also when most upstream cron systems run their minute jobs
+        // — D1 sees its loudest contention right then. Sleep 5s so
+        // probes land at ~:05 and writes finish well inside the
+        // minute, preventing rows from spilling into the next slot.
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
         await runChecks(env);
       })(),
     );
