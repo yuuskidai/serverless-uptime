@@ -128,7 +128,7 @@ type IncidentCheck = Pick<
  */
 function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] {
   const out: Incident[] = [];
-  const threshold = Math.max(1, monitor.retry_threshold ?? 1);
+  const threshold = Math.max(1, monitor.retry_threshold ?? 2);
   let consecFails = 0;
   let inIncident = false;
   let openIncident: Incident | null = null;

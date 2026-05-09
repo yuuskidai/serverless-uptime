@@ -103,6 +103,7 @@ export interface MonitorState {
   monitor_id: number;
   current_status: CheckStatus;
   consecutive_failures: number;
+  consecutive_degraded: number;
   last_notified_at: number | null;
   down_since: number | null;
   /** Slack message ts of the open DOWN alert; null when monitor is up. */

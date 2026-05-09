@@ -99,6 +99,11 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   -- legacy values and are upgraded on the next cron tick.
   current_status TEXT NOT NULL,
   consecutive_failures INTEGER DEFAULT 0,
+  -- Same idea as consecutive_failures, but for DEGRADED ticks. Both
+  -- DOWN and DEGRADED notifications require monitors.retry_threshold
+  -- consecutive observations before firing, so a single-tick spike
+  -- in the shared backend doesn't page on/off every minute.
+  consecutive_degraded INTEGER DEFAULT 0,
   last_notified_at INTEGER,
   down_since INTEGER,
   -- Slack message timestamp (chat.postMessage `ts`) for the open DOWN

@@ -448,17 +448,23 @@ async function reconcileState(
 
   const prevStatus: CheckStatus = previous?.current_status ?? 'up';
   const prevFailures = previous?.consecutive_failures ?? 0;
+  const prevDegraded = previous?.consecutive_degraded ?? 0;
   const prevDownSince = previous?.down_since ?? null;
   const prevNotifiedAt = previous?.last_notified_at ?? null;
   const prevSlackAlertTs = previous?.slack_alert_ts ?? null;
 
   let nextStatus: CheckStatus = prevStatus;
   let nextFailures = prevFailures;
+  let nextDegraded = prevDegraded;
   let nextDownSince = prevDownSince;
   let nextNotifiedAt = prevNotifiedAt;
   let nextSlackAlertTs = prevSlackAlertTs;
 
-  const threshold = Math.max(1, monitor.retry_threshold ?? 1);
+  // The schema default for retry_threshold is 2. The runtime fallback
+  // matches it so a NULL column (e.g. on a legacy row that pre-dates
+  // the column) still smooths over a single-tick spike instead of
+  // paging on the first sample.
+  const threshold = Math.max(1, monitor.retry_threshold ?? 2);
   // Effective status from the latest check, before threshold smoothing:
   //   - binary down → 'down'
   //   - healthz_status === 'degraded' → 'degraded'
@@ -472,6 +478,7 @@ async function reconcileState(
 
   if (result.status === 'down') {
     nextFailures = prevFailures + 1;
+    nextDegraded = 0;
     if (prevStatus !== 'down' && nextFailures >= threshold) {
       nextStatus = 'down';
       nextDownSince = ts;
@@ -490,13 +497,18 @@ async function reconcileState(
     }
   } else if (observed === 'degraded') {
     nextFailures = 0;
-    if (prevStatus === 'up') {
+    nextDegraded = prevDegraded + 1;
+    if (prevStatus === 'up' && nextDegraded >= threshold) {
       nextStatus = 'degraded';
       nextNotifiedAt = ts;
       if (!inMaintenance) {
         await safeNotifyDegraded(env, monitor, buildIncidentDetail(result, '一部の機能が不調'));
       }
     } else if (prevStatus === 'down') {
+      // Recovery from DOWN goes through the up-notify path even
+      // though the new status is DEGRADED. No threshold smoothing —
+      // the open incident already crossed the bar, we just want the
+      // recovery message threaded onto it.
       nextStatus = 'degraded';
       const downDurationMs = prevDownSince ? ts - prevDownSince : 0;
       nextDownSince = null;
@@ -508,6 +520,7 @@ async function reconcileState(
     }
   } else {
     nextFailures = 0;
+    nextDegraded = 0;
     if (prevStatus === 'down') {
       nextStatus = 'up';
       const downDurationMs = prevDownSince ? ts - prevDownSince : 0;
@@ -536,13 +549,15 @@ async function reconcileState(
 
   await env.DB.prepare(
     `INSERT INTO monitor_state (
-       monitor_id, current_status, consecutive_failures, last_notified_at,
-       down_since, slack_alert_ts, maintenance_from, maintenance_to, maintenance_reason
+       monitor_id, current_status, consecutive_failures, consecutive_degraded,
+       last_notified_at, down_since, slack_alert_ts,
+       maintenance_from, maintenance_to, maintenance_reason
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(monitor_id) DO UPDATE SET
        current_status = excluded.current_status,
        consecutive_failures = excluded.consecutive_failures,
+       consecutive_degraded = excluded.consecutive_degraded,
        last_notified_at = excluded.last_notified_at,
        down_since = excluded.down_since,
        slack_alert_ts = excluded.slack_alert_ts,
@@ -554,6 +569,7 @@ async function reconcileState(
       monitor.id,
       nextStatus,
       nextFailures,
+      nextDegraded,
       nextNotifiedAt,
       nextDownSince,
       nextSlackAlertTs,
