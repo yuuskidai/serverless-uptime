@@ -78,6 +78,14 @@ export interface Monitor {
   interval_minutes: number;
   enabled: number;
   retry_threshold: number;
+  /**
+   * Optional latency ceiling (ms). When set, a `degraded` healthz signal
+   * whose measured latency is below this value is treated as `ok` by
+   * kuma-lite. Lets the effective DEGRADED threshold be raised from the
+   * D1 monitor row without modifying the monitored service's source.
+   * NULL = no override (pass healthz status through unchanged).
+   */
+  latency_threshold_ms: number | null;
   created_at: number;
 }
 

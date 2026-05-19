@@ -81,6 +81,7 @@ interface CreateBody {
   interval_minutes?: unknown;
   retry_threshold?: unknown;
   enabled?: unknown;
+  latency_threshold_ms?: unknown;
 }
 
 const DESCRIPTION_MAX_LENGTH = 500;
@@ -121,11 +122,12 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
   const interval = clamp(asInt(body.interval_minutes, 1), 1, 60);
   const retry = clamp(asInt(body.retry_threshold, 2), 1, 10);
   const enabled = asBoolInt(body.enabled, 1);
+  const latencyThreshold = asNullablePositiveInt(body.latency_threshold_ms);
 
   const now = Date.now();
   const result = await env.DB.prepare(
-    `INSERT INTO monitors (name, url, description, fallback_url, service_binding, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO monitors (name, url, description, fallback_url, service_binding, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, latency_threshold_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       name,
@@ -140,6 +142,7 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
       interval,
       enabled,
       retry,
+      latencyThreshold,
       now,
     )
     .run();
@@ -224,6 +227,10 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
     fields.push('enabled = ?');
     values.push(asBoolInt(body.enabled, existing.enabled));
   }
+  if ('latency_threshold_ms' in body) {
+    fields.push('latency_threshold_ms = ?');
+    values.push(asNullablePositiveInt(body.latency_threshold_ms));
+  }
 
   if (fields.length === 0) return jsonError(400, 'no fields to update');
 
@@ -277,6 +284,16 @@ function asString(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const trimmed = v.trim();
   return trimmed.length === 0 ? null : trimmed;
+}
+
+function asNullablePositiveInt(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.trunc(v);
+  if (typeof v === 'string') {
+    const n = Number.parseInt(v, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 
 function asInt(v: unknown, fallback: number): number {
