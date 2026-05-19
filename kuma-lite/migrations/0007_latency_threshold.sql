@@ -1,0 +1,27 @@
+-- 0007_latency_threshold.sql
+--
+-- Add per-monitor latency threshold so kuma-lite can override a
+-- healthz `degraded` signal when the measured latency is still below
+-- an acceptable ceiling.
+--
+-- Background: the monitored service (partner-portal) hard-codes its
+-- own degradedThresholdMs (e.g. 800 ms). kuma-lite receives that
+-- `degraded` signal and fires alerts. When the threshold in the
+-- monitored service is too tight for the deployment environment
+-- (Supabase + Cloudflare Workers round-trip), the only way to raise
+-- it without touching partner-portal's source code is to let
+-- kuma-lite suppress degraded signals whose latency is still below a
+-- per-monitor ceiling configured here.
+--
+-- Behaviour (see monitor.ts:resultFromHealthz):
+--   - latency_threshold_ms IS NULL  → no override; behave as before
+--   - latency_threshold_ms = N      → if healthz says `degraded` AND
+--     latency_ms < N, treat the check as `ok` instead
+--   - healthz `down` is never overridden regardless of latency
+--
+-- Run once against the remote DB:
+--
+--   wrangler d1 execute kuma-lite-db \
+--     --file=./migrations/0007_latency_threshold.sql --remote
+
+ALTER TABLE monitors ADD COLUMN latency_threshold_ms INTEGER DEFAULT NULL;

@@ -287,8 +287,34 @@ function resultFromHealthz(monitor: Monitor, p: ProbeOutcome): CheckResult {
   // Spec §1.3 — JSON wins over HTTP code mismatch. We drive `status`
   // entirely off `healthzStatus`. degraded → still 'up' for binary
   // bookkeeping (the bars stay green); the nuance lives on the badge.
+  //
+  // Per-monitor latency override: if the site reports `degraded` but
+  // the measured round-trip is still below our configured ceiling,
+  // treat this tick as `ok`. This lets the effective DEGRADED
+  // threshold be tuned from kuma-lite's D1 without touching the
+  // monitored service's source. `down` is never overridden.
+  const thresholdMs = monitor.latency_threshold_ms;
+  if (
+    healthzStatus === 'degraded' &&
+    thresholdMs !== null &&
+    p.latencyMs !== null &&
+    p.latencyMs < thresholdMs
+  ) {
+    return {
+      status: 'up',
+      status_code: p.statusCode,
+      latency_ms: p.latencyMs,
+      error: null,
+      healthz_status: 'ok',
+      healthz_reason: null,
+      healthz_components: null,
+      healthz_version: version,
+      used_fallback: false,
+      maintenance,
+    };
+  }
+
   const binary: CheckBinaryStatus = healthzStatus === 'down' ? 'down' : 'up';
-  void monitor; // kept for future per-monitor overrides
   return {
     status: binary,
     status_code: p.statusCode,
