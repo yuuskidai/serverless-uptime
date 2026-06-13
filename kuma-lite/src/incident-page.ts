@@ -40,20 +40,22 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     db.prepare(`SELECT * FROM monitor_state WHERE monitor_id = ?`)
       .bind(monitorId)
       .first<MonitorState>(),
+    // Filter to real failures (down, non-maintenance) at the SQL level —
+    // a window can contain ~1440 checks/day at the default 1-minute
+    // interval, and a plain ORDER BY ts ASC LIMIT here would silently
+    // truncate to the first ~3 hours, hiding any failure that occurred
+    // later in the window. Down checks are rare, so MAX_ROWS effectively
+    // never binds for this query.
     db.prepare(
       `SELECT * FROM checks
-         WHERE monitor_id = ? AND ts >= ? AND ts < ?
+         WHERE monitor_id = ? AND ts >= ? AND ts < ? AND status = 'down' AND in_maintenance = 0
          ORDER BY ts ASC
          LIMIT ?`,
     )
       .bind(monitorId, from, to, MAX_ROWS)
       .all<CheckRow>(),
   ]);
-  const checks = checksResult.results ?? [];
-  // Maintenance checks aren't incidents — visitors arriving via a bar
-  // click should still see the window context, but the failure list and
-  // headline drive off real failures only.
-  const failures = checks.filter((c) => c.status === 'down' && !c.in_maintenance);
+  const failures = checksResult.results ?? [];
 
   const dbMs = Date.now() - dbStartedAt;
   const html = shell(
@@ -64,7 +66,7 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     JSON.stringify({
       route: 'incident',
       monitorId,
-      checks: checks.length,
+      failures: failures.length,
       dbMs,
       totalMs: Date.now() - renderStartedAt,
       d1Region: checksResult.meta?.served_by_region ?? null,
