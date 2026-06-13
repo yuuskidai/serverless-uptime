@@ -91,6 +91,14 @@ interface BucketRow {
   ups: number;
   downs: number;
   maints: number;
+  /**
+   * Longest run of consecutive down (non-maintenance) checks in this
+   * bucket. Only populated for the 30d daily-summary path (past days
+   * from `daily_summary.down_streak`, today from a live computation).
+   * `undefined`/`null` for other scales — buildBuckets falls back to
+   * the pre-streak `downs > 0` rule for those.
+   */
+  down_streak?: number | null;
 }
 
 interface BucketView {
@@ -392,6 +400,7 @@ async function loadDailySummaryAggregate(
     ups: number;
     downs: number;
     maints: number;
+    down_streak: number | null;
   };
   type TodayRow = {
     monitor_id: number;
@@ -399,26 +408,54 @@ async function loadDailySummaryAggregate(
     ups: number;
     downs: number;
     maints: number;
+    down_streak: number;
   };
   const [summaryResult, todayResult] = await Promise.all([
     db
       .prepare(
-        `SELECT monitor_id, day_ms, ups, downs, maints
+        `SELECT monitor_id, day_ms, ups, downs, maints, down_streak
            FROM daily_summary
           WHERE day_ms >= ? AND day_ms < ? AND monitor_id IN (${placeholders})`,
       )
       .bind(sinceWindow, todayMidnight, ...ids)
       .all<SummaryRow>(),
+    // Same "islands" technique as cleanupOldChecks (see monitor.ts), but
+    // for today's still-open day: scoped to a single day so there's no
+    // day_ms grouping, just monitor_id.
     db
       .prepare(
-        `SELECT monitor_id,
+        `WITH today AS (
+           SELECT monitor_id, status, in_maintenance,
+                  CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
+                  ts
+             FROM checks
+            WHERE ts >= ? AND monitor_id IN (${placeholders})
+         ),
+         islands AS (
+           SELECT monitor_id, is_down,
+                  ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY ts)
+                    - SUM(is_down) OVER (PARTITION BY monitor_id ORDER BY ts) AS island_id
+             FROM today
+         ),
+         streaks AS (
+           SELECT monitor_id, MAX(run_len) AS down_streak
+             FROM (
+               SELECT monitor_id, island_id, COUNT(*) AS run_len
+                 FROM islands
+                WHERE is_down = 1
+                GROUP BY monitor_id, island_id
+             )
+            GROUP BY monitor_id
+         )
+         SELECT t.monitor_id,
                 COUNT(*) AS total,
-                SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
-                SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
-                SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
-           FROM checks
-          WHERE ts >= ? AND monitor_id IN (${placeholders})
-          GROUP BY monitor_id`,
+                SUM(CASE WHEN t.status = 'up' AND t.in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
+                SUM(CASE WHEN t.status = 'down' AND t.in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
+                SUM(CASE WHEN t.in_maintenance = 1 THEN 1 ELSE 0 END) AS maints,
+                COALESCE(s.down_streak, 0) AS down_streak
+           FROM today t
+           LEFT JOIN streaks s ON s.monitor_id = t.monitor_id
+          GROUP BY t.monitor_id`,
       )
       .bind(todayMidnight, ...ids)
       .all<TodayRow>(),
@@ -432,6 +469,7 @@ async function loadDailySummaryAggregate(
       ups: row.ups,
       downs: row.downs,
       maints: row.maints,
+      down_streak: row.down_streak,
     });
   }
   const todayBucketIdx = bucketCount - 1;
@@ -443,6 +481,7 @@ async function loadDailySummaryAggregate(
       ups: row.ups,
       downs: row.downs,
       maints: row.maints,
+      down_streak: row.down_streak,
     });
   }
   return { results: out };
@@ -495,7 +534,10 @@ function deriveEffState(
 
 function buildBuckets(
   monitorId: number,
-  rows: Map<number, { ups: number; downs: number; total: number; maints: number }>,
+  rows: Map<
+    number,
+    { ups: number; downs: number; total: number; maints: number; down_streak?: number | null }
+  >,
   sampleLabels: Map<string, string>,
   sinceWindow: number,
   bucketMs: number,
@@ -523,6 +565,12 @@ function buildBuckets(
         state = 'up';
       } else if (row.ups === 0) {
         state = 'down';
+      } else if (row.down_streak != null && row.down_streak < 2) {
+        // A lone down tick that recovered by the next check isn't a
+        // real partial outage — keep the bar green. `down_streak` is
+        // only populated for the 30d daily-summary path; older rows
+        // (NULL) fall back to the pre-streak downs > 0 => partial rule.
+        state = 'up';
       } else {
         state = 'partial';
       }

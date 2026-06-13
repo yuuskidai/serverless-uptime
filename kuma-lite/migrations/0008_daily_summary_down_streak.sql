@@ -1,0 +1,29 @@
+-- 0008_daily_summary_down_streak.sql
+--
+-- Add a per-day "longest consecutive down-tick streak" counter to
+-- daily_summary. The 30-day status bar previously marked a whole day
+-- 'partial' (amber) whenever downs > 0, even if it was a single tick
+-- that recovered within a minute. That reads as "harsh" — the
+-- incident detail page correctly shows it as a <1s blip, but the bar
+-- implies a sustained partial outage for the whole day.
+--
+-- With down_streak populated, the bucket logic (see
+-- status-page.ts:buildBuckets) only colours a day 'partial' when
+-- down_streak >= 2 (i.e. at least two consecutive down checks — a
+-- real outage of >= 2 * interval_minutes). A lone down tick still
+-- shows up green on the bar, but still renders as an incident on the
+-- detail page (unchanged).
+--
+-- NULL on existing rows — those days predate this column and the
+-- underlying checks rows are long pruned past RETENTION_DAYS, so we
+-- can't recompute them. The bucket logic treats NULL as "unknown,
+-- keep prior behaviour" (downs > 0 => partial) and only applies the
+-- single-tick exemption to rows where this is populated (0 or >= 1),
+-- which happens going forward via cleanupOldChecks.
+--
+-- Run once against the remote DB:
+--
+--   wrangler d1 execute kuma-lite-db \
+--     --file=./migrations/0008_daily_summary_down_streak.sql --remote
+
+ALTER TABLE daily_summary ADD COLUMN down_streak INTEGER;

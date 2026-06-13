@@ -693,17 +693,54 @@ export async function cleanupOldChecks(env: Env): Promise<void> {
   // (by a previous cron tick or by the migration's seed insert) are
   // left alone — only newly-completed days get added. Computed first
   // so a prune that races a summary insert can't leave a hole.
+  //
+  // down_streak is the longest run of consecutive down (non-maintenance)
+  // checks that day, computed via the classic "islands" trick: within a
+  // (monitor_id, day_ms) partition ordered by ts, row_number() minus the
+  // running sum of is_down stays constant for a contiguous run of down
+  // ticks and changes whenever an up tick breaks the run. Grouping by
+  // that value and counting gives each run's length; MAX() is the
+  // longest. See status-page.ts:buildBuckets for how this distinguishes
+  // a single-tick blip (down_streak = 1, bar stays green) from a real
+  // outage (down_streak >= 2, bar goes amber).
   const todayMidnight = Math.floor(Date.now() / 86_400_000) * 86_400_000;
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO daily_summary (monitor_id, day_ms, ups, downs, maints)
-     SELECT monitor_id,
-            (ts / 86400000) * 86400000 AS day_ms,
-            SUM(CASE WHEN status = 'up' AND in_maintenance = 0 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END)
-       FROM checks
-      WHERE ts < ?
-      GROUP BY monitor_id, day_ms`,
+    `INSERT OR IGNORE INTO daily_summary (monitor_id, day_ms, ups, downs, maints, down_streak)
+     WITH days AS (
+       SELECT monitor_id,
+              (ts / 86400000) * 86400000 AS day_ms,
+              status,
+              in_maintenance,
+              CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
+              ts
+         FROM checks
+        WHERE ts < ?
+     ),
+     islands AS (
+       SELECT monitor_id, day_ms, is_down,
+              ROW_NUMBER() OVER (PARTITION BY monitor_id, day_ms ORDER BY ts)
+                - SUM(is_down) OVER (PARTITION BY monitor_id, day_ms ORDER BY ts) AS island_id
+         FROM days
+     ),
+     streaks AS (
+       SELECT monitor_id, day_ms, MAX(run_len) AS down_streak
+         FROM (
+           SELECT monitor_id, day_ms, island_id, COUNT(*) AS run_len
+             FROM islands
+            WHERE is_down = 1
+            GROUP BY monitor_id, day_ms, island_id
+         )
+        GROUP BY monitor_id, day_ms
+     )
+     SELECT d.monitor_id,
+            d.day_ms,
+            SUM(CASE WHEN d.status = 'up' AND d.in_maintenance = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN d.status = 'down' AND d.in_maintenance = 0 THEN 1 ELSE 0 END),
+            SUM(CASE WHEN d.in_maintenance = 1 THEN 1 ELSE 0 END),
+            COALESCE(s.down_streak, 0)
+       FROM days d
+       LEFT JOIN streaks s ON s.monitor_id = d.monitor_id AND s.day_ms = d.day_ms
+      GROUP BY d.monitor_id, d.day_ms`,
   )
     .bind(todayMidnight)
     .run();

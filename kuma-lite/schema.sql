@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS daily_summary (
   ups INTEGER NOT NULL DEFAULT 0,
   downs INTEGER NOT NULL DEFAULT 0,
   maints INTEGER NOT NULL DEFAULT 0,
+  -- Longest run of consecutive down (non-maintenance) checks this day.
+  -- The status-page bucket only renders 'partial' (amber) when this is
+  -- >= 2; a lone down tick (down_streak = 1) keeps the bar green even
+  -- though `downs` is 1, since a single-tick blip that self-recovers
+  -- isn't a real partial outage. NULL on rows written before this
+  -- column existed — treated as "unknown, fall back to downs > 0".
+  down_streak INTEGER,
   PRIMARY KEY (monitor_id, day_ms)
 ) WITHOUT ROWID;
 

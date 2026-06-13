@@ -34,6 +34,7 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'monitor_state', column: 'maintenance_from' },
   { table: 'monitor_state', column: 'consecutive_degraded' },
   { table: 'daily_summary', column: 'day_ms' },
+  { table: 'daily_summary', column: 'down_streak' },
 ];
 
 let cached: SchemaCheck | null = null;
