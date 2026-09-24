@@ -523,6 +523,7 @@ async function reconcileState(
             alertTs: nextSlackAlertTs,
             downSince: ts,
             reason: detail.reason,
+            kind: 'down',
           });
         }
       }
@@ -534,7 +535,19 @@ async function reconcileState(
       nextStatus = 'degraded';
       nextNotifiedAt = ts;
       if (!inMaintenance) {
-        await safeNotifyDegraded(env, monitor, buildIncidentDetail(result, '一部の機能が不調'));
+        const detail = buildIncidentDetail(result, '一部の機能が不調');
+        const r = await safeNotifyDegraded(env, monitor, detail);
+        // The DEGRADED alert's ts is only used to thread the RCA reply;
+        // it is not persisted, since recovery threading is DOWN-only.
+        if (r?.slackAlertTs) {
+          await enqueueRca(env, {
+            monitorId: monitor.id,
+            alertTs: r.slackAlertTs,
+            downSince: ts,
+            reason: detail.reason,
+            kind: 'degraded',
+          });
+        }
       }
     } else if (prevStatus === 'down') {
       // Recovery from DOWN goes through the up-notify path even
@@ -629,11 +642,12 @@ async function safeNotifyDegraded(
   env: Env,
   monitor: Monitor,
   detail: IncidentDetail,
-): Promise<void> {
+): Promise<{ slackAlertTs: string | null } | null> {
   try {
-    await notifyDegraded(env, monitor, detail);
+    return await notifyDegraded(env, monitor, detail);
   } catch (err) {
     console.error('notifyDegraded failed:', errorMessage(err));
+    return null;
   }
 }
 

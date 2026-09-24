@@ -19,7 +19,7 @@
 //                       e.g. `MY_API=my-api,OTHER=other-worker`
 //   RCA_QUEUE_NAME    — name of an existing Queue to bind as RCA_QUEUE
 //                       (producer + consumer), plus the Workers AI binding
-//                       `AI`, for AI root-cause analysis of DOWN alerts.
+//                       `AI`, for AI root-cause analysis of DOWN/DEGRADED alerts.
 //                       Empty skips these blocks, so deploys work before
 //                       the queue is created.
 

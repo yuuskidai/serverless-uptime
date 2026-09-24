@@ -73,11 +73,14 @@ export async function notifyDegraded(
   env: Env,
   monitor: Monitor,
   detail: IncidentDetail,
-): Promise<void> {
-  await Promise.allSettled([
+): Promise<NotifyDownResult> {
+  const [, slackResult] = await Promise.allSettled([
     sendDiscordDegraded(env, monitor, detail),
     sendSlackDegraded(env, monitor, detail),
   ]);
+  const slackAlertTs =
+    slackResult.status === 'fulfilled' ? slackResult.value : null;
+  return { slackAlertTs };
 }
 
 // ── Discord ────────────────────────────────────────────────────────────
@@ -227,9 +230,9 @@ async function sendSlackDegraded(
   env: Env,
   monitor: Monitor,
   detail: IncidentDetail,
-): Promise<void> {
+): Promise<string | null> {
   const bot = buildSlackBot(env);
-  if (!bot?.defaultChannelId) return;
+  if (!bot?.defaultChannelId) return null;
 
   const fallback = `🟡 DEGRADED: ${monitor.name} — ${detail.reason}`;
   const blocks: unknown[] = [
@@ -260,7 +263,8 @@ async function sendSlackDegraded(
     ...componentsSlackBlocks(detail.components),
     ...buildContextBlocks(detail.version, null),
   ];
-  await bot.slack.postBlocks(bot.defaultChannelId, { text: fallback, blocks });
+  const result = await bot.slack.postBlocks(bot.defaultChannelId, { text: fallback, blocks });
+  return result.ts || null;
 }
 
 async function sendSlackUp(
