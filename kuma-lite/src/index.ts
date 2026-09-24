@@ -1,6 +1,7 @@
 import { handleApiRequest } from './api';
 import { withEdgeCache } from './edge-cache';
 import { renderIncidentPage } from './incident-page';
+import { handleRcaBatch, type RcaJob } from './rca';
 import { cleanupOldChecks, runChecks } from './monitor';
 import { renderRssFeed } from './rss-feed';
 import {
@@ -43,6 +44,12 @@ export default {
         await runChecks(env);
       })(),
     );
+  },
+
+  // Consumer for RCA_QUEUE: AI root-cause analysis replies to DOWN
+  // alerts, run off the cron path so probes never wait on the LLM.
+  async queue(batch: MessageBatch<RcaJob>, env: Env): Promise<void> {
+    await handleRcaBatch(batch, env);
   },
 
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

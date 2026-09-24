@@ -1,3 +1,5 @@
+import type { RcaJob } from './rca';
+
 export interface Env {
   DB: D1Database;
   DISCORD_WEBHOOK_URL: string;
@@ -12,6 +14,22 @@ export interface Env {
   SLACK_BOT_TOKEN?: string;
   SLACK_SIGNING_SECRET?: string;
   SLACK_DEFAULT_CHANNEL?: string;
+
+  // AI root-cause analysis for DOWN alerts (see rca.ts). Enabled only
+  // when both the RCA_QUEUE and AI bindings are configured; inference
+  // goes through the Workers AI binding so it is billed by Cloudflare.
+  // RCA_MODEL overrides the model (default `@cf/deepseek-ai/deepseek-v4-pro-0813`),
+  // RCA_AI_GATEWAY the AI Gateway id (default `default`). The
+  // Cloudflare API pair adds Workers Logs and deployment history to
+  // the evidence. RCA_WORKER_SCRIPTS is a JSON object mapping monitor
+  // id → Worker script name, e.g. `{"1":"partner-portal"}`.
+  RCA_QUEUE?: Queue<RcaJob>;
+  AI?: Ai;
+  RCA_MODEL?: string;
+  RCA_AI_GATEWAY?: string;
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
+  RCA_WORKER_SCRIPTS?: string;
 
   // Service bindings for monitored Workers that share the same
   // Cloudflare account. A bare fetch() to a same-account *.workers.dev
