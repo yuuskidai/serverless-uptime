@@ -77,8 +77,9 @@ RETENTION_DAYS = "7"
 # AI root-cause analysis for DOWN alerts (optional, see src/rca.ts).
 # Enabled only when the RCA_QUEUE and AI bindings both exist. Inference
 # runs through the Workers AI binding, so it is billed by Cloudflare:
-# third-party models (default `anthropic/claude-opus-5`) use AI Gateway
-# Unified Billing credits; `@cf/...` models are regular Workers AI usage.
+# `@cf/...` models (default `@cf/deepseek-ai/deepseek-v4-pro-0813`) are
+# regular Workers AI usage; third-party models such as
+# `anthropic/claude-opus-5` use AI Gateway Unified Billing credits.
 # Create the queue once with `wrangler queues create kuma-lite-rca`, then
 # uncomment the blocks below (Workers Builds: set RCA_QUEUE_NAME instead —
 # scripts/build-wrangler-toml.mjs appends them for you).
@@ -107,6 +108,7 @@ RETENTION_DAYS = "7"
 #                            get account-wide error logs only.
 #
 # Optional RCA [vars]:
-#   RCA_MODEL        — AI catalog model id (default "anthropic/claude-opus-5";
-#                      e.g. "@cf/openai/gpt-oss-120b" for a Workers AI-hosted model)
+#   RCA_MODEL        — AI catalog model id (default
+#                      "@cf/deepseek-ai/deepseek-v4-pro-0813"; e.g.
+#                      "anthropic/claude-opus-5" to use Claude via Unified Billing)
 #   RCA_AI_GATEWAY   — AI Gateway id to route through (default "default")

@@ -249,12 +249,15 @@ cron の監視処理を LLM 呼び出しで止めないよう、DOWN 通知後�
 推論は Workers AI binding（`env.AI.run`）経由で行うため、請求は Cloudflare に
 一本化されます。
 
-- 既定モデルは `anthropic/claude-opus-5`。AI Gateway の Unified Billing で
-  課金されるため、ダッシュボードの **AI → AI Gateway** でクレジットを事前に
-  チャージしてください（購入額に 5% の手数料、トークン単価は Anthropic と同額）。
-- `RCA_MODEL` で AI カタログの任意のモデルに切り替えられます。
-  `@cf/openai/gpt-oss-120b` などの Workers AI ホストのモデルは通常の
-  Workers AI 利用料として請求され、クレジットのチャージは不要です。
+- 既定モデルは Workers AI 上の `@cf/deepseek-ai/deepseek-v4-pro-0813`
+  （汎用の推論モデル、100 万トークンのコンテキスト、入力 $1.32 / 出力 $3.96
+  per M tokens）。通常の Workers AI 利用料として請求され、Workers Paid プランが
+  必要です。
+- `RCA_MODEL` で AI カタログの任意のモデルに切り替えられます。安く済ませたい
+  場合は `@cf/deepseek-ai/deepseek-v4-flash-0731`、Claude を使いたい場合は
+  `anthropic/claude-opus-5`（AI Gateway の Unified Billing で課金されるため、
+  ダッシュボードの **AI → AI Gateway** でクレジットの事前チャージが必要。
+  購入額に 5% の手数料）。
 - `RCA_AI_GATEWAY` で経由する AI Gateway を指定できます（既定は初回利用時に
   自動作成される `default`）。
 

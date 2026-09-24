@@ -18,7 +18,7 @@ import type { Env, Monitor } from './types';
  * The model is called through the Workers AI binding (`env.AI.run`) so
  * inference lands on the Cloudflare invoice: third-party models such as
  * `anthropic/claude-opus-5` go through AI Gateway Unified Billing, and
- * `@cf/...` models are billed as regular Workers AI usage.
+ * `@cf/...` models (the default) are billed as regular Workers AI usage.
  *
  * The whole feature is opt-in: nothing is enqueued unless the RCA_QUEUE
  * and AI bindings are both configured. Cloudflare API sources are
@@ -35,8 +35,13 @@ export interface RcaJob {
   reason: string;
 }
 
-/** Default model; override with the RCA_MODEL var (any model in the AI catalog). */
-const DEFAULT_MODEL = 'anthropic/claude-opus-5';
+/**
+ * Default model; override with the RCA_MODEL var (any model in the AI
+ * catalog). DeepSeek V4 Pro is a Workers AI-hosted general reasoning
+ * model (1M context) billed as regular Workers AI usage — no prepaid
+ * AI Gateway credits needed, only the Workers Paid plan.
+ */
+const DEFAULT_MODEL = '@cf/deepseek-ai/deepseek-v4-pro-0813';
 /** Third-party models require a gateway; `default` is auto-created on first use. */
 const DEFAULT_GATEWAY = 'default';
 const MAX_OUTPUT_TOKENS = 16000;
@@ -223,7 +228,8 @@ function extractText(response: unknown): string | null {
       .flatMap((c) => (c.type === 'output_text' && c.text ? [c.text] : []))
       .join('\n');
   }
-  text = text.trim();
+  // Some reasoning models inline their chain of thought in the answer.
+  text = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
   return text || null;
 }
 

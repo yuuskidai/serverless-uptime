@@ -18,7 +18,7 @@ export interface Env {
   // AI root-cause analysis for DOWN alerts (see rca.ts). Enabled only
   // when both the RCA_QUEUE and AI bindings are configured; inference
   // goes through the Workers AI binding so it is billed by Cloudflare.
-  // RCA_MODEL overrides the model (default `anthropic/claude-opus-5`),
+  // RCA_MODEL overrides the model (default `@cf/deepseek-ai/deepseek-v4-pro-0813`),
   // RCA_AI_GATEWAY the AI Gateway id (default `default`). The
   // Cloudflare API pair adds Workers Logs and deployment history to
   // the evidence. RCA_WORKER_SCRIPTS is a JSON object mapping monitor
