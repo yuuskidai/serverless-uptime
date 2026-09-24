@@ -75,10 +75,16 @@ RETENTION_DAYS = "7"
 #                            webhooks at /slack/events.
 #
 # AI root-cause analysis for DOWN alerts (optional, see src/rca.ts).
-# Enabled only when the RCA_QUEUE binding and ANTHROPIC_API_KEY both
-# exist. Create the queue once with `wrangler queues create kuma-lite-rca`,
-# then uncomment the two blocks below (Workers Builds: set RCA_QUEUE_NAME
-# instead — scripts/build-wrangler-toml.mjs appends them for you).
+# Enabled only when the RCA_QUEUE and AI bindings both exist. Inference
+# runs through the Workers AI binding, so it is billed by Cloudflare:
+# third-party models (default `anthropic/claude-opus-5`) use AI Gateway
+# Unified Billing credits; `@cf/...` models are regular Workers AI usage.
+# Create the queue once with `wrangler queues create kuma-lite-rca`, then
+# uncomment the blocks below (Workers Builds: set RCA_QUEUE_NAME instead —
+# scripts/build-wrangler-toml.mjs appends them for you).
+#
+#   [ai]
+#   binding = "AI"
 #
 #   [[queues.producers]]
 #   binding = "RCA_QUEUE"
@@ -91,7 +97,6 @@ RETENTION_DAYS = "7"
 #
 # RCA secrets (set via `wrangler secret put`; secrets rather than [vars]
 # so account ids stay out of this public template and survive deploys):
-#   ANTHROPIC_API_KEY      — Claude API key. Required for RCA.
 #   CF_API_TOKEN           — Cloudflare API token with Workers Observability
 #                            Read + Workers Scripts Read. Optional; adds
 #                            Workers Logs errors and deployment history.
@@ -100,3 +105,8 @@ RETENTION_DAYS = "7"
 #                            name, e.g. {"1":"partner-portal"}. Mapped monitors
 #                            get per-script logs + deployments; unmapped ones
 #                            get account-wide error logs only.
+#
+# Optional RCA [vars]:
+#   RCA_MODEL        — AI catalog model id (default "anthropic/claude-opus-5";
+#                      e.g. "@cf/openai/gpt-oss-120b" for a Workers AI-hosted model)
+#   RCA_AI_GATEWAY   — AI Gateway id to route through (default "default")

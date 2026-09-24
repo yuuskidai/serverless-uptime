@@ -18,9 +18,10 @@
 //                       skips appending any service binding section.
 //                       e.g. `MY_API=my-api,OTHER=other-worker`
 //   RCA_QUEUE_NAME    — name of an existing Queue to bind as RCA_QUEUE
-//                       (producer + consumer) for AI root-cause analysis
-//                       of DOWN alerts. Empty skips the queue blocks, so
-//                       deploys work before the queue is created.
+//                       (producer + consumer), plus the Workers AI binding
+//                       `AI`, for AI root-cause analysis of DOWN alerts.
+//                       Empty skips these blocks, so deploys work before
+//                       the queue is created.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -76,6 +77,7 @@ if (rcaQueue) {
   content =
     content.trimEnd() +
     '\n\n' +
+    `[ai]\nbinding = "AI"\n\n` +
     `[[queues.producers]]\nbinding = "RCA_QUEUE"\nqueue = "${rcaQueue}"\n\n` +
     `[[queues.consumers]]\nqueue = "${rcaQueue}"\nmax_batch_size = 1\nmax_retries = 2\n`;
 }

@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { buildSlackBot } from './slack-bot';
 import type { Env, Monitor } from './types';
 
@@ -16,8 +15,13 @@ import type { Env, Monitor } from './types';
  * behind it. The queue consumer gets its own invocation budget and
  * retries.
  *
- * The whole feature is opt-in: nothing is enqueued unless RCA_QUEUE and
- * ANTHROPIC_API_KEY are both configured. Cloudflare API sources are
+ * The model is called through the Workers AI binding (`env.AI.run`) so
+ * inference lands on the Cloudflare invoice: third-party models such as
+ * `anthropic/claude-opus-5` go through AI Gateway Unified Billing, and
+ * `@cf/...` models are billed as regular Workers AI usage.
+ *
+ * The whole feature is opt-in: nothing is enqueued unless the RCA_QUEUE
+ * and AI bindings are both configured. Cloudflare API sources are
  * skipped individually when CF_API_TOKEN / CF_ACCOUNT_ID are missing.
  */
 
@@ -31,7 +35,11 @@ export interface RcaJob {
   reason: string;
 }
 
-const MODEL = 'claude-opus-5';
+/** Default model; override with the RCA_MODEL var (any model in the AI catalog). */
+const DEFAULT_MODEL = 'anthropic/claude-opus-5';
+/** Third-party models require a gateway; `default` is auto-created on first use. */
+const DEFAULT_GATEWAY = 'default';
+const MAX_OUTPUT_TOKENS = 16000;
 /** How far back before the DOWN transition to collect evidence. */
 const LOOKBACK_MS = 30 * 60_000;
 const MAX_CHECK_ROWS = 30;
@@ -72,7 +80,7 @@ export async function handleRcaBatch(batch: MessageBatch<RcaJob>, env: Env): Pro
  * RCA is best-effort and must not disturb state reconciliation.
  */
 export async function enqueueRca(env: Env, job: RcaJob): Promise<void> {
-  if (!env.RCA_QUEUE || !env.ANTHROPIC_API_KEY) return;
+  if (!env.RCA_QUEUE || !env.AI) return;
   try {
     await env.RCA_QUEUE.send(job);
   } catch (err) {
@@ -81,7 +89,7 @@ export async function enqueueRca(env: Env, job: RcaJob): Promise<void> {
 }
 
 async function runRca(env: Env, job: RcaJob): Promise<void> {
-  if (!env.ANTHROPIC_API_KEY) return;
+  if (!env.AI) return;
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return;
 
@@ -117,7 +125,7 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
     cloudflare_status: cfStatus,
   };
 
-  const text = await analyze(env.ANTHROPIC_API_KEY, evidence);
+  const text = await analyze(env, env.AI, evidence);
   if (!text) return;
 
   await bot.slack.postBlocks(bot.defaultChannelId, {
@@ -145,34 +153,77 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
   });
 }
 
-async function analyze(apiKey: string, evidence: unknown): Promise<string | null> {
-  const client = new Anthropic({ apiKey });
-  const response = await client.beta.messages.create({
-    model: MODEL,
-    max_tokens: 16000,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'high' },
-    // On a safety-classifier refusal, let the API re-run the request on
-    // a fallback model instead of returning an empty analysis.
-    betas: ['server-side-fallback-2026-07-01'],
-    fallbacks: 'default',
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: 'user',
-        content: `<data>\n${JSON.stringify(evidence, null, 2)}\n</data>\n\n上記データから障害の原因を推測してください。`,
-      },
-    ],
+/**
+ * The generated `Ai` types only list Workers AI-hosted models, so the
+ * binding is called through this loose signature to reach third-party
+ * catalog models like `anthropic/claude-opus-5` as well.
+ */
+type AiRun = (model: string, input: unknown, options?: AiOptions) => Promise<unknown>;
+
+async function analyze(env: Env, ai: Ai, evidence: unknown): Promise<string | null> {
+  const model = env.RCA_MODEL || DEFAULT_MODEL;
+  const userContent = `<data>\n${JSON.stringify(evidence, null, 2)}\n</data>\n\n上記データから障害の原因を推測してください。`;
+  // Anthropic models take the Anthropic Messages format (top-level
+  // `system`); Workers AI chat models take a system-role message.
+  const input = model.startsWith('anthropic/')
+    ? {
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userContent }],
+      }
+    : {
+        max_tokens: MAX_OUTPUT_TOKENS,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userContent },
+        ],
+      };
+
+  const run = ai.run.bind(ai) as unknown as AiRun;
+  const response = await run(model, input, {
+    gateway: { id: env.RCA_AI_GATEWAY || DEFAULT_GATEWAY },
   });
 
-  if (response.stop_reason === 'refusal') {
-    console.warn('rca: model refused', response.stop_details?.category ?? null);
+  if ((response as { stop_reason?: string } | null)?.stop_reason === 'refusal') {
+    console.warn('rca: model refused');
     return null;
   }
-  const text = response.content
-    .flatMap((block) => (block.type === 'text' ? [block.text] : []))
-    .join('\n')
-    .trim();
+  const text = extractText(response);
+  if (!text) console.warn('rca: empty or unrecognized model response');
+  return text;
+}
+
+/**
+ * Pull the answer text out of whichever response shape the model
+ * returned: Anthropic Messages (`content[]`), Workers AI (`response`),
+ * Chat Completions (`choices[]`), or Responses API (`output[]`).
+ */
+function extractText(response: unknown): string | null {
+  const r = response as {
+    content?: Array<{ type?: string; text?: string }>;
+    response?: unknown;
+    choices?: Array<{ message?: { content?: unknown } }>;
+    output_text?: unknown;
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
+  } | null;
+  if (!r) return null;
+  let text = '';
+  if (Array.isArray(r.content)) {
+    text = r.content.flatMap((b) => (b.type === 'text' && b.text ? [b.text] : [])).join('\n');
+  } else if (typeof r.response === 'string') {
+    text = r.response;
+  } else if (typeof r.choices?.[0]?.message?.content === 'string') {
+    text = r.choices[0].message.content;
+  } else if (typeof r.output_text === 'string') {
+    text = r.output_text;
+  } else if (Array.isArray(r.output)) {
+    text = r.output
+      .filter((o) => o.type === 'message')
+      .flatMap((o) => o.content ?? [])
+      .flatMap((c) => (c.type === 'output_text' && c.text ? [c.text] : []))
+      .join('\n');
+  }
+  text = text.trim();
   return text || null;
 }
 

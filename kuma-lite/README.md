@@ -49,7 +49,7 @@ Uptime Kuma 風の最小構成な監視サービスです。常時起動のコ�
                                  └─▶ /healthz       ヘルスチェック
 
             ┌──────────────────┐
-  Queue   ─▶│  queue()         │──▶ handleRcaBatch()  DOWN 通知の原因を Claude で推定し
+  Queue   ─▶│  queue()         │──▶ handleRcaBatch()  DOWN 通知の原因を AI で推定し
             └──────────────────┘                      Slack スレッドへ返信（任意）
 ```
 
@@ -241,10 +241,22 @@ bot をチャンネルに招待 (`/invite @kuma-lite`) するのを忘れずに�
 
 #### AI による原因推定（任意）
 
-Slack 連携を有効にしたうえで以下を設定すると、DOWN 通知のスレッドに Claude が
+Slack 連携を有効にしたうえで以下を設定すると、DOWN 通知のスレッドに AI が
 推定した原因（根拠となるログ行・次に確認すべきこと付き）が自動で返信されます。
 cron の監視処理を LLM 呼び出しで止めないよう、DOWN 通知後に Cloudflare Queues
 へジョブを積み、Queue consumer 側で分析・返信します（`src/rca.ts`）。
+
+推論は Workers AI binding（`env.AI.run`）経由で行うため、請求は Cloudflare に
+一本化されます。
+
+- 既定モデルは `anthropic/claude-opus-5`。AI Gateway の Unified Billing で
+  課金されるため、ダッシュボードの **AI → AI Gateway** でクレジットを事前に
+  チャージしてください（購入額に 5% の手数料、トークン単価は Anthropic と同額）。
+- `RCA_MODEL` で AI カタログの任意のモデルに切り替えられます。
+  `@cf/openai/gpt-oss-120b` などの Workers AI ホストのモデルは通常の
+  Workers AI 利用料として請求され、クレジットのチャージは不要です。
+- `RCA_AI_GATEWAY` で経由する AI Gateway を指定できます（既定は初回利用時に
+  自動作成される `default`）。
 
 分析に渡す材料:
 
@@ -255,16 +267,15 @@ cron の監視処理を LLM 呼び出しで止めないよう、DOWN 通知後�
 
 ```bash
 npx wrangler queues create kuma-lite-rca
-npx wrangler secret put ANTHROPIC_API_KEY    # 必須
 npx wrangler secret put CF_API_TOKEN         # 任意: Workers Observability Read + Workers Scripts Read
 npx wrangler secret put CF_ACCOUNT_ID        # 任意: 上記トークンのアカウント ID
 npx wrangler secret put RCA_WORKER_SCRIPTS   # 任意: {"1":"partner-portal"} のような 監視ID→Worker名 の JSON
 ```
 
-`wrangler.toml` の末尾にある `[[queues.producers]]` / `[[queues.consumers]]` の
-コメントを外してデプロイします。Workers Builds を使う場合は、環境変数
+`wrangler.toml` の末尾にある `[ai]` / `[[queues.producers]]` / `[[queues.consumers]]`
+のコメントを外してデプロイします。Workers Builds を使う場合は、環境変数
 `RCA_QUEUE_NAME=kuma-lite-rca` を設定すると `build-wrangler-toml.mjs` が追記します。
-`RCA_QUEUE` と `ANTHROPIC_API_KEY` のどちらかが無い間は機能全体が無効です。
+`RCA_QUEUE` と `AI` のどちらかの binding が無い間は機能全体が無効です。
 
 注意点:
 
