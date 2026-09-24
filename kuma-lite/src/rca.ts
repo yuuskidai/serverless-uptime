@@ -55,7 +55,7 @@ const LOOKBACK_MS = 30 * 60_000;
  * a past incident) still looks at the incident, not at the present.
  */
 const LOOKAHEAD_MS = 30 * 60_000;
-const MAX_CHECK_ROWS = 30;
+const MAX_CHECK_ROWS = 40;
 const MAX_LOG_EVENTS = 40;
 const MAX_DEPLOYMENTS = 5;
 /** Slack caps a section block's text at 3000 chars. */
@@ -122,10 +122,10 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
   // Each source is independent and best-effort: a failing Cloudflare
   // API call should degrade the analysis, not abort it.
   const [checks, logs, deployments, cfStatus] = await Promise.all([
-    settle(recentChecks(env, monitor.id, from, to)),
+    settle(recentChecks(env, monitor.id, from, to, job.downSince)),
     settle(workersErrorLogs(env, from, to, workerScript)),
     settle(workerScript ? recentDeployments(env, workerScript) : Promise.resolve(null)),
-    settle(cloudflareStatus()),
+    settle(cloudflareStatus(from, to)),
   ]);
 
   const evidence = {
@@ -260,23 +260,32 @@ interface CheckEvidence {
   healthz_version: string | null;
 }
 
+/**
+ * Checks in the evidence window, capped at MAX_CHECK_ROWS. The window
+ * holds ~60 rows per monitor, so pick which ones survive the cap: every
+ * abnormal row (down, or healthz not ok) first, then the rows closest to
+ * the incident start. Returned oldest first so the model reads a timeline.
+ */
 async function recentChecks(
   env: Env,
   monitorId: number,
   from: number,
   to: number,
+  incidentStart: number,
 ): Promise<CheckEvidence[]> {
   const rows = await env.DB.prepare(
     `SELECT ts, status, status_code, latency_ms, error,
             healthz_status, healthz_reason, healthz_components, healthz_version
        FROM checks
       WHERE monitor_id = ? AND ts >= ? AND ts <= ?
-      ORDER BY ts DESC
+      ORDER BY (status = 'down' OR COALESCE(healthz_status, 'ok') != 'ok') DESC,
+               ABS(ts - ?)
       LIMIT ?`,
   )
-    .bind(monitorId, from, to, MAX_CHECK_ROWS)
+    .bind(monitorId, from, to, incidentStart, MAX_CHECK_ROWS)
     .all<Omit<CheckEvidence, 'at'> & { ts: number }>();
-  return (rows.results ?? []).map(({ ts, ...rest }) => ({
+  const sorted = (rows.results ?? []).sort((a, b) => a.ts - b.ts);
+  return sorted.map(({ ts, ...rest }) => ({
     at: toJst(ts),
     ...rest,
     error: rest.error ? rest.error.slice(0, 500) : null,
@@ -367,13 +376,45 @@ async function recentDeployments(env: Env, workerScript: string): Promise<Deploy
   }));
 }
 
-async function cloudflareStatus(): Promise<Array<{ name: string; status: string; impact: string }>> {
-  const res = await fetch('https://www.cloudflarestatus.com/api/v2/incidents/unresolved.json');
+interface StatusIncidentEvidence {
+  name: string;
+  status: string;
+  impact: string;
+  started: string;
+  resolved: string | null;
+}
+
+/**
+ * Cloudflare's own incidents that overlapped the evidence window. Uses
+ * the recent-incidents feed (resolved ones included) rather than the
+ * unresolved feed, so a late or replayed job neither misses an incident
+ * that has since been resolved nor picks up one that started afterwards.
+ */
+async function cloudflareStatus(from: number, to: number): Promise<StatusIncidentEvidence[]> {
+  const res = await fetch('https://www.cloudflarestatus.com/api/v2/incidents.json');
   if (!res.ok) throw new Error(`cloudflarestatus ${res.status}`);
   const body = (await res.json()) as {
-    incidents?: Array<{ name: string; status: string; impact: string }>;
+    incidents?: Array<{
+      name: string;
+      status: string;
+      impact: string;
+      created_at: string;
+      resolved_at: string | null;
+    }>;
   };
-  return (body.incidents ?? []).map(({ name, status, impact }) => ({ name, status, impact }));
+  return (body.incidents ?? [])
+    .filter((i) => {
+      const start = Date.parse(i.created_at);
+      const end = i.resolved_at ? Date.parse(i.resolved_at) : Infinity;
+      return start <= to && end >= from;
+    })
+    .map((i) => ({
+      name: i.name,
+      status: i.status,
+      impact: i.impact,
+      started: toJst(Date.parse(i.created_at)),
+      resolved: i.resolved_at ? toJst(Date.parse(i.resolved_at)) : null,
+    }));
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
