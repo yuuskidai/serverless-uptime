@@ -47,6 +47,10 @@ Uptime Kuma 風の最小構成な監視サービスです。常時起動のコ�
                                  ├─▶ /api/monitors  handleApiRequest()
                                  ├─▶ /slack/events  chat-sdk webhook（/kuma 等）
                                  └─▶ /healthz       ヘルスチェック
+
+            ┌──────────────────┐
+  Queue   ─▶│  queue()         │──▶ handleRcaBatch()  DOWN 通知の原因を Claude で推定し
+            └──────────────────┘                      Slack スレッドへ返信（任意）
 ```
 
 状態は D1 の 3 テーブルで保持します：
@@ -234,6 +238,40 @@ Slack App 側の設定ポイント:
 - **Event Subscriptions**: 不要（`/status` は slash command のみ使用）
 
 bot をチャンネルに招待 (`/invite @kuma-lite`) するのを忘れずに。
+
+#### AI による原因推定（任意）
+
+Slack 連携を有効にしたうえで以下を設定すると、DOWN 通知のスレッドに Claude が
+推定した原因（根拠となるログ行・次に確認すべきこと付き）が自動で返信されます。
+cron の監視処理を LLM 呼び出しで止めないよう、DOWN 通知後に Cloudflare Queues
+へジョブを積み、Queue consumer 側で分析・返信します（`src/rca.ts`）。
+
+分析に渡す材料:
+
+- D1 の直近 30 分の `checks`（ステータスコード・エラー・healthz の内容）
+- Workers Logs のエラーイベント（Workers Observability Telemetry Query API）
+- 対象 Worker のデプロイ履歴（`RCA_WORKER_SCRIPTS` で対応付けた監視のみ）
+- Cloudflare 自体の未解決インシデント（cloudflarestatus.com）
+
+```bash
+npx wrangler queues create kuma-lite-rca
+npx wrangler secret put ANTHROPIC_API_KEY    # 必須
+npx wrangler secret put CF_API_TOKEN         # 任意: Workers Observability Read + Workers Scripts Read
+npx wrangler secret put CF_ACCOUNT_ID        # 任意: 上記トークンのアカウント ID
+npx wrangler secret put RCA_WORKER_SCRIPTS   # 任意: {"1":"partner-portal"} のような 監視ID→Worker名 の JSON
+```
+
+`wrangler.toml` の末尾にある `[[queues.producers]]` / `[[queues.consumers]]` の
+コメントを外してデプロイします。Workers Builds を使う場合は、環境変数
+`RCA_QUEUE_NAME=kuma-lite-rca` を設定すると `build-wrangler-toml.mjs` が追記します。
+`RCA_QUEUE` と `ANTHROPIC_API_KEY` のどちらかが無い間は機能全体が無効です。
+
+注意点:
+
+- `head_sampling_rate = 0.1` のため fetch のログは 1 割しか残りません。監視対象の
+  Worker 側もサンプリングしていると、原因のログが材料に含まれないことがあります。
+- ログ・エラー文字列は外部由来のデータなので、プロンプト上はデータとして扱うよう
+  指示しており、bot の権限はスレッドへの投稿のみです。
 
 ### 4. デプロイ
 

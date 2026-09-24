@@ -1,3 +1,5 @@
+import type { RcaJob } from './rca';
+
 export interface Env {
   DB: D1Database;
   DISCORD_WEBHOOK_URL: string;
@@ -12,6 +14,17 @@ export interface Env {
   SLACK_BOT_TOKEN?: string;
   SLACK_SIGNING_SECRET?: string;
   SLACK_DEFAULT_CHANNEL?: string;
+
+  // AI root-cause analysis for DOWN alerts (see rca.ts). Enabled only
+  // when both RCA_QUEUE and ANTHROPIC_API_KEY are configured; the
+  // Cloudflare API pair adds Workers Logs and deployment history to
+  // the evidence. RCA_WORKER_SCRIPTS is a JSON object mapping monitor
+  // id → Worker script name, e.g. `{"1":"partner-portal"}`.
+  RCA_QUEUE?: Queue<RcaJob>;
+  ANTHROPIC_API_KEY?: string;
+  CF_API_TOKEN?: string;
+  CF_ACCOUNT_ID?: string;
+  RCA_WORKER_SCRIPTS?: string;
 
   // Service bindings for monitored Workers that share the same
   // Cloudflare account. A bare fetch() to a same-account *.workers.dev

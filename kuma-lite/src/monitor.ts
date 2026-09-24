@@ -11,6 +11,7 @@ import type {
   MonitorState,
 } from './types';
 import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp } from './notifier';
+import { enqueueRca } from './rca';
 
 const BATCH_SIZE = 40;
 
@@ -513,12 +514,17 @@ async function reconcileState(
       // window (per spec §2). The state still flips so the page shows a
       // blue maintenance bar.
       if (!inMaintenance) {
-        const r = await safeNotifyDown(
-          env,
-          monitor,
-          buildIncidentDetail(result, 'unknown error'),
-        );
+        const detail = buildIncidentDetail(result, 'unknown error');
+        const r = await safeNotifyDown(env, monitor, detail);
         nextSlackAlertTs = r?.slackAlertTs ?? null;
+        if (nextSlackAlertTs) {
+          await enqueueRca(env, {
+            monitorId: monitor.id,
+            alertTs: nextSlackAlertTs,
+            downSince: ts,
+            reason: detail.reason,
+          });
+        }
       }
     }
   } else if (observed === 'degraded') {

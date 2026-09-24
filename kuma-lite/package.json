@@ -18,6 +18,7 @@
     "wrangler": "^4.88.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@chat-adapter/state-memory": "^4.27.0",
     "chat": "^4.27.0"
   }
