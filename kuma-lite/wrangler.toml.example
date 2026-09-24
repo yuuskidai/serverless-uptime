@@ -74,7 +74,7 @@ RETENTION_DAYS = "7"
 #   SLACK_SIGNING_SECRET   — Slack signing secret used to verify inbound
 #                            webhooks at /slack/events.
 #
-# AI root-cause analysis for DOWN alerts (optional, see src/rca.ts).
+# AI root-cause analysis for DOWN/DEGRADED alerts (optional, see src/rca.ts).
 # Enabled only when the RCA_QUEUE and AI bindings both exist. Inference
 # runs through the Workers AI binding, so it is billed by Cloudflare:
 # `@cf/...` models (default `@cf/deepseek-ai/deepseek-v4-pro-0813`) are

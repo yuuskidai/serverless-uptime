@@ -49,7 +49,7 @@ Uptime Kuma 風の最小構成な監視サービスです。常時起動のコ�
                                  └─▶ /healthz       ヘルスチェック
 
             ┌──────────────────┐
-  Queue   ─▶│  queue()         │──▶ handleRcaBatch()  DOWN 通知の原因を AI で推定し
+  Queue   ─▶│  queue()         │──▶ handleRcaBatch()  DOWN/DEGRADED 通知の原因を AI で推定
             └──────────────────┘                      Slack スレッドへ返信（任意）
 ```
 
@@ -241,9 +241,9 @@ bot をチャンネルに招待 (`/invite @kuma-lite`) するのを忘れずに�
 
 #### AI による原因推定（任意）
 
-Slack 連携を有効にしたうえで以下を設定すると、DOWN 通知のスレッドに AI が
+Slack 連携を有効にしたうえで以下を設定すると、DOWN・DEGRADED 通知のスレッドに AI が
 推定した原因（根拠となるログ行・次に確認すべきこと付き）が自動で返信されます。
-cron の監視処理を LLM 呼び出しで止めないよう、DOWN 通知後に Cloudflare Queues
+cron の監視処理を LLM 呼び出しで止めないよう、通知後に Cloudflare Queues
 へジョブを積み、Queue consumer 側で分析・返信します（`src/rca.ts`）。
 
 推論は Workers AI binding（`env.AI.run`）経由で行うため、請求は Cloudflare に

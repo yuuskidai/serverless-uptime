@@ -46,7 +46,7 @@ export default {
     );
   },
 
-  // Consumer for RCA_QUEUE: AI root-cause analysis replies to DOWN
+  // Consumer for RCA_QUEUE: AI root-cause analysis replies to DOWN/DEGRADED
   // alerts, run off the cron path so probes never wait on the LLM.
   async queue(batch: MessageBatch<RcaJob>, env: Env): Promise<void> {
     await handleRcaBatch(batch, env);
