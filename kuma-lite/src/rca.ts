@@ -47,6 +47,12 @@ const DEFAULT_GATEWAY = 'default';
 const MAX_OUTPUT_TOKENS = 16000;
 /** How far back before the DOWN transition to collect evidence. */
 const LOOKBACK_MS = 30 * 60_000;
+/**
+ * How far after the DOWN transition to collect evidence. Bounds the
+ * window so a job processed late (queue retries, or a manual replay of
+ * a past incident) still looks at the incident, not at the present.
+ */
+const LOOKAHEAD_MS = 30 * 60_000;
 const MAX_CHECK_ROWS = 30;
 const MAX_LOG_EVENTS = 40;
 const MAX_DEPLOYMENTS = 5;
@@ -104,13 +110,13 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
   if (!monitor) return;
 
   const from = job.downSince - LOOKBACK_MS;
-  const to = Date.now();
+  const to = Math.min(Date.now(), job.downSince + LOOKAHEAD_MS);
   const workerScript = workerScriptFor(env, monitor.id);
 
   // Each source is independent and best-effort: a failing Cloudflare
   // API call should degrade the analysis, not abort it.
   const [checks, logs, deployments, cfStatus] = await Promise.all([
-    settle(recentChecks(env, monitor.id, from)),
+    settle(recentChecks(env, monitor.id, from, to)),
     settle(workersErrorLogs(env, from, to, workerScript)),
     settle(workerScript ? recentDeployments(env, workerScript) : Promise.resolve(null)),
     settle(cloudflareStatus()),
@@ -247,16 +253,21 @@ interface CheckEvidence {
   healthz_version: string | null;
 }
 
-async function recentChecks(env: Env, monitorId: number, from: number): Promise<CheckEvidence[]> {
+async function recentChecks(
+  env: Env,
+  monitorId: number,
+  from: number,
+  to: number,
+): Promise<CheckEvidence[]> {
   const rows = await env.DB.prepare(
     `SELECT ts, status, status_code, latency_ms, error,
             healthz_status, healthz_reason, healthz_components, healthz_version
        FROM checks
-      WHERE monitor_id = ? AND ts >= ?
+      WHERE monitor_id = ? AND ts >= ? AND ts <= ?
       ORDER BY ts DESC
       LIMIT ?`,
   )
-    .bind(monitorId, from, MAX_CHECK_ROWS)
+    .bind(monitorId, from, to, MAX_CHECK_ROWS)
     .all<Omit<CheckEvidence, 'at'> & { ts: number }>();
   return (rows.results ?? []).map(({ ts, ...rest }) => ({
     at: new Date(ts).toISOString(),
