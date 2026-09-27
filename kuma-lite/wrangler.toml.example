@@ -79,6 +79,11 @@ RETENTION_DAYS = "7"
 [previews.vars]
 RETENTION_DAYS = "7"
 
+# Top-level [observability] would otherwise apply to Previews too; they
+# only serve frontend checks, so Workers Logs are not needed there.
+[previews.observability]
+enabled = false
+
 [[previews.d1_databases]]
 binding = "DB"
 database_name = "kuma-lite-db"
