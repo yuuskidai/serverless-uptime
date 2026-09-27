@@ -17,6 +17,9 @@
 //                       pairs declaring [[services]] blocks. Empty
 //                       skips appending any service binding section.
 //                       e.g. `MY_API=my-api,OTHER=other-worker`
+//                       The same bindings are mirrored into
+//                       [[previews.services]] because Worker Previews
+//                       don't inherit top-level bindings.
 //   RCA_QUEUE_NAME    — name of an existing Queue to bind as RCA_QUEUE
 //                       (producer + consumer), plus the Workers AI binding
 //                       `AI`, for AI root-cause analysis of DOWN/DEGRADED alerts.
@@ -50,7 +53,9 @@ if (!content.includes('<your-d1-database-id>')) {
   console.error('build-wrangler-toml: template does not contain the expected database_id placeholder.');
   process.exit(1);
 }
-content = content.replace('<your-d1-database-id>', dbId);
+// replaceAll: the placeholder appears in both [[d1_databases]] and
+// [[previews.d1_databases]] (Previews share the production DB).
+content = content.replaceAll('<your-d1-database-id>', dbId);
 
 const servicesEnv = (process.env.WRANGLER_SERVICES ?? '').trim();
 if (servicesEnv) {
@@ -64,7 +69,10 @@ if (servicesEnv) {
     }
     const binding = trimmed.slice(0, eq).trim();
     const service = trimmed.slice(eq + 1).trim();
-    return `[[services]]\nbinding = "${binding}"\nservice = "${service}"`;
+    return (
+      `[[services]]\nbinding = "${binding}"\nservice = "${service}"\n\n` +
+      `[[previews.services]]\nbinding = "${binding}"\nservice = "${service}"`
+    );
   });
   content = content.trimEnd() + '\n\n' + blocks.join('\n\n') + '\n';
 }
