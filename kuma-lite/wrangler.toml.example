@@ -64,6 +64,26 @@ RETENTION_DAYS = "7"
 # and as the default channel for the `/status` slash command response.
 # SLACK_DEFAULT_CHANNEL = ""
 
+# Worker Previews (`wrangler preview`, run by Workers Builds for
+# non-production branches). Previews do NOT inherit production vars or
+# bindings, so everything the Worker reads from env must be redeclared
+# under `previews`. Cron Triggers never target Previews, so a Preview
+# only serves HTTP and never runs checks or sends alerts on its own.
+#
+# Previews are for checking frontend changes, so they share the
+# production D1 database (same database_id). Writes made through a
+# Preview's management API land in production data. Service bindings
+# are mirrored into `[[previews.services]]` by
+# scripts/build-wrangler-toml.mjs; they call the bound Worker's
+# production deployment.
+[previews.vars]
+RETENTION_DAYS = "7"
+
+[[previews.d1_databases]]
+binding = "DB"
+database_name = "kuma-lite-db"
+database_id = "<your-d1-database-id>"
+
 # Secrets (set via `wrangler secret put`):
 #   DISCORD_WEBHOOK_URL    — Discord incoming webhook URL for alerts
 #   API_TOKEN              — bearer token required by the management API
@@ -112,3 +132,9 @@ RETENTION_DAYS = "7"
 #                      "@cf/deepseek-ai/deepseek-v4-pro-0813"; e.g.
 #                      "anthropic/claude-opus-5" to use Claude via Unified Billing)
 #   RCA_AI_GATEWAY   — AI Gateway id to route through (default "default")
+#
+# Preview secrets are separate from production. Set shared ones once
+# (applied to every newly created Preview):
+#   npx wrangler preview base-config secret put API_TOKEN
+# RCA bindings are not mirrored into `previews`: Previews never run
+# crons, so they never raise alerts to analyse.
