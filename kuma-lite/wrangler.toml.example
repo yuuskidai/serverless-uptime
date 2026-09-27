@@ -81,7 +81,13 @@ RETENTION_DAYS = "7"
 
 # Top-level [observability] would otherwise apply to Previews too; they
 # only serve frontend checks, so Workers Logs are not needed there.
+# `logs.enabled` must be set too: updating an existing Preview merges
+# settings, so a logs.enabled = true copied from Previews Base survives
+# a bare `enabled = false`.
 [previews.observability]
+enabled = false
+
+[previews.observability.logs]
 enabled = false
 
 [[previews.d1_databases]]
