@@ -372,6 +372,10 @@ Build configuration で以下を設定します。
 `scripts/build-wrangler-toml.mjs` が `wrangler.toml.example` から実値入りの
 `wrangler.toml` を生成 → 続く `wrangler deploy` がそれを使ってデプロイします。
 
+`packageManager` は `npm@11.21.1` に固定しています。Workers Builds は依存の
+自動インストール前にこの指定を適用します。既定の npm 10.9.2 ではこの lockfile の
+依存 override を正しく解決できず `npm ci` が失敗するため、版指定を維持してください。
+
 Worker は `https://kuma-lite.<your-subdomain>.workers.dev` で公開されます。
 `wrangler.toml` に設定した Cron Trigger は自動的に発火を始めます。
 

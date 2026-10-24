@@ -2,6 +2,7 @@
   "name": "kuma-lite",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "npm@11.21.1",
   "description": "Uptime Kuma-style monitoring on Cloudflare Workers + D1",
   "main": "src/index.ts",
   "scripts": {
