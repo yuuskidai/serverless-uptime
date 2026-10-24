@@ -83,6 +83,9 @@ export class SlackClient {
     try {
       response = await this.fetchImpl(`${this.apiUrl}${method}`, {
         method: 'POST',
+        // Bound both headers and response-body consumption so notification work fits its lease.
+        signal: AbortSignal.timeout(6000),
+        redirect: 'manual',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json; charset=utf-8',

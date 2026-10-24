@@ -35,6 +35,15 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'monitor_state', column: 'consecutive_degraded' },
   { table: 'daily_summary', column: 'day_ms' },
   { table: 'daily_summary', column: 'down_streak' },
+  { table: 'monitors', column: 'db_latency_threshold_ms' },
+  { table: 'monitors', column: 'http_latency_threshold_ms' },
+  { table: 'checks', column: 'scheduled_slot' },
+  { table: 'checks', column: 'probe_trace_json' },
+  { table: 'monitor_state', column: 'last_check_slot' },
+  { table: 'monitor_state', column: 'consecutive_successes' },
+  { table: 'monitor_execution', column: 'claimed_slot' },
+  { table: 'monitor_execution', column: 'lease_token' },
+  { table: 'monitor_execution', column: 'lease_until' },
 ];
 
 let cached: SchemaCheck | null = null;

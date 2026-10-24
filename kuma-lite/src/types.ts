@@ -96,14 +96,12 @@ export interface Monitor {
   interval_minutes: number;
   enabled: number;
   retry_threshold: number;
-  /**
-   * Optional latency ceiling (ms). When set, a `degraded` healthz signal
-   * whose measured latency is below this value is treated as `ok` by
-   * kuma-lite. Lets the effective DEGRADED threshold be raised from the
-   * D1 monitor row without modifying the monitored service's source.
-   * NULL = no override (pass healthz status through unchanged).
-   */
+  /** Deprecated API alias for db_latency_threshold_ms; never an HTTP ceiling. */
   latency_threshold_ms: number | null;
+  /** Optional HTTP headers+body ceiling; NULL leaves HTTP latency alerting disabled. */
+  http_latency_threshold_ms: number | null;
+  /** Overrides only an identifiable DB-latency degradation using the DB component's own time. */
+  db_latency_threshold_ms: number | null;
   created_at: number;
 }
 
@@ -123,6 +121,8 @@ export interface CheckRow {
   healthz_version: string | null;
   used_fallback: number; // 0 | 1
   in_maintenance: number; // 0 | 1
+  /** Bounded ProbeTrace[]; NULL on historical rows. Never contains request URLs or credentials. */
+  probe_trace_json: string | null;
 }
 
 export interface MonitorState {
@@ -158,6 +158,22 @@ export interface CheckResult {
   used_fallback: boolean;
   /** Maintenance window declared by the site at the time of this check. */
   maintenance: MaintenanceWindow | null;
+  probe_trace_json: string;
+}
+
+/** A probe measures one transport path; a service binding is not an independent regional probe. */
+export interface ProbeTrace {
+  attempt: 'primary' | 'fallback';
+  transport: 'service_binding' | 'public_fetch';
+  request_id: string;
+  response_request_id: string | null;
+  request_id_matched: boolean;
+  status_code: number | null;
+  headers_ms: number | null;
+  body_ms: number | null;
+  total_ms: number;
+  failure_phase: 'headers' | 'body' | null;
+  body_truncated: boolean;
 }
 
 export interface ComponentHealth {

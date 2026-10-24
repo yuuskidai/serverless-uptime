@@ -2,7 +2,8 @@ import { handleApiRequest } from './api';
 import { withEdgeCache } from './edge-cache';
 import { renderIncidentPage } from './incident-page';
 import { handleRcaBatch, type RcaJob } from './rca';
-import { cleanupOldChecks, runChecks } from './monitor';
+import { cleanupOldChecks } from './monitor';
+import { runChecks } from './monitor-runner';
 import { renderRssFeed } from './rss-feed';
 import {
   apiSchemaErrorResponse,
@@ -18,10 +19,18 @@ export type { Env };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Daily cleanup runs in parallel with the minute check so 03:00
-    // UTC isn't a one-minute hole in the bar history.
+    // The separate minute trigger still handles the 03:00 check. The daily
+    // trigger must not fall through and create another probe for that slot.
     if (event.cron === '0 3 * * *') {
-      ctx.waitUntil(cleanupOldChecks(env));
+      ctx.waitUntil((async () => {
+        const check = await ensureSchema(env);
+        if (!check.ok) {
+          logSchemaProblem(check, 'scheduled cleanup');
+          return;
+        }
+        await cleanupOldChecks(env);
+      })());
+      return;
     }
     // The minute cron writes to `checks` and `monitor_state` using
     // the latest column set; if the migration hasn't been applied,
@@ -35,13 +44,10 @@ export default {
           logSchemaProblem(check, 'scheduled cron');
           return;
         }
-        // Cron triggers fire on the :00 second boundary, which is
-        // also when most upstream cron systems run their minute jobs
-        // — D1 sees its loudest contention right then. Sleep 5s so
-        // probes land at ~:05 and writes finish well inside the
-        // minute, preventing rows from spilling into the next slot.
+        // Preserve the existing five-second scheduling offset. This is
+        // not mutual exclusion: D1 slot claims and leases prevent overlap.
         await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await runChecks(env);
+        await runChecks(env, event.scheduledTime);
       })(),
     );
   },

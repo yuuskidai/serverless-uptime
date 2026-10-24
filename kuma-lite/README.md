@@ -203,6 +203,66 @@ npx wrangler d1 execute kuma-lite-db --file=./migrations/0002_healthz_integratio
 ALTER で追加します。冪等ではないため、適用済みの環境で再実行するとエラーに
 なります（その場合は無視して構いません）。
 
+#### 0009: 監視実行の重複防止と通知状態の更新
+
+`0009_monitor_execution.sql` は **監視 Worker `helth` が既に使っている監視用 D1**
+への差分です。Core OS / Partner Portal の業務用 D1 に適用しないでください。
+新しい Worker や DB は作りません。`schema.sql` は新規 DB 用で、既存 DB の
+更新には使いません。0008 まで適用された既存 DB に 0009 を一度だけ適用します。
+
+既存のデプロイ設定で Worker 名、`DB` binding の接続先、二つの Cron 設定を
+確認・記録します。本番への反映時は次の順で切り替えます。
+
+1. 監視の Cron を一時停止し、旧バージョンの実行が終了したことを確認します。
+   旧コードは新しい lease / CAS を参照しません。新旧の処理を重ねたままでは、
+   旧処理による状態上書きまで防ぐことはできません。すでに動いている処理の
+   終了を Logs 等で確認してから進めてください。
+2. `kuma-lite` ディレクトリで固定 lockfile の依存を用意し、検証します。
+
+   ```bash
+   npm ci --ignore-scripts
+   npm run typecheck
+   npm test
+   ```
+
+   テストには Node.js 24 と、インストール済み Wrangler の workerd / D1 を使います。
+   テストはローカル DB のみで実行され、Cloudflare アカウントには接続しません。
+3. 接続先が既存の監視 DB であることと未適用であることを確認し、差分を適用します。
+
+   ```bash
+   ./node_modules/.bin/wrangler d1 execute kuma-lite-db \
+     --file=./migrations/0009_monitor_execution.sql --remote
+   ```
+
+   `ALTER TABLE` を含むため再実行できません。エラー時は成功扱いにせず、
+   列・index・table の適用状態を確認してから復旧してください。新コードは
+   必須列が欠けていると schema gate で監視処理を止めます。
+4. 確認済みの新バージョンを既存 `helth` Worker へデプロイし、旧バージョンが
+   残っていないことを確認してから、元の `* * * * *` と `0 3 * * *` を戻します。
+   新版は分ごとの予定時刻を slot にし、日次 cleanup は別経路として処理します。
+5. 新しい slot ごとのチェックが監視ごとに一件であること、
+   `monitor_state.last_check_slot` が前へ進むこと、旧版の書き込みがないことを確認します。
+
+実行権は D1 の時計で 120 秒後に失効します。中断された slot を再実行することは
+ありません。失効後の新しい slot から再開するため、異常終了時には監視に空白が
+生じる場合があります。古い runner は結果・状態・通知 thread を更新できません。
+通知の直前にも所有権を確認して最低 30 秒の実行権を確保し、通知処理には別途
+時間上限を設けます。外部通知先との分散トランザクションはないため、送信先が
+受信した後の応答消失等では通知の到達を確定できません。同じ slot の自動再送はしません。
+
+DOWN 判定は既存の連続 `retry_threshold` 回（既定 2 回）のままです。
+DOWN から DEGRADED は部分復旧として扱い、DEGRADED から完全復旧は連続する
+正常応答が同じ閾値に達してから通知します。メンテナンス中の通知抑制が終わっても
+異常が続いている場合は、その異常を一度通知します。
+
+旧 `latency_threshold_ms` の正の安全整数は DB 専用の
+`db_latency_threshold_ms` に引き継ぎます。HTTP 全体の閾値
+`http_latency_threshold_ms` は `NULL` のままで、明示設定するまで有効になりません。
+新しい DB 閾値を明示的に `NULL` にした場合、旧列への fallback はしません。
+
+相関ID・段階計測・部分復旧と完全復旧・AI分析の公開仕様は
+[health-monitoring-contract.md](docs/health-monitoring-contract.md) を参照してください。
+
 ### 3. シークレットの登録
 
 ```bash

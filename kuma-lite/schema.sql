@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS monitors (
   interval_minutes INTEGER DEFAULT 1,
   enabled INTEGER DEFAULT 1,
   retry_threshold INTEGER DEFAULT 2,
+  -- Deprecated API alias for the DB ceiling; new code reads the explicit fields.
+  latency_threshold_ms INTEGER DEFAULT NULL,
+  db_latency_threshold_ms INTEGER DEFAULT NULL,
+  -- End-to-end HTTP timing is an independent, opt-in ceiling.
+  http_latency_threshold_ms INTEGER DEFAULT NULL,
   created_at INTEGER NOT NULL
 );
 
@@ -62,11 +67,15 @@ CREATE TABLE IF NOT EXISTS checks (
   -- 1 when this check happened inside a declared maintenance window;
   -- DOWN notifications are suppressed for these rows.
   in_maintenance INTEGER DEFAULT 0,
+  scheduled_slot INTEGER,
+  probe_trace_json TEXT,
   FOREIGN KEY (monitor_id) REFERENCES monitors(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_checks_ts ON checks(ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_checks_monitor_slot ON checks(monitor_id, scheduled_slot)
+  WHERE scheduled_slot IS NOT NULL;
 -- Partial index targeting the down-check filter pattern used by the
 -- status-page error-sample query and the RSS feed's incident
 -- derivation. Trimmed to just down + non-maintenance rows so the
@@ -111,11 +120,12 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   -- consecutive observations before firing, so a single-tick spike
   -- in the shared backend doesn't page on/off every minute.
   consecutive_degraded INTEGER DEFAULT 0,
+  consecutive_successes INTEGER NOT NULL DEFAULT 0,
+  last_check_slot INTEGER NOT NULL DEFAULT -1,
   last_notified_at INTEGER,
   down_since INTEGER,
-  -- Slack message timestamp (chat.postMessage `ts`) for the open DOWN
-  -- alert. Used to thread the recovery message and to add a checkmark
-  -- reaction when the monitor recovers. Cleared on recovery.
+  -- Slack thread for the current DOWN/DEGRADED alert. Partial recovery
+  -- keeps the thread; full recovery clears it after claiming the transition.
   slack_alert_ts TEXT,
   -- Most recent declared maintenance window. Refreshed every cron tick
   -- from the /healthz `maintenance` field. Cleared (NULL) when the
@@ -124,4 +134,13 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   maintenance_to INTEGER,
   maintenance_reason TEXT,
   FOREIGN KEY (monitor_id) REFERENCES monitors(id)
+);
+
+-- One expiring owner per monitor across isolates, with a durable slot watermark.
+CREATE TABLE IF NOT EXISTS monitor_execution (
+  monitor_id INTEGER PRIMARY KEY,
+  claimed_slot INTEGER NOT NULL,
+  lease_token TEXT NOT NULL,
+  lease_until INTEGER NOT NULL,
+  FOREIGN KEY (monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
 );

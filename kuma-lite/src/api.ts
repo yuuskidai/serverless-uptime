@@ -82,6 +82,8 @@ interface CreateBody {
   retry_threshold?: unknown;
   enabled?: unknown;
   latency_threshold_ms?: unknown;
+  db_latency_threshold_ms?: unknown;
+  http_latency_threshold_ms?: unknown;
 }
 
 const DESCRIPTION_MAX_LENGTH = 500;
@@ -122,12 +124,13 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
   const interval = clamp(asInt(body.interval_minutes, 1), 1, 60);
   const retry = clamp(asInt(body.retry_threshold, 2), 1, 10);
   const enabled = asBoolInt(body.enabled, 1);
-  const latencyThreshold = asNullablePositiveInt(body.latency_threshold_ms);
+  const thresholds = readLatencyThresholds(body);
+  if ('error' in thresholds) return jsonError(400, thresholds.error);
 
   const now = Date.now();
   const result = await env.DB.prepare(
-    `INSERT INTO monitors (name, url, description, fallback_url, service_binding, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, latency_threshold_ms, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO monitors (name, url, description, fallback_url, service_binding, method, expected_status, keyword, timeout_ms, interval_minutes, enabled, retry_threshold, latency_threshold_ms, db_latency_threshold_ms, http_latency_threshold_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       name,
@@ -142,7 +145,9 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
       interval,
       enabled,
       retry,
-      latencyThreshold,
+      thresholds.database,
+      thresholds.database,
+      thresholds.http,
       now,
     )
     .run();
@@ -154,6 +159,8 @@ async function createMonitor(req: Request, env: Env): Promise<Response> {
 async function updateMonitor(req: Request, env: Env, id: number): Promise<Response> {
   const body = (await readJson(req)) as CreateBody | null;
   if (!body) return jsonError(400, 'invalid JSON body');
+  const thresholds = readLatencyThresholds(body);
+  if ('error' in thresholds) return jsonError(400, thresholds.error);
 
   const existing = await env.DB.prepare(`SELECT * FROM monitors WHERE id = ?`)
     .bind(id)
@@ -227,9 +234,14 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
     fields.push('enabled = ?');
     values.push(asBoolInt(body.enabled, existing.enabled));
   }
-  if ('latency_threshold_ms' in body) {
-    fields.push('latency_threshold_ms = ?');
-    values.push(asNullablePositiveInt(body.latency_threshold_ms));
+  if ('latency_threshold_ms' in body || 'db_latency_threshold_ms' in body) {
+    // The old field represented the service's DB threshold. Never migrate it into HTTP RTT alerting.
+    fields.push('latency_threshold_ms = ?', 'db_latency_threshold_ms = ?');
+    values.push(thresholds.database, thresholds.database);
+  }
+  if ('http_latency_threshold_ms' in body) {
+    fields.push('http_latency_threshold_ms = ?');
+    values.push(thresholds.http);
   }
 
   if (fields.length === 0) return jsonError(400, 'no fields to update');
@@ -253,7 +265,8 @@ async function deleteMonitor(env: Env, id: number): Promise<Response> {
 
 async function readJson(req: Request): Promise<unknown> {
   try {
-    return await req.json();
+    const value: unknown = await req.json();
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
   } catch {
     return null;
   }
@@ -286,14 +299,23 @@ function asString(v: unknown): string | null {
   return trimmed.length === 0 ? null : trimmed;
 }
 
-function asNullablePositiveInt(v: unknown): number | null {
+function asNullablePositiveInt(v: unknown): number | null | undefined {
   if (v === null || v === undefined) return null;
-  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.trunc(v);
-  if (typeof v === 'string') {
-    const n = Number.parseInt(v, 10);
-    if (Number.isFinite(n) && n > 0) return n;
+  const n = typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v.trim()) : v;
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0 ? n : undefined;
+}
+
+function readLatencyThresholds(body: CreateBody): { database: number | null; http: number | null } | { error: string } {
+  const legacy = asNullablePositiveInt(body.latency_threshold_ms);
+  const database = asNullablePositiveInt(body.db_latency_threshold_ms);
+  const http = asNullablePositiveInt(body.http_latency_threshold_ms);
+  if (legacy === undefined || database === undefined || http === undefined) {
+    return { error: 'latency thresholds must be positive safe integers or null' };
   }
-  return null;
+  if ('latency_threshold_ms' in body && 'db_latency_threshold_ms' in body && legacy !== database) {
+    return { error: 'latency_threshold_ms is a deprecated DB alias; conflicting DB thresholds are not allowed' };
+  }
+  return { database: 'db_latency_threshold_ms' in body ? database : legacy, http };
 }
 
 function asInt(v: unknown, fallback: number): number {

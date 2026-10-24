@@ -57,11 +57,35 @@ export async function notifyUp(
   monitor: Monitor,
   downDurationMs: number,
   slackAlertTs: string | null,
+  previousStatus: 'down' | 'degraded' = 'down',
 ): Promise<void> {
   await Promise.allSettled([
-    sendDiscordUp(env, monitor, downDurationMs),
-    sendSlackUp(env, monitor, downDurationMs, slackAlertTs),
+    sendDiscordRecovery(env, monitor, downDurationMs, previousStatus),
+    sendSlackRecovery(env, monitor, downDurationMs, slackAlertTs, previousStatus),
   ]);
+}
+
+/** A responding-but-degraded site has not fully recovered; keep the incident thread open. */
+export async function notifyPartialRecovery(
+  env: Env, monitor: Monitor, detail: IncidentDetail, downDurationMs: number, slackAlertTs: string | null,
+): Promise<void> {
+  await Promise.allSettled([
+    sendDiscordRecovery(env, monitor, downDurationMs, 'partial', detail),
+    sendSlackRecovery(env, monitor, downDurationMs, slackAlertTs, 'partial', detail),
+  ]);
+}
+
+type RecoveryKind = 'down' | 'degraded' | 'partial';
+
+function recoveryText(monitor: Monitor, kind: RecoveryKind, duration: number, detail?: IncidentDetail) {
+  const partial = kind === 'partial';
+  return {
+    title: partial ? `🟡 RESPONSE RESTORED — ${monitor.name}` : `✅ RECOVERED — ${monitor.name}`,
+    message: partial
+      ? `応答は復旧しましたが、遅延または一部不調が継続しています。${detail ? ` ${detail.reason}` : ''}`
+      : kind === 'degraded' ? '連続した正常チェックで遅延・一部不調の解消を確認しました。' : '監視で正常応答への復旧を確認しました。',
+    duration: kind === 'degraded' ? null : `監視上の停止期間: ${formatDuration(duration)}`,
+  };
 }
 
 /**
@@ -123,18 +147,21 @@ async function sendDiscordDegraded(
   });
 }
 
-async function sendDiscordUp(
+async function sendDiscordRecovery(
   env: Env,
   monitor: Monitor,
   downDurationMs: number,
+  kind: RecoveryKind,
+  detail?: IncidentDetail,
 ): Promise<void> {
   if (!env.DISCORD_WEBHOOK_URL) return;
+  const content = recoveryText(monitor, kind, downDurationMs, detail);
   await postWebhook(env.DISCORD_WEBHOOK_URL, {
     embeds: [
       {
-        title: `🟢 UP: ${monitor.name}`,
-        description: `${publicFacingUrl(monitor.url)}\n\n**Recovered after:** ${formatDuration(downDurationMs)}`,
-        color: 0x00cc66,
+        title: content.title,
+        description: [publicFacingUrl(monitor.url), content.message, content.duration].filter(Boolean).join('\n\n'),
+        color: kind === 'partial' ? 0xfbbf24 : 0x00cc66,
         timestamp: new Date().toISOString(),
       },
     ],
@@ -170,8 +197,10 @@ function discordIncidentBody(
 async function postWebhook(url: string, payload: unknown): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(6000),
+    redirect: 'manual',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ ...(payload as Record<string, unknown>), allowed_mentions: { parse: [] } }),
   });
   if (!response.ok && response.status !== 204) {
     const body = await response.text().catch(() => '');
@@ -220,7 +249,7 @@ async function sendSlackDown(
   ];
 
   const result = await bot.slack.postBlocks(bot.defaultChannelId, {
-    text: fallback,
+    text: slackEscape(fallback),
     blocks,
   });
   return result.ts || null;
@@ -263,25 +292,30 @@ async function sendSlackDegraded(
     ...componentsSlackBlocks(detail.components),
     ...buildContextBlocks(detail.version, null),
   ];
-  const result = await bot.slack.postBlocks(bot.defaultChannelId, { text: fallback, blocks });
+  const result = await bot.slack.postBlocks(bot.defaultChannelId, { text: slackEscape(fallback), blocks });
   return result.ts || null;
 }
 
-async function sendSlackUp(
+async function sendSlackRecovery(
   env: Env,
   monitor: Monitor,
   downDurationMs: number,
   slackAlertTs: string | null,
+  kind: RecoveryKind,
+  detail?: IncidentDetail,
 ): Promise<void> {
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return;
 
   const channel = bot.defaultChannelId;
-  const fallback = `✅ RECOVERED: ${monitor.name} (down for ${formatDuration(downDurationMs)})`;
+  // DOWN -> DEGRADED formerly emitted a green RECOVERED message. Distinguish response
+  // restoration from full recovery, and label durations as monitor observations.
+  const content = recoveryText(monitor, kind, downDurationMs, detail);
+  const fallback = `${content.title} — ${content.message}${content.duration ? ` (${content.duration})` : ''}`;
   const blocks: unknown[] = [
     {
       type: 'header',
-      text: { type: 'plain_text', text: `✅  RECOVERED — ${monitor.name}`, emoji: true },
+      text: { type: 'plain_text', text: content.title, emoji: true },
     },
     {
       type: 'section',
@@ -290,15 +324,16 @@ async function sendSlackUp(
           type: 'mrkdwn',
           text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
         },
-        { type: 'mrkdwn', text: `*Down for*\n${formatDuration(downDurationMs)}` },
+        ...(content.duration ? [{ type: 'mrkdwn', text: slackEscape(content.duration) }] : []),
       ],
     },
+    { type: 'section', text: { type: 'mrkdwn', text: slackEscape(content.message) } },
     {
       type: 'context',
       elements: [
         {
           type: 'mrkdwn',
-          text: `:large_green_circle:  Recovered at <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+          text: `${kind === 'partial' ? ':large_yellow_circle: Response restored; degradation continues' : ':large_green_circle: Full recovery observed'} at <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
         },
       ],
     },
@@ -306,7 +341,7 @@ async function sendSlackUp(
 
   await Promise.allSettled([
     bot.slack.postBlocks(channel, {
-      text: fallback,
+      text: slackEscape(fallback),
       blocks,
       threadTs: slackAlertTs ?? undefined,
       // Threaded recoveries also broadcast to the channel timeline so the
@@ -314,7 +349,7 @@ async function sendSlackUp(
       // there's no thread (top-level fallback path).
       replyBroadcast: Boolean(slackAlertTs),
     }),
-    slackAlertTs
+    slackAlertTs && kind !== 'partial'
       ? bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark')
       : Promise.resolve(),
   ]);
