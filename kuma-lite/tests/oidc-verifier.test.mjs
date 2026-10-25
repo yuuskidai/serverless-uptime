@@ -44,7 +44,7 @@ test('actual RSA signature is verified against fixed issuer keys and exact workf
   assert.equal(claims.repository_owner_id, config.ownerId);
   assert.equal(claims.sha, baseClaims.sha);
   assert.deepEqual(f.calls, [{ url: 'https://token.actions.githubusercontent.com/.well-known/jwks',
-    method: 'GET', redirect: 'error', headers: { Accept: 'application/json' } }]);
+    method: 'GET', redirect: 'manual', headers: { Accept: 'application/json' } }]);
 });
 
 for (const backdate of [300, 600]) test(`accepts GitHub signed nbf backdated ${backdate} seconds without extending token expiry`, async () => {

@@ -198,7 +198,9 @@ async function refreshKeys(state: KeyCache, fetcher: typeof fetch, nowMs: number
   let timer: ReturnType<typeof setTimeout> | undefined;
   let response: Response | undefined;
   const operation = (async () => {
-    response = await fetcher(JWKS_URL, { method: 'GET', redirect: 'error', signal: controller.signal,
+    // Workers supports follow/manual, not redirect:error. Manual keeps issuer
+    // redirects untrusted; readJwks rejects every non-2xx response below.
+    response = await fetcher(JWKS_URL, { method: 'GET', redirect: 'manual', signal: controller.signal,
       headers: { Accept: 'application/json' } });
     if (controller.signal.aborted) {
       void response.body?.cancel().catch(() => undefined);
