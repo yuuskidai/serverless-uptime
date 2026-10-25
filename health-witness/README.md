@@ -50,3 +50,14 @@ Deploy and provision `ADMIN_SECRET` separately before issuing the authenticated
 start request. Deployment alone leaves an uninitialised object `unknown` and
 stopped. Invocation logs are disabled to keep administrative bearer headers out
 of invocation metadata; the probe's own structured logs contain no credentials.
+
+Workers Builds deploys this Worker from the repository's `master` branch, watching
+both `health-witness/**` and its shared `kuma-lite/**` dependencies. The build root
+is `/health-witness`; it installs the pinned sibling dependencies and typechecks
+before deploying. `NODE_VERSION=24.22.1` selects Node and `packageManager` selects
+npm 11.21.1. Keep the existing runtime secret and SQLite namespace across releases;
+a deployment must not stop, restart, or clear the scheduler's stored state.
+
+The main monitor may read the fixed `/latest` endpoint through its
+`CLOUDFLARE_WITNESS` Service Binding. That binding carries no administrative bearer
+and does not change where or when these public HTTPS measurements run.

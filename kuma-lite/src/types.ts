@@ -15,6 +15,7 @@ export interface Env {
   EXTERNAL_PROBE_WORKFLOW_REF?: string;
   // Optional read-only supplement from the separate Cloudflare alarm Worker.
   CLOUDFLARE_WITNESS_URL?: string;
+  CLOUDFLARE_WITNESS?: Fetcher;
 
   // Slack via chat-sdk. Configure all three (or none) to enable Slack
   // notifications and the `/status` slash command. SLACK_DEFAULT_CHANNEL

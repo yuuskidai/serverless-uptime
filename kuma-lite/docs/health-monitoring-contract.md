@@ -168,6 +168,12 @@ and does not establish provider independence. When the setting is absent, the
 GitHub supplement remains selected. When present, a failed or invalid Cloudflare
 response is unknown; a healthy GitHub row is never substituted.
 
+The `CLOUDFLARE_WITNESS` service binding must point to `helth-witness` (Workers
+Builds: add `CLOUDFLARE_WITNESS=helth-witness` to `WRANGLER_SERVICES`). The
+binding reads only the fixed `/latest` snapshot. It does not initiate probes or
+admin requests. Same-zone `workers.dev` calls cannot use bare global `fetch`;
+missing bindings fail closed to unknown, without a global-fetch fallback.
+
 The consumer only fetches the exact allowlisted origin's `/latest`, with a
 two-second absolute deadline including headers and body, no redirects, no-store,
 and an 8 KiB body limit. Cached responses cannot establish health. It checks enabled/current-generation readiness, local

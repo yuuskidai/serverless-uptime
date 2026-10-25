@@ -18,22 +18,34 @@ const bundle = buildSync({ stdin: {
   resolveDir: fileURLToPath(new URL('../', import.meta.url)), sourcefile: 'external-summary-fixture.js',
 }, bundle: true, platform: 'browser', format: 'esm', write: false }).outputFiles[0].text;
 
-test('real workerd uses bounded HTTPS manual/no-store fetch for Cloudflare summaries and rejects a redirect', async t => {
-  const now = Date.now(); const calls = []; let mode = 'ok';
+test('real workerd uses the read-only service binding, rejects redirects and never uses global fetch', async t => {
+  const now = Date.now(); let globalFetches = 0;
   const payload = { version: 1, source: 'cloudflare_alarm', enabled: true, observed_at: now - 2000, finished_at: now - 1000,
     readiness: { status: 'fresh' }, results: config.targets.map(target => ({ monitor_id: target.monitor_id,
       url: target.url, db_threshold_ms: target.db_threshold_ms, observed_at: now - 2000, finished_at: now - 1000,
       total_ms: 1000, status: 'ok', http_status: 200, database_ms: 100, failure: null })) };
+  const witnessScript = `let mode = 'ok'; const calls = [];
+    export default { fetch(request, env) {
+      const path = new URL(request.url).pathname;
+      if (path.startsWith('/test-mode/')) { mode = path.slice('/test-mode/'.length); return new Response('ok'); }
+      if (path === '/test-calls') return Response.json(calls);
+      calls.push({ url: request.url, method: request.method, cacheControl: request.headers.get('Cache-Control') });
+      if (mode === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://private.invalid/' } });
+      if (mode === 'oversized') return new Response(' '.repeat(8193), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      return Response.json(JSON.parse(env.PAYLOAD), { headers: { 'Cache-Control': 'no-store' } });
+    } };`;
+  const denyGlobalFetch = async () => { globalFetches++; throw new Error('Global fetch must not be used'); };
   const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
     name: 'summary', script: bundle, modules: true, compatibilityDate: '2025-01-01',
     d1Databases: { DB: 'synthetic-summary-db' },
     bindings: { CLOUDFLARE_WITNESS_URL: origin, FIXTURE_NOW: String(now) },
-    outboundService: async request => {
-      calls.push({ url: request.url, method: request.method, cacheControl: request.headers.get('Cache-Control') });
-      if (mode === 'redirect') return new Response(null, { status: 302, headers: { Location: 'https://private.invalid/' } });
-      if (mode === 'oversized') return new Response(' '.repeat(8193), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-      return Response.json(payload, { headers: { 'Cache-Control': 'no-store' } });
-    },
+    serviceBindings: { CLOUDFLARE_WITNESS: 'witness' }, outboundService: denyGlobalFetch,
+  }, {
+    name: 'witness', script: witnessScript, modules: true, compatibilityDate: '2025-01-01',
+    bindings: { PAYLOAD: JSON.stringify(payload) }, outboundService: denyGlobalFetch,
+  }, {
+    name: 'summary-unbound', script: bundle, modules: true, compatibilityDate: '2025-01-01',
+    bindings: { CLOUDFLARE_WITNESS_URL: origin, FIXTURE_NOW: String(now) }, outboundService: denyGlobalFetch,
   }] }));
   t.after(() => mf.dispose());
   const db = await mf.getD1Database('DB', 'summary');
@@ -47,11 +59,16 @@ test('real workerd uses bounded HTTPS manual/no-store fetch for Cloudflare summa
   assert.equal(result[5].status, 'ok'); assert.equal(result[6].status, 'ok');
   assert.equal(result[5].source, 'cloudflare_alarm'); assert.equal(result[5].runUrl, null);
   assert.equal(result[5].statusUrl, origin + '/status');
-  mode = 'redirect'; result = await (await worker.fetch('https://summary.invalid/')).json();
+  const witness = await mf.getWorker('witness');
+  await witness.fetch('https://fixture.invalid/test-mode/redirect'); result = await (await worker.fetch('https://summary.invalid/')).json();
   assert.equal(result[5].status, 'unknown');
-  mode = 'oversized'; result = await (await worker.fetch('https://summary.invalid/')).json();
+  await witness.fetch('https://fixture.invalid/test-mode/oversized'); result = await (await worker.fetch('https://summary.invalid/')).json();
   assert.equal(result[5].status, 'unknown');
+  const calls = await (await witness.fetch('https://fixture.invalid/test-calls')).json();
   assert.deepEqual(calls, Array.from({ length: 3 }, () => ({ url: origin + '/latest', method: 'GET', cacheControl: 'no-store' })));
+  const unbound = await mf.getWorker('summary-unbound');
+  const unknown = await (await unbound.fetch('https://summary.invalid/')).json();
+  assert.equal(unknown[5].status, 'unknown'); assert.equal(globalFetches, 0);
   assert.equal((await db.prepare('SELECT count(*) AS n FROM checks').first()).n, 0);
   assert.equal((await db.prepare('SELECT count(*) AS n FROM external_probe_runs').first()).n, 0);
 });

@@ -45,6 +45,27 @@ test('Cloudflare summary only fetches the fixed latest endpoint and leaves every
   assert.equal(before, after);
 });
 
+test('the read-only service binding keeps its receiver and global fetch is never used', async t => {
+  const f = fixture(t); let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => { assert.fail('global fetch must not be used'); });
+  const binding = { fetch: async function(url, init) {
+    assert.equal(this, binding); assert.equal(url, origin + '/latest'); assert.equal(init.method, 'GET');
+    calls++; return response(payload());
+  } };
+  f.env.CLOUDFLARE_WITNESS = binding;
+  const out = await getExternalSummaries(f.env, now);
+  assert.equal(calls, 1); assert.equal(out.get(5).status, 'ok'); assert.equal(out.get(6).status, 'ok');
+});
+
+test('a missing service binding fails closed without global fetch, while an injected test fetcher takes priority', async t => {
+  const f = fixture(t);
+  t.mock.method(globalThis, 'fetch', async () => { assert.fail('global fetch must not be used'); });
+  const missing = await getExternalSummaries(f.env, now);
+  assert.equal(missing.get(5).source, 'cloudflare_alarm'); assert.equal(missing.get(5).status, 'unknown');
+  f.env.CLOUDFLARE_WITNESS = { fetch() { assert.fail('injected fetcher must take priority'); } };
+  assert.equal((await call(f)).get(5).status, 'ok');
+});
+
 for (const url of ['', 'http://helth-witness.opus-system.workers.dev', origin + '/latest', origin + '?x=1',
   origin + '#x', origin.replace('https://', 'https://user@'), origin + ':443', 'https://127.0.0.1', origin + '.invalid']) {
   test(`invalid configured origin fails closed without fetching: ${url}`, async t => {

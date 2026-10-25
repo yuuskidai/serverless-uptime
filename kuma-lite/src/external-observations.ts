@@ -176,6 +176,10 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
   // ports, paths, queries, fragments, redirects, or arbitrary destinations.
   if (env.CLOUDFLARE_WITNESS_URL !== CLOUDFLARE_WITNESS_ORIGIN &&
       env.CLOUDFLARE_WITNESS_URL !== `${CLOUDFLARE_WITNESS_ORIGIN}/`) return out;
+  // Same-zone workers.dev calls require a service binding. This fetch only
+  // reads the fixed public snapshot; it never starts probes or sends controls.
+  const fetcher = options.fetcher ?? env.CLOUDFLARE_WITNESS?.fetch.bind(env.CLOUDFLARE_WITNESS);
+  if (!fetcher) return out;
   const deadline = performance.now() + Math.min(2000, Math.max(1, options.timeoutMs ?? 2000));
   const requireDeadline = () => { if (performance.now() >= deadline) throw new Error('witness'); };
   const controller = new AbortController();
@@ -187,7 +191,7 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
     const monitorsPromise = env.DB.prepare(
       'SELECT id,url,enabled,monitor_role,db_latency_threshold_ms FROM monitors WHERE id IN (?,?)',
     ).bind(...targetsConfig.targets.map(target => target.monitor_id)).all<Monitor>().catch(() => ({ results: [] as Monitor[] }));
-    const res = await (options.fetcher ?? fetch)(`${CLOUDFLARE_WITNESS_ORIGIN}/latest`, {
+    const res = await fetcher(`${CLOUDFLARE_WITNESS_ORIGIN}/latest`, {
       method: 'GET', redirect: 'manual', cache: 'no-store', signal: controller.signal,
       headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
     });
