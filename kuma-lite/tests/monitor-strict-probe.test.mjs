@@ -25,8 +25,7 @@ test('explicit public transport ignores an available binding and requests fresh 
     assert.equal(url, base.url);
     assert.equal(init.redirect, 'manual');
     assert.equal(init.cache, 'no-store');
-    assert.equal(init.cf.cacheTtl, 0);
-    assert.equal(init.cf.cacheEverything, false);
+    assert.equal(init.cf, undefined);
     assert.match(init.headers['X-Monitor-Request-ID'], /^[a-f0-9-]{36}$/);
     return response();
   });

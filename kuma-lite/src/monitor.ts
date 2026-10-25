@@ -113,7 +113,9 @@ async function probe(
       }
       response = await fetcher.fetch(url, {
         method, signal, redirect: strict ? 'manual' : 'follow',
-        ...(strict ? { cache: 'no-store' as const, cf: { cacheTtl: 0, cacheEverything: false } } : {}),
+        // Workers rejects cache:no-store combined with cf.cacheTtl. Use the
+        // standard bypass by itself; response freshness is validated below.
+        ...(strict ? { cache: 'no-store' as const } : {}),
         headers: { 'User-Agent': 'kuma-lite/0.3 (uptime monitor)', 'X-Monitor-Request-ID': trace.request_id },
       });
       if (signal.aborted) {
