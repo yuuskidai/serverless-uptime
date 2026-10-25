@@ -5,6 +5,9 @@ import { verifyGithubOidc, GithubOidcError, type GithubOidcConfig, type GithubOi
 const BODY_LIMIT = 8192;
 const OBSERVATION_MAX_AGE = 600_000;
 const WITNESS_MAX_AGE = 900_000;
+const CLOUDFLARE_WITNESS_MAX_AGE = 150_000;
+const CLOUDFLARE_WITNESS_ORIGIN = 'https://helth-witness.opus-system.workers.dev';
+export const CLOUDFLARE_WITNESS_STATUS_URL = `${CLOUDFLARE_WITNESS_ORIGIN}/status`;
 const FUTURE_TOLERANCE = 30_000;
 const ERRORS = new Set(['timeout_headers', 'timeout_body', 'http_error', 'invalid_health', 'cached_response', 'network_error']);
 const HEADERS = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
@@ -46,6 +49,7 @@ interface ExternalReport {
   readiness: ReadinessObservation;
 }
 export interface ExternalWitness {
+  source: 'github_actions' | 'cloudflare_alarm';
   status: 'ok' | 'degraded' | 'down' | 'unknown';
   observedAt: number | null;
   totalMs: number | null;
@@ -53,6 +57,7 @@ export interface ExternalWitness {
   runId: string | null;
   runAttempt: string | null;
   runUrl: string | null;
+  statusUrl: string | null;
 }
 type HandlerOptions = { now?: number; verifyToken?: typeof verifyGithubOidc; bodyTimeoutMs?: number };
 
@@ -149,12 +154,126 @@ export async function readExternalWitnesses(env: Env, now = Date.now()): Promise
     const age = row.finished_at == null ? null : now - row.finished_at;
     const fresh = age !== null && age >= -FUTURE_TOLERANCE && age < WITNESS_MAX_AGE;
     const validRun = row.run_id !== null && /^[1-9]\d{0,19}$/.test(row.run_id) && row.run_attempt !== null && /^[1-9]\d{0,5}$/.test(row.run_attempt);
-    out.set(row.id, { status: fresh && row.status ? row.status : 'unknown', observedAt: row.observed_at,
+    out.set(row.id, { source: 'github_actions', status: fresh && row.status ? row.status : 'unknown', observedAt: row.observed_at,
       totalMs: fresh ? row.total_ms : null, ageMs: age === null ? null : Math.max(0, age),
       runId: row.run_id, runAttempt: row.run_attempt,
-      runUrl: validRun ? `https://github.com/${config.repository}/actions/runs/${row.run_id}/attempts/${row.run_attempt}` : null });
+      runUrl: validRun ? `https://github.com/${config.repository}/actions/runs/${row.run_id}/attempts/${row.run_attempt}` : null,
+      statusUrl: null });
   }
   return out;
+}
+
+/** Display-only source selection. Failure never substitutes a different provider. */
+export async function getExternalSummaries(env: Env, now = Date.now(), options: {
+  fetcher?: typeof fetch; timeoutMs?: number;
+} = {}): Promise<Map<number, ExternalWitness>> {
+  if (env.CLOUDFLARE_WITNESS_URL === undefined) return readExternalWitnesses(env, now);
+  const out = new Map<number, ExternalWitness>(targetsConfig.targets.map(target => [target.monitor_id, {
+    source: 'cloudflare_alarm', status: 'unknown', observedAt: null, totalMs: null, ageMs: null,
+    runId: null, runAttempt: null, runUrl: null, statusUrl: CLOUDFLARE_WITNESS_STATUS_URL,
+  }]));
+  // Compare the entire configured value before fetching: no userinfo, alternate
+  // ports, paths, queries, fragments, redirects, or arbitrary destinations.
+  if (env.CLOUDFLARE_WITNESS_URL !== CLOUDFLARE_WITNESS_ORIGIN &&
+      env.CLOUDFLARE_WITNESS_URL !== `${CLOUDFLARE_WITNESS_ORIGIN}/`) return out;
+  const deadline = performance.now() + Math.min(2000, Math.max(1, options.timeoutMs ?? 2000));
+  const requireDeadline = () => { if (performance.now() >= deadline) throw new Error('witness'); };
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let responseBody: ReadableStream<Uint8Array> | null = null;
+  const operation = async () => {
+    requireDeadline();
+    const monitorsPromise = env.DB.prepare(
+      'SELECT id,url,enabled,monitor_role,db_latency_threshold_ms FROM monitors WHERE id IN (?,?)',
+    ).bind(...targetsConfig.targets.map(target => target.monitor_id)).all<Monitor>().catch(() => ({ results: [] as Monitor[] }));
+    const res = await (options.fetcher ?? fetch)(`${CLOUDFLARE_WITNESS_ORIGIN}/latest`, {
+      method: 'GET', redirect: 'manual', cache: 'no-store', signal: controller.signal,
+      headers: { Accept: 'application/json', 'Cache-Control': 'no-store' },
+    });
+    responseBody = res.body;
+    if (controller.signal.aborted || performance.now() >= deadline) {
+      void res.body?.cancel().catch(() => undefined);
+      throw new Error('witness');
+    }
+    // Workers supports manual redirect mode. Reject 3xx without following it.
+    if (controller.signal.aborted || res.status !== 200 || !res.body ||
+        !/^application\/json(?:\s*;|\s*$)/i.test(res.headers.get('content-type') ?? '') ||
+        !/(?:^|,)\s*no-store\s*(?:,|$)/i.test(res.headers.get('cache-control') ?? '') ||
+        ['HIT', 'STALE', 'UPDATING', 'REVALIDATED'].includes((res.headers.get('cf-cache-status') ?? '').trim().toUpperCase()) ||
+        Number(res.headers.get('content-length') ?? 0) > BODY_LIMIT ||
+        Number(res.headers.get('age') ?? 0) > 0) {
+      void res.body?.cancel().catch(() => undefined);
+      throw new Error('witness');
+    }
+    reader = res.body.getReader();
+    let text = ''; let bytes = 0;
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+    try {
+      for (;;) {
+        const part = await reader.read();
+        requireDeadline();
+        if (controller.signal.aborted) throw new Error('witness');
+        if (part.done) { text += decoder.decode(); break; }
+        bytes += part.value.byteLength;
+        if (bytes > BODY_LIMIT) throw new Error('witness');
+        text += decoder.decode(part.value, { stream: true });
+      }
+    } finally { reader.releaseLock(); }
+    const payload = JSON.parse(text) as unknown;
+    const monitors = (await monitorsPromise).results ?? [];
+    requireDeadline();
+    return { payload, monitors };
+  };
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(new Error('witness')); },
+        Math.max(0, deadline - performance.now()));
+    });
+    const { payload, monitors } = await Promise.race([operation(), timeout]);
+    requireDeadline();
+    if (!record(payload) || payload.version !== 1 || payload.source !== 'cloudflare_alarm' ||
+        payload.enabled !== true || !record(payload.readiness) || payload.readiness.status !== 'fresh' ||
+        !cloudflareInterval(payload, now) || !Array.isArray(payload.results) || payload.results.length !== 2) return out;
+    const seen = new Set<number>();
+    const summaries: [number, ExternalWitness][] = [];
+    for (const input of payload.results) {
+      if (!record(input)) return out;
+      const target = targetsConfig.targets.find(target => target.monitor_id === input.monitor_id);
+      if (!target || seen.has(target.monitor_id)) return out;
+      seen.add(target.monitor_id);
+      const monitor = monitors.find(monitor => monitor.id === target.monitor_id);
+      if (!monitor || monitor.enabled !== 1 || monitor.monitor_role !== 'availability' ||
+          monitor.url !== target.url || input.url !== monitor.url ||
+          monitor.db_latency_threshold_ms !== target.db_threshold_ms || input.db_threshold_ms !== monitor.db_latency_threshold_ms ||
+          !cloudflareInterval(input, now) || !finite(input.total_ms, 0, 30_000) || !statusCode(input.http_status) ||
+          (input.observed_at as number) < (payload.observed_at as number) || (input.finished_at as number) > (payload.finished_at as number) ||
+          typeof input.status !== 'string' || !['ok', 'degraded', 'down'].includes(input.status) ||
+          !durationOrNull(input.database_ms) ||
+          (input.status !== 'down' && (input.http_status !== 200 || input.failure !== null || input.database_ms === null)) ||
+          (input.status === 'ok' && (input.database_ms as number) >= target.db_threshold_ms)) continue;
+      summaries.push([target.monitor_id, { source: 'cloudflare_alarm', status: input.status as ExternalWitness['status'],
+        observedAt: input.observed_at as number, totalMs: input.total_ms, ageMs: Math.max(0, now - (input.observed_at as number)),
+        runId: null, runAttempt: null, runUrl: null, statusUrl: CLOUDFLARE_WITNESS_STATUS_URL }]);
+    }
+    requireDeadline();
+    for (const [id, summary] of summaries) out.set(id, summary);
+  } catch { /* A supplemental failure is unknown and never changes primary state. */ }
+  finally {
+    if (timer !== undefined) clearTimeout(timer);
+    controller.abort();
+    // A stalled peer must not extend the response while acknowledging cancel.
+    void reader?.cancel().catch(() => undefined);
+    const body = responseBody as ReadableStream<Uint8Array> | null;
+    if (body && !body.locked) void body.cancel().catch(() => undefined);
+  }
+  return out;
+}
+
+function cloudflareInterval(value: Record<string, unknown>, now: number): boolean {
+  return Number.isSafeInteger(value.observed_at) && Number.isSafeInteger(value.finished_at) &&
+    finite(value.observed_at, Math.max(0, now - CLOUDFLARE_WITNESS_MAX_AGE + 1), now + FUTURE_TOLERANCE) &&
+    finite(value.finished_at, value.observed_at, now + FUTURE_TOLERANCE);
 }
 
 function configuration(env: Env): GithubOidcConfig | null {

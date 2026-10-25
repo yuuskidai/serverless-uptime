@@ -159,6 +159,29 @@ workflow status. This witness is outside Cloudflare, but does not establish a Ja
 APAC location or one-minute execution SLA. It is supplemental; primary cadence and
 the configured consecutive-failure policy remain separate.
 
+### Optional Cloudflare alarm Worker display
+
+`CLOUDFLARE_WITNESS_URL=https://helth-witness.opus-system.workers.dev` selects a
+read-only supplement from the separate alarm Worker. The status cards and Slack
+status label it **別Worker確認（Cloudflare）**: it uses the same Cloudflare provider
+and does not establish provider independence. When the setting is absent, the
+GitHub supplement remains selected. When present, a failed or invalid Cloudflare
+response is unknown; a healthy GitHub row is never substituted.
+
+The consumer only fetches the exact allowlisted origin's `/latest`, with a
+two-second absolute deadline including headers and body, no redirects, no-store,
+and an 8 KiB body limit. Cached responses cannot establish health. It checks enabled/current-generation readiness, local
+timestamps (less than 150 seconds old and no more than 30 seconds in the future),
+the two fixed target identities, and their URLs/DB thresholds against current
+availability monitors. Stopped, restarted without a new observation, stale, or
+configuration-mismatched results remain unknown. The only Cloudflare provenance
+link is the fixed `/status`; GitHub run links are never fabricated for alarm runs.
+
+This selection neither writes monitoring records nor changes primary checks,
+state, incident/recovery decisions, or notifications. `/api/external-observations`
+continues to expose authenticated GitHub observation history. Activating this
+display requires a separately verified deployment of `health-witness/`.
+
 ## Separate latency thresholds
 
 - `db_latency_threshold_ms`: nullable positive safe integer. Compares only an identifiable

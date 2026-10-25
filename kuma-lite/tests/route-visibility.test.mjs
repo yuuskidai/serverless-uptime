@@ -162,7 +162,7 @@ test('external confirmation remains supplemental when the primary monitor is dow
   check(f, { status: 'down' });
   const witness = { status: 'ok', observedAt: now - 1000, ageMs: 1000, totalMs: 208,
     runId: '123', runAttempt: '2', runUrl: 'https://github.com/example/monitor/actions/runs/123/attempts/2' };
-  const helper = { readExternalWitnesses: async () => new Map([[1, witness], [2, { ...witness, runUrl: 'https://private.example/secret' }]]) };
+  const helper = { getExternalSummaries: async () => new Map([[1, witness], [2, { ...witness, runUrl: 'https://private.example/secret' }]]) };
   const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
   const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
   assert.match(html, /> 停止中/);
@@ -187,12 +187,36 @@ test('stale external confirmation is unknown and arbitrary provenance links cann
     'https://github.com/a/b/actions/runs/1?private=token', 'https://github.com/a/b/actions/runs/1#fragment',
   ]) {
     const { renderStatusPage: render } = loadTs('status-page', { './external-observations': {
-      readExternalWitnesses: async () => new Map([[1, { status: 'unknown', observedAt: Date.now() - 1000000,
+      getExternalSummaries: async () => new Map([[1, { status: 'unknown', observedAt: Date.now() - 1000000,
         totalMs: null, ageMs: 1000000, runId: '1', runAttempt: '1', runUrl }]]),
     } });
     const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
     assert.match(html, /外部確認: 未確認/);
     assert.doesNotMatch(html, />確認記録<|javascript:|password@github|private=token/);
     assert.match(html, /すべて正常に稼働中/);
+  }
+});
+
+test('Cloudflare alarm confirmation identifies the shared provider and never supplies a GitHub provenance link', async t => {
+  const f = fixture(t); check(f, { status: 'down' });
+  f.sqlite.prepare("UPDATE monitor_state SET current_status='down' WHERE monitor_id=1").run();
+  const statusUrl = 'https://helth-witness.opus-system.workers.dev/status';
+  for (const url of [statusUrl, statusUrl + '?secret=private', 'https://private.invalid/status']) {
+    const helper = { CLOUDFLARE_WITNESS_STATUS_URL: statusUrl, getExternalSummaries: async () => new Map([[1, {
+      source: 'cloudflare_alarm', status: 'ok', observedAt: Date.now() - 1000, totalMs: 100, ageMs: 1000,
+      runUrl: 'https://github.com/example/monitor/actions/runs/123', statusUrl: url,
+    }]]) };
+    const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
+    const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
+    assert.match(html, /別Worker確認（Cloudflare）: 正常/); assert.match(html, /同じCloudflare上で動作/);
+    assert.match(html, /> 停止中/); assert.doesNotMatch(html, /github\.com|private\.invalid|secret=private/);
+    assert.equal(html.includes('>確認記録<'), url === statusUrl);
+    const { renderStatusBlocks: slack } = loadTs('slack-bot', {
+      chat: { Chat: class {} }, '@chat-adapter/state-memory': { createMemoryState: () => ({}) },
+      './chat-adapters/slack': { createSlackAdapter: () => ({}) }, './external-observations': helper,
+    });
+    const blocks = await slack(f.env); assert.match(blocks.text, /DOWN/);
+    assert.match(JSON.stringify(blocks), /別Worker確認（Cloudflare）: 正常/);
+    assert.doesNotMatch(JSON.stringify(blocks), /github\.com|private\.invalid/);
   }
 });

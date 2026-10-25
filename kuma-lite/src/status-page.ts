@@ -9,7 +9,7 @@ import { classify, KIND_HEADLINE } from './kinds';
 import { publicFacingUrl } from './url-display';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql, availabilitySince } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
-import { readExternalWitnesses, type ExternalWitness } from './external-observations';
+import { getExternalSummaries, CLOUDFLARE_WITNESS_STATUS_URL, type ExternalWitness } from './external-observations';
 
 const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
@@ -258,7 +258,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
           .bind(sinceWindow, ...ids)
           .all<ErrRow>()
       : Promise.resolve(null),
-    readExternalWitnesses(env, now),
+    getExternalSummaries(env, now),
   ]);
 
   const stateById = new Map<number, MonitorState>();
@@ -1059,15 +1059,20 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 
 /** A separate observation, never a replacement for the primary monitor state. */
 function renderExternalWitness(witness: ExternalWitness | null): string {
+  const cloudflare = witness?.source === 'cloudflare_alarm';
+  const heading = cloudflare ? '別Worker確認（Cloudflare）' : '外部確認';
   const label = witness?.status === 'ok' ? '正常' : witness?.status === 'degraded' ? '遅延・一部不調'
     : witness?.status === 'down' ? '応答確認できず' : '未確認';
   const time = witness?.observedAt != null ? ` · ${formatJstDateTime(witness.observedAt)}` : '';
   const elapsed = witness?.status !== 'unknown' && witness?.totalMs != null ? ` · ${Math.round(witness.totalMs)} ミリ秒` : '';
   // Provenance links are reconstructed from the configured GitHub repository.
   // Do not render a database-supplied arbitrary URL even for this optional link.
-  const url = safeExternalRunUrl(witness?.runUrl ?? null);
+  const url = cloudflare ? (witness?.statusUrl === CLOUDFLARE_WITNESS_STATUS_URL ? CLOUDFLARE_WITNESS_STATUS_URL : null)
+    : safeExternalRunUrl(witness?.runUrl ?? null);
   const provenance = url ? ` · <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="underline">確認記録</a>` : '';
-  return `<p class="mt-2 text-xs text-slate-400 leading-snug">外部確認: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">約5分ごとの補助確認。更新が古い場合は未確認です。</span></p>`;
+  const cadence = cloudflare ? '約1分ごとの補助確認。同じCloudflare上で動作し、150秒以上古い場合は未確認です。'
+    : '約5分ごとの補助確認。更新が古い場合は未確認です。';
+  return `<p class="mt-2 text-xs text-slate-400 leading-snug">${heading}: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">${cadence}</span></p>`;
 }
 
 function safeExternalRunUrl(value: string | null): string | null {

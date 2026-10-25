@@ -5,11 +5,13 @@ on:
     branches: [master]
     paths:
       - "kuma-lite/**"
+      - "health-witness/**"
       - ".github/workflows/kuma-lite-test.yml"
       - ".github/workflows/external-health.yml"
   pull_request:
     paths:
       - "kuma-lite/**"
+      - "health-witness/**"
       - ".github/workflows/kuma-lite-test.yml"
       - ".github/workflows/external-health.yml"
 
@@ -33,3 +35,9 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
+      - name: Typecheck Cloudflare witness
+        run: npm run typecheck
+        working-directory: health-witness
+      - name: Test Cloudflare witness
+        run: npm test
+        working-directory: health-witness

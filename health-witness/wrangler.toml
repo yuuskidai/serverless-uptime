@@ -1,0 +1,27 @@
+name = "helth-witness"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+# Deliberately independent of the monitor's Cron, D1, service bindings and tokens.
+[[durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "ProbeScheduler"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProbeScheduler"]
+
+[version_metadata]
+binding = "VERSION_METADATA"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+# Set ADMIN_SECRET separately: a random 32-byte hex or base64url value.
+# No Cron, business database, service binding, Slack, AI, or Cloudflare API token.
