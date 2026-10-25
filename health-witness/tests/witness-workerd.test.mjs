@@ -14,8 +14,16 @@ const bundle = buildSync({ stdin: {
   contents: `import handler from './src/index.ts';
     import { ProbeScheduler } from './src/scheduler.ts';
     export default handler;
+    const acceptedAudits = [];
+    const originalInfo = console.info.bind(console);
+    console.info = (...args) => {
+      if (args[0]?.event === 'witness_slot_result') acceptedAudits.push(args[0]);
+      originalInfo(...args);
+    };
     // Test-only RPC surface: never part of the deployed entry point or its bundle.
     export class TestScheduler extends ProbeScheduler {
+      async testAudits() { return acceptedAudits; }
+      async testClearAudits() { acceptedAudits.length = 0; }
       async testState() {
         return { control: await this.ctx.storage.get('control'),
           history: await this.ctx.storage.get('history'), alarm: await this.ctx.storage.getAlarm() };
@@ -78,7 +86,10 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
   const call = (path, options) => worker.fetch(`https://witness.invalid${path}`, options);
   const admin = path => call(`/admin/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${secret}` } });
   const status = async () => (await call('/status')).json();
-  async function reset() { outbound = undefined; requests.length = 0; await stub().testSeed(emptyControl()); }
+  async function reset() {
+    outbound = undefined; requests.length = 0;
+    await stub().testSeed(emptyControl()); await stub().testClearAudits();
+  }
 
   await t.test('public reads and recreated constructors cannot start an uninitialised or stopped scheduler', async () => {
     await reset();
@@ -114,6 +125,7 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
     assert.equal((await admin('stop')).status, 200);
     assert.equal((await stub().testState()).alarm, null);
     assert.equal(requests.length, 0);
+    assert.deepEqual(await stub().testAudits(), []); // Administrative HTTP never logs accepted results.
   });
 
   await t.test('real runtime alarm schedules its successor before public HTTPS probes and deduplicates retry', async () => {
@@ -129,6 +141,7 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
     assert.ok(processing.alarm > Date.now()); assert.equal(processing.alarm, processing.control.next_slot);
     await Promise.all([stub().testInvokeAlarm(), stub().testInvokeAlarm()]);
     assert.equal(requests.length, 2);
+    assert.deepEqual(await stub().testAudits(), []); // No result audit before storage acceptance.
     release();
     await poll(async () => (await status()).status === 'ok', 'alarm should persist the actual responses');
     const view = await status();
@@ -140,6 +153,13 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
     ]);
     assert.ok(requests.every(row => row.method === 'GET' && !row.headers.authorization));
     assert.equal(JSON.stringify(view).includes(secret), false);
+    await poll(async () => (await stub().testAudits()).length === 1, 'accepted result should produce one audit');
+    const audits = await stub().testAudits();
+    assert.equal(audits[0].event, 'witness_slot_result');
+    assert.equal(audits[0].attempt_id, view.latest.attempt_id);
+    assert.equal(audits[0].slot, slot); assert.equal(audits[0].targets.length, 2);
+    await stub().testInvokeAlarm();
+    assert.equal((await stub().testAudits()).length, 1); // Duplicate delivery is not an accepted observation.
     const compactResponse = await call('/latest');
     const compactText = await compactResponse.text(); assert.ok(Buffer.byteLength(compactText) < 8192);
     const compact = JSON.parse(compactText);
@@ -175,6 +195,7 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
     assert.equal(after.history[0].phase, 'cancelled');
     assert.deepEqual(after.history[0].targets, []);
     assert.equal((await status()).status, 'unknown');
+    assert.deepEqual(await stub().testAudits(), []); // The stopped generation's completion was rejected.
     await admin('stop');
   });
 
@@ -225,12 +246,15 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
     const newer = await stub().testState();
     assert.equal(newer.history.at(-1).phase, 'completed');
     const newToken = newer.history.at(-1).attempt_id;
+    assert.equal((await stub().testAudits()).length, 1);
     release(); await oldRun;
     const final = await stub().testState();
     assert.equal(final.history.at(-1).attempt_id, newToken);
     assert.equal(final.history[0].phase, 'abandoned');
     assert.deepEqual(final.history[0].targets, []);
     assert.equal(final.control.active, null); assert.equal((await status()).status, 'ok');
+    const audits = await stub().testAudits();
+    assert.equal(audits.length, 1); assert.equal(audits[0].attempt_id, newToken);
     await admin('stop');
   });
 
@@ -250,6 +274,15 @@ test('SQLite Durable Object witness remains independent, bounded and fenced', as
       assert.equal(JSON.stringify(view).includes(secret), false);
     }
     assert.equal(requests.length, 10); // A redirect must never launch a third-party fetch.
+    const audits = await stub().testAudits(); assert.equal(audits.length, 5);
+    assert.equal(JSON.stringify(audits).includes(secret), false);
+    const allowedTop = new Set(['event', 'slot', 'generation', 'attempt_id', 'alarm_received_at',
+      'alarm_lateness_ms', 'alarm_retry_count', 'phase', 'completed_at', 'probe_started_at', 'probe_finished_at', 'version', 'targets']);
+    const allowedTarget = new Set(['target', 'status', 'observed_at', 'finished_at', 'http_status',
+      'total_ms', 'database_ms', 'failure', 'request_id', 'response_request_id', 'request_id_matched',
+      'headers_ms', 'body_ms', 'timeout_callback_elapsed_ms', 'deadline_overrun_ms', 'healthz_version']);
+    assert.ok(audits.every(audit => Object.keys(audit).every(key => allowedTop.has(key))));
+    assert.ok(audits.every(audit => audit.targets.every(target => Object.keys(target).every(key => allowedTarget.has(key)))));
     await admin('stop');
   });
 

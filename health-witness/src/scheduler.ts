@@ -93,17 +93,36 @@ export class ProbeScheduler extends DurableObject<Env> {
   }
 
   private async finish(active: Active, targets: TargetObservation[], phase: SlotRecord['phase'], startedAt: number, finishedAt: number): Promise<void> {
-    await this.ctx.storage.transaction(async tx => {
+    const saved = await this.ctx.storage.transaction<SlotRecord | null>(async tx => {
       const control = await tx.get<Control>(CONTROL_KEY) ?? initial();
       // A stopped/restarted generation or a newer owner must never accept this late result.
-      if (!control.enabled || control.generation !== active.generation || control.active?.token !== active.token) return;
+      if (!control.enabled || control.generation !== active.generation || control.active?.token !== active.token) return null;
       const history = await tx.get<SlotRecord[]>(HISTORY_KEY) ?? [];
       const record = history.find(row => row.attempt_id === active.token && row.phase === 'checking');
-      if (!record) return;
+      if (!record) return null;
       record.phase = phase; record.completed_at = Date.now(); record.targets = targets;
       record.probe_started_at = startedAt; record.probe_finished_at = finishedAt;
       control.active = null;
       await tx.put(CONTROL_KEY, control); await tx.put(HISTORY_KEY, bounded(history));
+      return record;
+    });
+    // Log only accepted alarm results, after the transaction acknowledges storage.
+    // This allowlist excludes headers, response bodies/reasons and administrative inputs.
+    if (saved) console.info({
+      event: 'witness_slot_result', slot: saved.slot, generation: saved.generation,
+      attempt_id: saved.attempt_id, alarm_received_at: saved.alarm_received_at,
+      alarm_lateness_ms: saved.alarm_lateness_ms, alarm_retry_count: saved.alarm_retry_count,
+      phase: saved.phase, completed_at: saved.completed_at,
+      probe_started_at: saved.probe_started_at, probe_finished_at: saved.probe_finished_at,
+      version: { id: saved.version.id, tag: saved.version.tag, timestamp: saved.version.timestamp },
+      targets: saved.targets.map(target => ({
+        target: target.target, status: target.status, observed_at: target.observed_at, finished_at: target.finished_at,
+        http_status: target.http_status, total_ms: target.total_ms, database_ms: target.database_ms,
+        failure: target.failure, request_id: target.request_id, response_request_id: target.response_request_id,
+        request_id_matched: target.request_id_matched, headers_ms: target.headers_ms, body_ms: target.body_ms,
+        timeout_callback_elapsed_ms: target.timeout_callback_elapsed_ms, deadline_overrun_ms: target.deadline_overrun_ms,
+        healthz_version: target.healthz_version,
+      })),
     });
   }
 

@@ -36,6 +36,11 @@ one-minute interval is not a one-minute execution SLA. Missing/old observations
 never establish availability. Storage contains only bounded operational metadata
 and sanitized numeric/status/version/request-ID observations, without response
 bodies, reasons, credentials or request headers.
+Every accepted completed alarm emits a sanitized `witness_slot_result` structured
+log after storage acknowledges it. Cloudflare logs use 100% sampling for this
+Worker; these events support comparisons beyond the 15-slot public history,
+within the account's log retention period. Rejected late owners and duplicate
+deliveries do not emit accepted-result events, and administrative HTTP adds no logs.
 
 Use the Node 24 toolchain and the pinned dependencies installed by `npm ci` in
 `../kuma-lite`. This package downloads no separate toolchain:
