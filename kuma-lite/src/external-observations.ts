@@ -176,7 +176,7 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
   // ports, paths, queries, fragments, redirects, or arbitrary destinations.
   if (env.CLOUDFLARE_WITNESS_URL !== CLOUDFLARE_WITNESS_ORIGIN &&
       env.CLOUDFLARE_WITNESS_URL !== `${CLOUDFLARE_WITNESS_ORIGIN}/`) return out;
-  // Same-zone workers.dev calls require a service binding. This fetch only
+  // With the current compatibility flags, same-zone workers.dev calls need a binding. This fetch only
   // reads the fixed public snapshot; it never starts probes or sends controls.
   const fetcher = options.fetcher ?? env.CLOUDFLARE_WITNESS?.fetch.bind(env.CLOUDFLARE_WITNESS);
   if (!fetcher) return out;
