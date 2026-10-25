@@ -448,6 +448,17 @@ RSS リーダーは `<head>` の `<link rel="alternate" type="application/rss+xm
 | `interval_minutes` | number   | `1`     | `[1, 60]` にクランプ                 |
 | `retry_threshold`  | number   | `2`     | この回数連続で失敗したら通知         |
 | `enabled`          | boolean  | `true`  |                                      |
+| `probe_transport` | string | `legacy` | `public_fetch` は公開HTTPS、`service_binding` は指定した内部bindingを使用。明示した経路は自動で切り替えない |
+| `monitor_role` | string | `availability` | `availability` は公開稼働判定、`diagnostic` は内部経路の運用通知、`shadow` は記録のみ。診断・shadowは公開画面やRSSへ出さない |
+| `parent_monitor_id` | number / null | `null` | 診断・shadowが対応する公開監視ID。公開監視には親を指定しない |
+| `response_mode` | string | `legacy_http` | `strict_healthz` はHTTP・JSON・Database計測・キャッシュ抑止を検証し、入口画面の応答でhealth失敗を解消しない |
+| `config_revision` | number | サーバー管理 | 設定更新ごとに進み、旧設定で開始した要求の記録・通知を拒否する。APIからの指定不可 |
+| `availability_since_ms` | number / null | サーバー管理 | 公開HTTPS監視へ切り替えた時刻。過去の内部監視を公開HTTPSの実績として集計しない。APIからの指定不可 |
+
+経路変更は進行中の障害や有効な実行leaseがある場合に409を返します。設定変更・欠測を跨ぐ観測は連続失敗として数えません。
+監視自身の `/healthz` はプロセスの死活確認、`/readyz` は公開監視データの鮮度確認です。
+公開チェックが欠測・古い場合は `/readyz` が503を返し、公開画面も現在の状態を「未確認」と表示します。
+設定・段階切替・ロールバックの詳細は [監視契約](docs/health-monitoring-contract.md) を参照してください。
 
 > **業務情報の流し込みについて。** kuma-lite は HTTP レベルの自動診断しか
 > できないため、障害詳細ページに表示される説明文（例: 「システムエラー」「応答遅延」）

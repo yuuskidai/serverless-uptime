@@ -44,6 +44,16 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'monitor_execution', column: 'claimed_slot' },
   { table: 'monitor_execution', column: 'lease_token' },
   { table: 'monitor_execution', column: 'lease_until' },
+  { table: 'monitors', column: 'probe_transport' },
+  { table: 'monitors', column: 'monitor_role' },
+  { table: 'monitors', column: 'parent_monitor_id' },
+  { table: 'monitors', column: 'response_mode' },
+  { table: 'monitors', column: 'config_revision' },
+  { table: 'monitors', column: 'availability_since_ms' },
+  { table: 'checks', column: 'config_revision' },
+  { table: 'checks', column: 'monitor_role' },
+  { table: 'checks', column: 'probe_transport' },
+  { table: 'monitor_state', column: 'config_revision' },
 ];
 
 let cached: SchemaCheck | null = null;

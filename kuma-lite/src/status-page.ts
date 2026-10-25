@@ -7,6 +7,8 @@ import type {
 } from './types';
 import { classify, KIND_HEADLINE } from './kinds';
 import { publicFacingUrl } from './url-display';
+import { AVAILABILITY_ROLE_SQL, availabilityHistorySql, availabilitySince } from './monitor-policy';
+import { monitorFreshness } from './monitor-readiness';
 
 const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
@@ -78,7 +80,7 @@ type BucketState = 'up' | 'down' | 'partial' | 'maintenance' | 'none';
  * not). 'maintenance' overrides everything when the monitor is inside
  * a declared window.
  */
-type EffectiveState = 'up' | 'degraded' | 'down' | 'maintenance';
+type EffectiveState = 'up' | 'degraded' | 'down' | 'maintenance' | 'unknown';
 
 // Aggregate per-bucket counts on the database side. Without this, a 30-day
 // window with one-minute checks would pull tens of thousands of rows back
@@ -174,7 +176,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const db = env.DB.withSession('first-unconstrained');
 
   const monitorsResult = await db.prepare(
-    `SELECT * FROM monitors WHERE enabled = 1 ORDER BY id ASC`,
+    `SELECT * FROM monitors WHERE enabled = 1 AND ${AVAILABILITY_ROLE_SQL} ORDER BY id ASC`,
   ).all<Monitor>();
   const monitors = (monitorsResult.results ?? []).filter((m) => !hidden.has(m.id));
 
@@ -193,6 +195,8 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     ts: number;
     healthz_reason: string | null;
     healthz_components: string | null;
+    scheduled_slot: number | null;
+    config_revision: number | null;
   };
   type ErrRow = {
     monitor_id: number;
@@ -214,12 +218,12 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       .bind(...ids)
       .all<MonitorState>(),
     db.prepare(
-      `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components
+      `SELECT c.monitor_id, c.latency_ms, c.ts, c.healthz_reason, c.healthz_components, c.scheduled_slot, c.config_revision
          FROM checks c
          JOIN (
            SELECT monitor_id, MAX(ts) AS max_ts
              FROM checks
-            WHERE monitor_id IN (${placeholders})
+            WHERE monitor_id IN (${placeholders}) AND ${availabilityHistorySql()}
             GROUP BY monitor_id
          ) m ON m.monitor_id = c.monitor_id AND m.max_ts = c.ts`,
     )
@@ -236,7 +240,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
                     SUM(CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
                     SUM(CASE WHEN in_maintenance = 1 THEN 1 ELSE 0 END) AS maints
                FROM checks
-              WHERE ts >= ? AND monitor_id IN (${placeholders})
+              WHERE ts >= ? AND monitor_id IN (${placeholders}) AND ${availabilityHistorySql()}
               GROUP BY monitor_id, bucket_idx`,
           )
           .bind(sinceWindow, bucketMs, sinceWindow, ...ids)
@@ -244,7 +248,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     windowMs <= SAMPLE_ERROR_MAX_SCALE_MS
       ? db.prepare(
           `SELECT monitor_id, error, status_code, healthz_reason, ts FROM checks
-            WHERE ts >= ? AND status = 'down' AND in_maintenance = 0
+            WHERE ts >= ? AND ${availabilityHistorySql()} AND status = 'down' AND in_maintenance = 0
                   AND monitor_id IN (${placeholders})
             ORDER BY ts DESC
             LIMIT 5000`,
@@ -264,6 +268,8 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       ts: number;
       healthz_reason: string | null;
       healthz_components: string | null;
+      scheduled_slot: number | null;
+      config_revision: number | null;
     }
   >();
   for (const row of latestResult.results ?? []) {
@@ -272,6 +278,8 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       ts: row.ts,
       healthz_reason: row.healthz_reason,
       healthz_components: row.healthz_components,
+      scheduled_slot: row.scheduled_slot,
+      config_revision: row.config_revision,
     });
   }
 
@@ -329,17 +337,18 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     }
     const state = (stateRow?.current_status ?? 'up') as CheckStatus;
     const maintenance = parseMaintenance(stateRow, now);
-    const effState = deriveEffState(state, buckets, maintenance);
+    const freshness = monitorFreshness(monitor, latest ?? null, now);
+    const effState = freshness === 'fresh' ? deriveEffState(state, maintenance) : 'unknown';
     return {
       monitor,
       state,
       effState,
       uptime: totalChecks > 0 ? (totalUps / totalChecks) * 100 : null,
-      latestLatency: latest?.latency_ms ?? null,
+      latestLatency: freshness === 'fresh' ? latest?.latency_ms ?? null : null,
       latestTs: latest?.ts ?? null,
       buckets,
-      latestReason: latest?.healthz_reason ?? null,
-      latestComponents: parseComponents(latest?.healthz_components ?? null),
+      latestReason: freshness !== 'fresh' ? '監視情報が古いか、まだ取得されていません。現在の稼働状態は未確認です。' : latest?.healthz_reason ?? null,
+      latestComponents: freshness === 'fresh' ? parseComponents(latest?.healthz_components ?? null) : [],
       maintenance,
     };
   });
@@ -410,32 +419,29 @@ async function loadDailySummaryAggregate(
     maints: number;
     down_streak: number;
   };
-  const [summaryResult, todayResult] = await Promise.all([
-    db
-      .prepare(
-        `SELECT monitor_id, day_ms, ups, downs, maints, down_streak
-           FROM daily_summary
-          WHERE day_ms >= ? AND day_ms < ? AND monitor_id IN (${placeholders})`,
-      )
-      .bind(sinceWindow, todayMidnight, ...ids)
-      .all<SummaryRow>(),
-    // Same "islands" technique as cleanupOldChecks (see monitor.ts), but
-    // for today's still-open day: scoped to a single day so there's no
-    // day_ms grouping, just monitor_id.
-    db
-      .prepare(
-        `WITH today AS (
+  // Use identical slot/revision-aware streaks for today and the partial
+  // cutover day; otherwise yesterday's isolated sample would turn amber.
+  const rawDayAggregateSql = (scope: string, includeBucket = false) => `WITH today AS (
            SELECT monitor_id, status, in_maintenance,
                   CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
-                  ts
+                  COALESCE(scheduled_slot, CAST(ts / 60000 AS INTEGER) * 60000) AS slot,
+                  COALESCE(config_revision, 1) AS revision,
+                  COALESCE((SELECT interval_minutes FROM monitors WHERE id = checks.monitor_id), 1) * 60000 AS interval_ms,
+                  ts, id
              FROM checks
-            WHERE ts >= ? AND monitor_id IN (${placeholders})
+            WHERE ${scope} AND ${availabilityHistorySql()}
+         ),
+         sequence AS (
+           SELECT *, LAG(slot) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_slot,
+                     LAG(revision) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_revision
+             FROM today
          ),
          islands AS (
            SELECT monitor_id, is_down,
-                  ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY ts)
-                    - SUM(is_down) OVER (PARTITION BY monitor_id ORDER BY ts) AS island_id
-             FROM today
+                  SUM(CASE WHEN is_down = 0 OR previous_slot IS NULL OR slot - previous_slot != interval_ms
+                                  OR revision != previous_revision THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY monitor_id ORDER BY ts, id) AS island_id
+             FROM sequence
          ),
          streaks AS (
            SELECT monitor_id, MAX(run_len) AS down_streak
@@ -448,6 +454,7 @@ async function loadDailySummaryAggregate(
             GROUP BY monitor_id
          )
          SELECT t.monitor_id,
+                ${includeBucket ? 'CAST((MIN(t.ts) - ?) / 86400000 AS INTEGER) AS bucket_idx,' : ''}
                 COUNT(*) AS total,
                 SUM(CASE WHEN t.status = 'up' AND t.in_maintenance = 0 THEN 1 ELSE 0 END) AS ups,
                 SUM(CASE WHEN t.status = 'down' AND t.in_maintenance = 0 THEN 1 ELSE 0 END) AS downs,
@@ -455,12 +462,35 @@ async function loadDailySummaryAggregate(
                 COALESCE(s.down_streak, 0) AS down_streak
            FROM today t
            LEFT JOIN streaks s ON s.monitor_id = t.monitor_id
-          GROUP BY t.monitor_id`,
+          GROUP BY t.monitor_id`;
+  const [summaryResult, todayResult, boundaryResult] = await Promise.all([
+    db
+      .prepare(
+        `SELECT monitor_id, day_ms, ups, downs, maints, down_streak
+           FROM daily_summary
+          WHERE day_ms >= ? AND day_ms < ? AND monitor_id IN (${placeholders})
+            AND day_ms >= COALESCE((SELECT ((availability_since_ms + 86399999) / 86400000) * 86400000 FROM monitors WHERE id = daily_summary.monitor_id), 0)`,
+      )
+      .bind(sinceWindow, todayMidnight, ...ids)
+      .all<SummaryRow>(),
+    // Same "islands" technique as cleanupOldChecks (see monitor.ts), but
+    // for today's still-open day: scoped to a single day so there's no
+    // day_ms grouping, just monitor_id.
+    db
+      .prepare(
+        rawDayAggregateSql(`ts >= ? AND monitor_id IN (${placeholders})`),
       )
       .bind(todayMidnight, ...ids)
       .all<TodayRow>(),
+    // A mid-day route cutover makes that day's summary a mixed series. Read only
+    // post-cutover checks from the boundary day instead; keep stored history intact.
+    db.prepare(rawDayAggregateSql(
+      `ts >= ? AND ts < ? AND monitor_id IN (${placeholders})
+        AND ts < COALESCE((SELECT ((availability_since_ms + 86399999) / 86400000) * 86400000
+                            FROM monitors WHERE id = checks.monitor_id), 0)`, true,
+    )).bind(sinceWindow, todayMidnight, ...ids, sinceWindow).all<BucketRow>(),
   ]);
-  const out: BucketRow[] = [];
+  const out: BucketRow[] = [...(boundaryResult.results ?? [])];
   for (const row of summaryResult.results ?? []) {
     out.push({
       monitor_id: row.monitor_id,
@@ -510,26 +540,10 @@ function parseComponents(json: string | null): ComponentHealth[] {
   }
 }
 
-/**
- * Pick the badge state from the latest non-empty bucket. Empty trailing
- * buckets (the very current minute that hasn't been written to yet) are
- * skipped so the badge doesn't go neutral mid-cron-cycle.
- */
-function deriveEffState(
-  currentStatus: CheckStatus,
-  buckets: BucketView[],
-  maintenance: MaintenanceView | null,
-): EffectiveState {
+/** Current availability follows confirmed live state; past bars retain historical failures. */
+function deriveEffState(currentStatus: CheckStatus, maintenance: MaintenanceView | null): EffectiveState {
   if (maintenance?.active) return 'maintenance';
-  if (currentStatus === 'down') return 'down';
-  if (currentStatus === 'degraded') return 'degraded';
-  for (let i = buckets.length - 1; i >= 0; i--) {
-    const b = buckets[i];
-    if (!b || b.state === 'none') continue;
-    if (b.state === 'down' || b.state === 'partial') return 'degraded';
-    return 'up';
-  }
-  return 'up';
+  return currentStatus;
 }
 
 function buildBuckets(
@@ -599,21 +613,24 @@ function parseHidden(input: string | undefined): Set<number> {
 }
 
 interface OverallStatus {
-  status: 'ok' | 'degraded' | 'down' | 'maintenance';
+  status: 'ok' | 'degraded' | 'down' | 'maintenance' | 'unknown';
   downCount: number;
   degradedCount: number;
   maintenanceCount: number;
+  unknownCount: number;
 }
 
 function computeOverall(views: MonitorView[]): OverallStatus {
   const downCount = views.filter((v) => v.effState === 'down').length;
   const degradedCount = views.filter((v) => v.effState === 'degraded').length;
   const maintenanceCount = views.filter((v) => v.effState === 'maintenance').length;
+  const unknownCount = views.filter((v) => v.effState === 'unknown').length;
   let status: OverallStatus['status'] = 'ok';
   if (downCount > 0) status = 'down';
   else if (degradedCount > 0) status = 'degraded';
+  else if (unknownCount > 0) status = 'unknown';
   else if (maintenanceCount > 0) status = 'maintenance';
-  return { status, downCount, degradedCount, maintenanceCount };
+  return { status, downCount, degradedCount, maintenanceCount, unknownCount };
 }
 
 function renderShell(title: string, body: string, now: number, scale: Scale): string {
@@ -883,6 +900,9 @@ function renderMaintenanceBanner(views: MonitorView[], now: number): string {
 }
 
 function renderHeaderStatus(overall: OverallStatus): string {
+  if (overall.status === 'unknown') {
+    return `<div class="flex items-center gap-2.5 text-slate-300"><span class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>${overall.unknownCount}件 — 監視情報を確認できません</div>`;
+  }
   if (overall.status === 'down') {
     const n = overall.downCount;
     return `<div class="flex items-center gap-2.5">
@@ -919,6 +939,7 @@ function renderHeaderStatus(overall: OverallStatus): string {
 }
 
 function renderBadge(effState: EffectiveState): string {
+  if (effState === 'unknown') return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-slate-500/10 text-slate-300 border border-slate-500/30"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> 未確認</span>`;
   if (effState === 'down') {
     return `<span class="inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-full bg-red-500/10 text-red-300 border border-red-500/30">
          <span class="w-1.5 h-1.5 rounded-full bg-red-400"></span> 停止中
@@ -989,6 +1010,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
             ${escapeHtml(view.monitor.name)}
           </h2>
           ${descriptionLine}
+          ${availabilitySince(view.monitor) ? `<p class="mt-1 text-[11px] text-slate-400">公開HTTPS監視開始: ${escapeHtml(formatJstDateTime(availabilitySince(view.monitor)))}</p>` : ''}
           ${(() => {
             const display = publicFacingUrl(view.monitor.url);
             return `<a href="${escapeAttr(display)}" target="_blank" rel="noopener noreferrer"
@@ -1038,6 +1060,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
  * "planned maintenance".
  */
 function renderLatestReason(view: MonitorView): string {
+  if (view.effState === 'unknown') return `<p class="mt-2 text-xs text-slate-300 leading-snug">${escapeHtml(view.latestReason ?? '監視情報を確認できません。')}</p>`;
   if (view.maintenance?.active) {
     return `<p class="mt-2 text-xs text-blue-300/90 leading-snug">
       <span class="font-medium">メンテナンス中:</span> ${escapeHtml(view.maintenance.reason)}

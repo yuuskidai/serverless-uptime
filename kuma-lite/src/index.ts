@@ -4,6 +4,7 @@ import { renderIncidentPage } from './incident-page';
 import { handleRcaBatch, type RcaJob } from './rca';
 import { cleanupOldChecks } from './monitor';
 import { runChecks } from './monitor-runner';
+import { monitoringReadiness } from './monitor-readiness';
 import { renderRssFeed } from './rss-feed';
 import {
   apiSchemaErrorResponse,
@@ -19,6 +20,7 @@ export type { Env };
 
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const receivedAt = Date.now();
     // The separate minute trigger still handles the 03:00 check. The daily
     // trigger must not fall through and create another probe for that slot.
     if (event.cron === '0 3 * * *') {
@@ -39,15 +41,18 @@ export default {
     // apply the migration without combing through D1 errors.
     ctx.waitUntil(
       (async () => {
+        const schemaStarted = Date.now();
         const check = await ensureSchema(env);
+        const schemaMs = Math.max(0, Date.now() - schemaStarted);
         if (!check.ok) {
           logSchemaProblem(check, 'scheduled cron');
           return;
         }
         // Preserve the existing five-second scheduling offset. This is
         // not mutual exclusion: D1 slot claims and leases prevent overlap.
+        const offsetStarted = Date.now();
         await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await runChecks(env, event.scheduledTime);
+        await runChecks(env, event.scheduledTime, { receivedAt, schemaMs, offsetMs: Math.max(0, Date.now() - offsetStarted) });
       })(),
     );
   },
@@ -67,6 +72,7 @@ export default {
     if (url.pathname === '/healthz') {
       return new Response('ok', { status: 200 });
     }
+    if (url.pathname === '/readyz') return monitoringReadiness(env);
 
     // Every other path eventually queries D1. Run the schema gate
     // once per isolate; on miss, return a friendly 503 with a

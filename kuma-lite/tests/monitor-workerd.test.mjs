@@ -106,4 +106,27 @@ test('real workerd isolates share D1 atomic claims, expiry fences, CAS, and tran
     assert.equal(await call(0, { action: 'commit', lease, monitor, result: result('down') }), false);
     assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=5').first()).n, 0);
   });
+
+  await t.test('actual D1 revision guards reject a late old-route commit and notification reservation', async () => {
+    await seed(6);
+    const lease = await call(0, { action: 'claim', monitorId: 6, slotMs, configRevision: 1 });
+    const oldMonitor = await db.prepare('SELECT * FROM monitors WHERE id=6').first();
+    await db.prepare("UPDATE monitors SET config_revision=2,probe_transport='public_fetch' WHERE id=6").run();
+    assert.equal(await call(0, { action: 'commit', lease, monitor: oldMonitor, result: result('down') }), false);
+    assert.equal(await call(0, { action: 'reserve', lease }), false);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=6').first()).n, 0);
+    await call(0, { action: 'release', lease });
+    assert.equal(await call(1, { action: 'claim', monitorId: 6, slotMs: slotMs + 60000, configRevision: 1 }), null);
+    const current = await call(1, { action: 'claim', monitorId: 6, slotMs: slotMs + 60000, configRevision: 2 });
+    assert.ok(current);
+    assert.equal(await call(1, { action: 'commit', lease: current, result: result('up') }), true);
+    const check = await db.prepare('SELECT config_revision,probe_transport,monitor_role FROM checks WHERE monitor_id=6').first();
+    assert.equal(check.config_revision, 2);
+    assert.equal(check.probe_transport, 'public_fetch');
+    assert.equal(check.monitor_role, 'availability');
+    await db.prepare('UPDATE monitors SET config_revision=3 WHERE id=6').run();
+    assert.equal(await call(1, { action: 'reserve', lease: current }), false);
+    await call(1, { action: 'thread', lease: current, thread: 'late-route-thread' });
+    assert.equal((await db.prepare('SELECT slack_alert_ts FROM monitor_state WHERE monitor_id=6').first()).slack_alert_ts, null);
+  });
 });

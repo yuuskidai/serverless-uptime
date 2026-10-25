@@ -263,7 +263,7 @@ test('schema gate rejects a missing lease migration and self-heals after the tab
   } finally { f.close(); }
 });
 
-test('full historical schema upgraded through 0009 matches a fresh canonical install', () => {
+test('full historical schema upgraded through 0010 matches a fresh canonical install', () => {
   const fresh = new DatabaseSync(':memory:'), upgraded = new DatabaseSync(':memory:');
   try {
     fresh.exec(readFileSync(new URL('schema.sql', root), 'utf8'));
@@ -272,6 +272,7 @@ test('full historical schema upgraded through 0009 matches a fresh canonical ins
     upgraded.exec(readFileSync(new URL('tests/fixtures/pre-0009.sql', root), 'utf8'));
     upgraded.exec(readFileSync(new URL('migrations/0007_latency_threshold.sql', root), 'utf8'));
     upgraded.exec(readFileSync(new URL('migrations/0009_monitor_execution.sql', root), 'utf8'));
+    upgraded.exec(readFileSync(new URL('migrations/0010_monitor_routes.sql', root), 'utf8'));
     function shape(db) {
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
       return tables.map(({ name }) => ({
@@ -283,4 +284,62 @@ test('full historical schema upgraded through 0009 matches a fresh canonical ins
     }
     assert.deepEqual(shape(upgraded), shape(fresh));
   } finally { fresh.close(); upgraded.close(); }
+});
+
+test('configuration revision fences late checks, notification ownership, and thread metadata', async () => {
+  const f = sqliteEnv();
+  try {
+    const lease = await execution.claimMonitorSlot(f.env, 1, SLOT, 1);
+    assert.equal((await commit(f, lease)).committed, true);
+    f.sqlite.exec('UPDATE monitors SET config_revision = 2');
+    assert.equal(await execution.reserveTransitionNotification(f.env, lease), false);
+    await execution.saveAlertThread(f.env, lease, 'old-route-thread');
+    assert.equal((await execution.readMonitorState(f.env, 1)).slack_alert_ts, null);
+    await execution.releaseMonitorSlot(f.env, lease);
+    assert.equal(await execution.claimMonitorSlot(f.env, 1, SLOT + 60000, 1), null);
+    const next = await execution.claimMonitorSlot(f.env, 1, SLOT + 60000, 2);
+    assert.ok(next);
+    // A stale monitor snapshot cannot commit under a fresh revision lease.
+    assert.equal((await commit(f, next, 'down')).committed, false);
+    f.monitor.config_revision = 2;
+    assert.equal((await commit(f, next, 'down')).committed, true);
+    const row = f.sqlite.prepare('SELECT config_revision,monitor_role,probe_transport FROM checks ORDER BY id DESC LIMIT 1').get();
+    assert.equal(row.config_revision, 2);
+    assert.equal(row.monitor_role, 'availability');
+    assert.equal(row.probe_transport, 'public_fetch');
+    assert.equal((await execution.readMonitorState(f.env, 1)).config_revision, 2);
+  } finally { f.close(); }
+});
+
+test('a changed configuration rejects an in-flight result before its first commit', async () => {
+  const f = sqliteEnv();
+  try {
+    const lease = await execution.claimMonitorSlot(f.env, 1, SLOT, 1);
+    f.sqlite.exec('UPDATE monitors SET config_revision = 2');
+    assert.equal((await commit(f, lease, 'down')).committed, false);
+    assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM checks').get().n, 0);
+    assert.equal(await execution.readMonitorState(f.env, 1), null);
+  } finally { f.close(); }
+});
+
+test('missing slots and changed routes break streaks without closing an existing incident', () => {
+  const f = sqliteEnv();
+  try {
+    const first = deriveTransition(f.monitor, result('down'), null, Date.now(), SLOT, false).next;
+    const gap = deriveTransition(f.monitor, result('down'), first, Date.now(), SLOT + 120000, false);
+    assert.equal(gap.kind, null);
+    assert.equal(gap.next.consecutive_failures, 1);
+    const changed = deriveTransition({ ...f.monitor, config_revision: 2 }, result('down'), first,
+      Date.now(), SLOT + 60000, false);
+    assert.equal(changed.kind, null);
+    assert.equal(changed.next.consecutive_failures, 1);
+    const open = { ...first, current_status: 'degraded', consecutive_successes: 1,
+      slack_alert_ts: 'open-incident', down_since: null };
+    const healthy = deriveTransition({ ...f.monitor, config_revision: 2 }, result('up'), open,
+      Date.now(), SLOT + 60000, false);
+    assert.equal(healthy.kind, null);
+    assert.equal(healthy.next.current_status, 'degraded');
+    assert.equal(healthy.next.slack_alert_ts, 'open-incident');
+    assert.equal(healthy.next.consecutive_successes, 1);
+  } finally { f.close(); }
 });

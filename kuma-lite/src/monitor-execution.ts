@@ -11,6 +11,7 @@ export interface MonitorLease {
   monitorId: number;
   slotMs: number;
   token: string;
+  configRevision?: number;
 }
 
 export function scheduledSlot(scheduledTime: number): number {
@@ -29,12 +30,14 @@ export async function claimMonitorSlot(
   env: Env,
   monitorId: number,
   slotMs: number,
+  configRevision = 1,
 ): Promise<MonitorLease | null> {
   if (scheduledSlot(slotMs) !== slotMs) throw new Error('Invalid monitor slot');
+  if (!Number.isSafeInteger(configRevision) || configRevision < 1) throw new Error('Invalid monitor revision');
   const token = crypto.randomUUID();
   const claimed = await env.DB.prepare(
     `INSERT INTO monitor_execution (monitor_id, claimed_slot, lease_token, lease_until)
-     SELECT id, ?, ?, ${DB_NOW_MS} + ? FROM monitors WHERE id = ? AND enabled = 1
+     SELECT id, ?, ?, ${DB_NOW_MS} + ? FROM monitors WHERE id = ? AND enabled = 1 AND config_revision = ?
        AND ? > COALESCE((SELECT last_check_slot FROM monitor_state WHERE monitor_id = monitors.id), -1)
      ON CONFLICT(monitor_id) DO UPDATE SET
        claimed_slot = excluded.claimed_slot,
@@ -43,8 +46,8 @@ export async function claimMonitorSlot(
      WHERE monitor_execution.claimed_slot < excluded.claimed_slot
        AND monitor_execution.lease_until <= ${DB_NOW_MS}
      RETURNING monitor_id`,
-  ).bind(slotMs, token, LEASE_MS, monitorId, slotMs).first<{ monitor_id: number }>();
-  return claimed ? { monitorId, slotMs, token } : null;
+  ).bind(slotMs, token, LEASE_MS, monitorId, configRevision, slotMs).first<{ monitor_id: number }>();
+  return claimed ? { monitorId, slotMs, token, configRevision } : null;
 }
 
 const LEASE_OWNER = `EXISTS (
@@ -57,6 +60,7 @@ const ACTIVE_LEASE = `EXISTS (
      AND lease_until > ${DB_NOW_MS}
 )`;
 const EXPECTED_STATE = `COALESCE((SELECT last_check_slot FROM monitor_state WHERE monitor_id = ?), -1) = ?`;
+const CURRENT_CONFIG = `EXISTS (SELECT 1 FROM monitors WHERE id = ? AND enabled = 1 AND config_revision = ?)`;
 
 export async function readMonitorState(env: Env, monitorId: number): Promise<OrderedMonitorState | null> {
   return env.DB.prepare('SELECT * FROM monitor_state WHERE monitor_id = ?')
@@ -83,32 +87,41 @@ export async function commitMonitorResult(
 ): Promise<boolean> {
   const expectedSlot = previous?.last_check_slot ?? -1;
   if (monitor.id !== lease.monitorId || transition.next.monitor_id !== monitor.id ||
-      expectedSlot >= lease.slotMs || transition.next.last_check_slot !== lease.slotMs) return false;
+      expectedSlot >= lease.slotMs || transition.next.last_check_slot !== lease.slotMs ||
+      (monitor.config_revision ?? 1) !== (lease.configRevision ?? 1)) return false;
   const guardValues = [lease.monitorId, lease.slotMs, lease.token, lease.monitorId, expectedSlot];
+  const revisionValues = [lease.monitorId, lease.configRevision ?? 1];
   const next = transition.next;
+  let transport = monitor.probe_transport === 'public_fetch' ? 'public_fetch' :
+    monitor.probe_transport === 'service_binding' || monitor.service_binding ? 'service_binding' : 'public_fetch';
+  try {
+    const trace = JSON.parse(result.probe_trace_json)[0];
+    if (trace?.transport === 'public_fetch' || trace?.transport === 'service_binding') transport = trace.transport;
+  } catch { /* Legacy results may not contain a trace. */ }
   const writes = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO checks (
          monitor_id, status, status_code, latency_ms, error, ts,
          healthz_status, healthz_reason, healthz_components, healthz_version,
-         used_fallback, in_maintenance, scheduled_slot, probe_trace_json
+         used_fallback, in_maintenance, scheduled_slot, probe_trace_json, config_revision, monitor_role, probe_transport
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE ${ACTIVE_LEASE} AND ${EXPECTED_STATE}`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE ${ACTIVE_LEASE} AND ${EXPECTED_STATE} AND ${CURRENT_CONFIG}`,
     ).bind(
       monitor.id, result.status, result.status_code, result.latency_ms, result.error, ts,
       result.healthz_status, result.healthz_reason, result.healthz_components, result.healthz_version,
       result.used_fallback ? 1 : 0, inMaintenance ? 1 : 0, lease.slotMs, result.probe_trace_json,
-      ...guardValues,
+      lease.configRevision ?? 1, monitor.monitor_role ?? 'availability', transport,
+      ...guardValues, ...revisionValues,
     ),
     env.DB.prepare(
       `INSERT INTO monitor_state (
          monitor_id, current_status, consecutive_failures, consecutive_degraded,
          last_notified_at, down_since, slack_alert_ts,
-         maintenance_from, maintenance_to, maintenance_reason, last_check_slot, consecutive_successes
+         maintenance_from, maintenance_to, maintenance_reason, last_check_slot, consecutive_successes, config_revision
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE ${LEASE_OWNER} AND ${EXPECTED_STATE}
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE ${LEASE_OWNER} AND ${EXPECTED_STATE} AND ${CURRENT_CONFIG}
           AND EXISTS (SELECT 1 FROM checks WHERE monitor_id = ? AND scheduled_slot = ?)
        ON CONFLICT(monitor_id) DO UPDATE SET
          current_status = excluded.current_status,
@@ -121,13 +134,15 @@ export async function commitMonitorResult(
          maintenance_to = excluded.maintenance_to,
          maintenance_reason = excluded.maintenance_reason,
          last_check_slot = excluded.last_check_slot,
-         consecutive_successes = excluded.consecutive_successes
+         consecutive_successes = excluded.consecutive_successes,
+         config_revision = excluded.config_revision
        WHERE monitor_state.last_check_slot < excluded.last_check_slot`,
     ).bind(
       next.monitor_id, next.current_status, next.consecutive_failures, next.consecutive_degraded,
       next.last_notified_at, next.down_since, next.slack_alert_ts,
       next.maintenance_from, next.maintenance_to, next.maintenance_reason, next.last_check_slot, next.consecutive_successes,
-      ...guardValues,
+      lease.configRevision ?? 1,
+      ...guardValues, ...revisionValues,
       lease.monitorId, lease.slotMs,
     ),
   ]);
@@ -141,8 +156,10 @@ export async function reserveTransitionNotification(env: Env, lease: MonitorLeas
       WHERE monitor_id = ? AND claimed_slot = ? AND lease_token = ?
         AND lease_until > ${DB_NOW_MS}
         AND EXISTS (SELECT 1 FROM monitor_state WHERE monitor_id = ? AND last_check_slot = ?)
+        AND ${CURRENT_CONFIG}
       RETURNING 1 AS owned`,
-  ).bind(NOTIFICATION_LEASE_MS, lease.monitorId, lease.slotMs, lease.token, lease.monitorId, lease.slotMs)
+  ).bind(NOTIFICATION_LEASE_MS, lease.monitorId, lease.slotMs, lease.token, lease.monitorId, lease.slotMs,
+    lease.monitorId, lease.configRevision ?? 1)
     .first<{ owned: number }>();
   return owned !== null;
 }
@@ -150,8 +167,9 @@ export async function reserveTransitionNotification(env: Env, lease: MonitorLeas
 export async function saveAlertThread(env: Env, lease: MonitorLease, slackAlertTs: string): Promise<void> {
   await env.DB.prepare(
     `UPDATE monitor_state SET slack_alert_ts = ?
-      WHERE monitor_id = ? AND last_check_slot = ? AND ${ACTIVE_LEASE}`,
-  ).bind(slackAlertTs, lease.monitorId, lease.slotMs, lease.monitorId, lease.slotMs, lease.token).run();
+      WHERE monitor_id = ? AND last_check_slot = ? AND ${ACTIVE_LEASE} AND ${CURRENT_CONFIG}`,
+  ).bind(slackAlertTs, lease.monitorId, lease.slotMs, lease.monitorId, lease.slotMs, lease.token,
+    lease.monitorId, lease.configRevision ?? 1).run();
 }
 
 export async function releaseMonitorSlot(env: Env, lease: MonitorLease): Promise<void> {

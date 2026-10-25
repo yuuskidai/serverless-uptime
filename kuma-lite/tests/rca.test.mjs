@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import * as monitorPolicy from '../src/monitor-policy.ts';
 
 const source = readFileSync(new URL('../src/rca.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, {
@@ -28,7 +29,7 @@ function fixture(options = {}) {
         next_checks: ['correlate_request_ids', 'inspect_database_phases'] }),
     }; } },
     DB: { prepare(sql) { return { bind() { return this; },
-      async first() { return { id: 1, name: options.name ?? 'Synthetic monitor', url: 'https://user:secret@example.invalid/healthz?token=hidden#private' }; },
+      async first() { return { id: 1, name: options.name ?? 'Synthetic monitor', url: 'https://user:secret@example.invalid/healthz?token=hidden#private', ...options.monitor }; },
       async all() { assert.match(sql, /probe_trace_json/); return { results: [row] }; },
     }; } },
   };
@@ -50,6 +51,7 @@ function fixture(options = {}) {
     setTimeout: options.setTimeout ?? setTimeout, clearTimeout, fetch: fetcher,
     console: { error() {}, warn() {}, log() {} },
     require(id) {
+      if (id === './monitor-policy') return monitorPolicy;
       assert.equal(id, './slack-bot');
       return { buildSlackBot() { return { defaultChannelId: 'synthetic-channel', slack: {
         async postBlocks(_channel, payload) { posts.push(payload); },
@@ -60,7 +62,7 @@ function fixture(options = {}) {
     enqueue(job) { return module.exports.enqueueRca(env, job); },
     get acked() { return acked; }, get retried() { return retried; },
     async run() { await module.exports.handleRcaBatch({ messages: [{
-      body: { monitorId: 1, alertTs: 'synthetic-thread', downSince: incident, reason: 'DB応答遅延', kind: 'degraded' },
+      body: { monitorId: 1, alertTs: 'synthetic-thread', downSince: incident, reason: 'DB応答遅延', kind: 'degraded', ...options.job },
       ack() { acked++; }, retry() { retried++; },
     }] }, env); },
     evidence() { return JSON.parse(inputs[0].messages.at(-1).content.replace(/^<data>\n|\n<\/data>$/g, '')); },
@@ -221,4 +223,28 @@ test('queue send wait is bounded without retrying an unconfirmed publish or leak
   rejectPublish(new Error('synthetic late rejection'));
   await Promise.resolve();
   assert.equal(f.posts.length, 0);
+});
+
+for (const role of ['diagnostic','shadow']) test(`queued RCA skips a monitor now assigned the ${role} role`,async()=>{
+ const f=fixture({monitor:{monitor_role:role}});await f.run();
+ assert.equal(f.acked,1);assert.equal(f.inputs.length+f.posts.length+f.requests.length,0);
+});
+test('queued RCA cannot cross a configuration revision or availability cutover',async()=>{
+ for(const options of [
+  {monitor:{config_revision:2}},
+  {monitor:{config_revision:2},job:{configRevision:1}},
+  {monitor:{config_revision:2,availability_since_ms:Date.now()},job:{configRevision:2}},
+ ]) {const f=fixture(options);await f.run();assert.equal(f.inputs.length+f.posts.length+f.requests.length,0);assert.equal(f.acked,1);}
+});
+test('same-revision availability RCA still runs',async()=>{
+ const f=fixture({monitor:{config_revision:2,monitor_role:'availability'},job:{configRevision:2}});await f.run();
+ assert.equal(f.inputs.length,1);assert.equal(f.posts.length,1);
+});
+
+test('RCA rechecks role, enabled state and revision after inference before posting',async()=>{
+ for (const change of [{monitor_role:'diagnostic'},{monitor_role:'shadow'},{config_revision:2},{enabled:0}]) {
+  const monitor={config_revision:1,monitor_role:'availability',enabled:1};
+  const f=fixture({monitor,ai:async()=>{Object.assign(monitor,change);return {response:JSON.stringify({hypotheses:[],next_checks:[]})};}});
+  await f.run();assert.equal(f.inputs.length,1);assert.equal(f.posts.length,0);assert.equal(f.acked,1);
+ }
 });

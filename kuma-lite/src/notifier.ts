@@ -38,6 +38,38 @@ export interface IncidentDetail {
   version: string | null;
 }
 
+/** Internal transport diagnostics never describe application availability or open public incidents. */
+export async function notifyInternalPath(
+  env: Env, monitor: Monitor, detail: IncidentDetail,
+  kind: 'down' | 'degraded' | 'partial' | 'up', threadTs: string | null,
+): Promise<NotifyDownResult> {
+  const normal = kind === 'up';
+  const label = normal ? 'NORMAL' : kind === 'partial' ? 'RESPONDING' : 'WARNING';
+  const title = `INTERNAL PATH ${label} — ${monitor.name}`;
+  const message = normal ? '内部診断で正常応答を確認しました。' : detail.reason;
+  const guidance = '公開サービスの稼働判定とは別の内部診断です。';
+  const bot = buildSlackBot(env);
+  const [, slack] = await Promise.allSettled([
+    env.DISCORD_WEBHOOK_URL ? postWebhook(env.DISCORD_WEBHOOK_URL, {
+      embeds: [{ title, description: `${truncate(message, 800)}\n\n${guidance}`,
+        color: normal ? 0x94a3b8 : 0xfbbf24, timestamp: new Date().toISOString() }],
+    }) : Promise.resolve(),
+    bot?.defaultChannelId ? bot.slack.postBlocks(bot.defaultChannelId, {
+      text: slackEscape(`${title} — ${message}`),
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: false } },
+        { type: 'section', text: { type: 'mrkdwn', text: slackEscape(truncate(message, 500)) } },
+        { type: 'context', elements: [{ type: 'mrkdwn', text: guidance }] },
+      ],
+      threadTs: threadTs ?? undefined,
+    }) : Promise.resolve(null),
+  ]);
+  // Only a new diagnostic incident starts a thread. Partial/normal replies keep
+  // the original thread metadata and never replace it with a child reply's ts.
+  return { slackAlertTs: (kind === 'down' || kind === 'degraded') &&
+    slack.status === 'fulfilled' && slack.value ? slack.value.ts || null : null };
+}
+
 export async function notifyDown(
   env: Env,
   monitor: Monitor,

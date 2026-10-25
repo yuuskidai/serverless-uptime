@@ -1,5 +1,6 @@
 import { buildSlackBot } from './slack-bot';
 import type { Env, Monitor } from './types';
+import { isAvailabilityMonitor, availabilitySince, availabilityHistorySql } from './monitor-policy';
 
 /**
  * AI-assisted root-cause analysis (RCA) for DOWN alerts.
@@ -27,6 +28,8 @@ import type { Env, Monitor } from './types';
 
 export interface RcaJob {
   monitorId: number;
+  /** Configuration that produced this alert; late jobs cannot cross a route change. */
+  configRevision?: number;
   /** Slack ts of the alert; the RCA reply is threaded under it. */
   alertTs: string;
   /** ms epoch when the monitor flipped to DOWN / DEGRADED. */
@@ -108,7 +111,10 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
   const monitor = await env.DB.prepare(`SELECT * FROM monitors WHERE id = ?`)
     .bind(job.monitorId)
     .first<Monitor>();
-  if (!monitor) return;
+  if (!monitor || monitor.enabled === 0 || !isAvailabilityMonitor(monitor) ||
+    (job.configRevision !== undefined && job.configRevision !== (monitor.config_revision ?? 1)) ||
+    (job.configRevision === undefined && (monitor.config_revision ?? 1) !== 1) ||
+    job.downSince < availabilitySince(monitor)) return;
 
   const from = job.downSince - LOOKBACK_MS;
   const to = Math.min(Date.now(), job.downSince + LOOKAHEAD_MS);
@@ -142,6 +148,14 @@ async function runRca(env: Env, job: RcaJob): Promise<void> {
 
   const proposal = await analyze(env, env.AI, evidence);
   const text = renderAssessment(observations, proposal, evidence.limitations);
+
+  // Evidence collection and inference may outlive a route change. Recheck the
+  // current configuration immediately before the external notification starts.
+  const current = await env.DB.prepare(`SELECT * FROM monitors WHERE id = ?`)
+    .bind(job.monitorId).first<Monitor>();
+  if (!current || current.enabled === 0 || !isAvailabilityMonitor(current) ||
+    (current.config_revision ?? 1) !== (monitor.config_revision ?? 1) ||
+    job.downSince < availabilitySince(current)) return;
 
   await bot.slack.postBlocks(bot.defaultChannelId, {
     text: `監視事実と未確認の仮説: ${slackText(monitor.name, 200)}`,
@@ -446,7 +460,7 @@ async function recentChecks(
     `SELECT ts, status, status_code, latency_ms, error,
             healthz_status, healthz_reason, healthz_components, healthz_version, probe_trace_json
        FROM checks
-      WHERE monitor_id = ? AND ts >= ? AND ts <= ?
+      WHERE monitor_id = ? AND ts >= ? AND ts <= ? AND ${availabilityHistorySql()}
       ORDER BY (status = 'down' OR COALESCE(healthz_status, 'ok') != 'ok') DESC,
                ABS(ts - ?)
       LIMIT ?`,

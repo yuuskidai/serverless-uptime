@@ -1,5 +1,6 @@
 import type { CheckRow, Env, Monitor } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
+import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
 
 const TIMEZONE = 'Asia/Tokyo';
 /** How far back to look when synthesising the incident timeline. */
@@ -44,7 +45,7 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
 
   const dbStartedAt = Date.now();
   const monitorsResult = await db.prepare(
-    `SELECT * FROM monitors WHERE enabled = 1 ORDER BY id ASC`,
+    `SELECT * FROM monitors WHERE enabled = 1 AND ${AVAILABILITY_ROLE_SQL} ORDER BY id ASC`,
   ).all<Monitor>();
   const monitors = monitorsResult.results ?? [];
 
@@ -59,11 +60,11 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
     type FeedRow = Pick<
       CheckRow,
       'monitor_id' | 'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
-    >;
+    > & { scheduled_slot: number | null; config_revision: number | null };
     const checksResult = await db.prepare(
-      `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance
+      `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance, scheduled_slot, config_revision
          FROM checks
-        WHERE ts >= ? AND monitor_id IN (${placeholders})
+        WHERE ts >= ? AND monitor_id IN (${placeholders}) AND ${availabilityHistorySql()}
         ORDER BY monitor_id ASC, ts ASC`,
     )
       .bind(since, ...ids)
@@ -118,7 +119,7 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
 type IncidentCheck = Pick<
   CheckRow,
   'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
->;
+> & { scheduled_slot: number | null; config_revision: number | null };
 
 /**
  * Walk per-monitor checks chronologically and emit one incident per
@@ -137,8 +138,16 @@ function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] 
   let kindCounts: Map<IncidentKind, number> | null = null;
   // Most recent structured reason captured during the current incident.
   let latestReason: string | null = null;
+  let previousSlot: number | null = null;
+  let previousRevision: number | null = null;
+  let streakStartedAt: number | null = null;
 
   for (const c of checks) {
+    const slot = c.scheduled_slot ?? Math.floor(c.ts / 60_000) * 60_000;
+    const revision = c.config_revision ?? 1;
+    if (previousSlot !== null && (slot - previousSlot !== Math.max(1, monitor.interval_minutes ?? 1) * 60_000 || revision !== previousRevision)) consecFails = 0;
+    previousSlot = slot;
+    previousRevision = revision;
     // Maintenance windows aren't incidents and shouldn't fire RSS items
     // (per spec §2 — "DOWN 通知抑止" extends to the public feed).
     if (c.in_maintenance) {
@@ -156,6 +165,7 @@ function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] 
       continue;
     }
     if (c.status === 'down') {
+      if (consecFails === 0) streakStartedAt = c.ts;
       consecFails += 1;
       if (!inIncident && consecFails >= threshold) {
         inIncident = true;
@@ -165,7 +175,7 @@ function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] 
           monitor,
           // Mark the incident's start at the first of the consecutive
           // failures, not at the threshold-crossing check.
-          startedAt: c.ts - (threshold - 1) * 60_000,
+          startedAt: streakStartedAt ?? c.ts,
           endedAt: null,
           kind: 'unknown',
           reason: null,

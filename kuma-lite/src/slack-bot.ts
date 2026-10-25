@@ -1,7 +1,9 @@
 import { Chat } from 'chat';
 import { createMemoryState } from '@chat-adapter/state-memory';
 import { createSlackAdapter, SlackWorkersAdapter } from './chat-adapters/slack';
-import type { Env } from './types';
+import type { Env, Monitor } from './types';
+import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
+import { monitorFreshness } from './monitor-readiness';
 
 export interface SlackBot {
   chat: Chat<{ slack: SlackWorkersAdapter }>;
@@ -58,124 +60,57 @@ function stripSlackPrefix(id: string): string {
   return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
 }
 
-interface MonitorWithState {
-  id: number;
-  name: string;
-  url: string;
-  current_status: 'up' | 'down' | null;
-  consecutive_failures: number | null;
-  down_since: number | null;
+interface MonitorWithState extends Monitor {
+  current_status: 'up' | 'down' | 'degraded' | null;
+  latest_ts: number | null;
+  latest_slot: number | null;
+  latest_revision: number | null;
 }
 
-async function renderStatusBlocks(
+export async function renderStatusBlocks(
   env: Env,
 ): Promise<{ text: string; blocks: unknown[] }> {
+  const latest = (column: string) => `(SELECT c.${column} FROM checks c WHERE c.monitor_id = m.id
+    AND ${availabilityHistorySql('c')} ORDER BY c.ts DESC LIMIT 1)`;
   const rows = await env.DB.prepare(
-    `SELECT m.id, m.name, m.url,
-            s.current_status, s.consecutive_failures, s.down_since
+    `SELECT m.*, s.current_status,
+            ${latest('ts')} AS latest_ts,
+            ${latest('scheduled_slot')} AS latest_slot,
+            ${latest('config_revision')} AS latest_revision
        FROM monitors m
        LEFT JOIN monitor_state s ON s.monitor_id = m.id
-      WHERE m.enabled = 1
+      WHERE m.enabled = 1 AND ${AVAILABILITY_ROLE_SQL.replace('COALESCE(monitor_role', 'COALESCE(m.monitor_role')}
       ORDER BY m.id`,
   ).all<MonitorWithState>();
   const monitors = rows.results ?? [];
-
-  if (monitors.length === 0) {
-    return {
-      text: 'No monitors are configured.',
-      blocks: [
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: ':information_source:  No monitors are configured.' },
-        },
-      ],
-    };
+  if (monitors.length === 0) return {
+    text: 'No monitors are configured.',
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: No monitors are configured.' } }],
+  };
+  const now = Date.now();
+  const views = monitors.map(monitor => ({
+    monitor,
+    state: monitorFreshness(monitor, monitor.latest_ts === null ? null : {
+      ts: monitor.latest_ts, scheduled_slot: monitor.latest_slot, config_revision: monitor.latest_revision,
+    }, now) === 'fresh' ? monitor.current_status ?? 'unknown' : 'unknown',
+  }));
+  const downCount = views.filter(v => v.state === 'down').length;
+  const degradedCount = views.filter(v => v.state === 'degraded').length;
+  const unknownCount = views.filter(v => v.state === 'unknown').length;
+  const headerText = downCount ? `🔴 ${downCount}/${views.length} DOWN`
+    : degradedCount ? `🟡 ${degradedCount}/${views.length} DEGRADED`
+    : unknownCount ? `⚪ ${unknownCount}/${views.length} 監視情報未確認`
+    : `✅ All ${views.length} monitors operational`;
+  const blocks: unknown[] = [{ type: 'header', text: { type: 'plain_text', text: headerText, emoji: true } }];
+  for (const {monitor, state} of views) {
+    const label = state === 'unknown' ? ':white_circle: 監視情報が古いか、まだ取得されていません'
+      : state === 'down' ? ':red_circle: DOWN' : state === 'degraded' ? ':large_yellow_circle: DEGRADED' : ':large_green_circle: UP';
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text:
+      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` } });
   }
-
-  const down = monitors
-    .filter((m) => m.current_status === 'down')
-    .sort((a, b) => (a.down_since ?? 0) - (b.down_since ?? 0));
-  const up = monitors
-    .filter((m) => m.current_status !== 'down')
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  const total = monitors.length;
-  const headerText =
-    down.length === 0
-      ? `✅  All ${total} monitor${total === 1 ? '' : 's'} operational`
-      : `🔴  ${down.length}/${total} monitor${total === 1 ? '' : 's'} DOWN`;
-
-  const blocks: unknown[] = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: headerText, emoji: true },
-    },
-  ];
-
-  if (down.length > 0) {
-    blocks.push({ type: 'divider' });
-    blocks.push({
-      type: 'context',
-      elements: [{ type: 'mrkdwn', text: `*🔴  DOWN  (${down.length})*` }],
-    });
-    for (const m of down) {
-      const downFor = m.down_since ? formatDuration(Date.now() - m.down_since) : '—';
-      blocks.push({
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: [
-            `:red_circle:  *${slackEscape(m.name)}*`,
-            `<${m.url}|${slackEscape(displayUrl(m.url))}>`,
-            `_Down for *${downFor}*_`,
-          ].join('\n'),
-        },
-      });
-    }
-  }
-
-  if (up.length > 0) {
-    blocks.push({ type: 'divider' });
-    blocks.push({
-      type: 'context',
-      elements: [{ type: 'mrkdwn', text: `*🟢  UP  (${up.length})*` }],
-    });
-    // 2 monitors per section.fields row for compactness.
-    for (let i = 0; i < up.length; i += 2) {
-      const left = up[i];
-      const right = up[i + 1];
-      const fields: unknown[] = [];
-      if (left) {
-        fields.push({
-          type: 'mrkdwn',
-          text: `:large_green_circle:  *${slackEscape(left.name)}*\n<${left.url}|${slackEscape(displayUrl(left.url))}>`,
-        });
-      }
-      if (right) {
-        fields.push({
-          type: 'mrkdwn',
-          text: `:large_green_circle:  *${slackEscape(right.name)}*\n<${right.url}|${slackEscape(displayUrl(right.url))}>`,
-        });
-      }
-      blocks.push({ type: 'section', fields });
-    }
-  }
-
-  blocks.push({
-    type: 'context',
-    elements: [
-      {
-        type: 'mrkdwn',
-        text: `:clock1:  as of <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
-      },
-    ],
-  });
-
+  blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
+    `:clock1: as of <!date^${Math.floor(now/1000)}^{date_short_pretty} {time}|${new Date(now).toISOString()}>` }] });
   return { text: headerText, blocks };
-}
-
-function unixSec(): number {
-  return Math.floor(Date.now() / 1000);
 }
 
 function displayUrl(url: string): string {
@@ -189,17 +124,4 @@ function displayUrl(url: string): string {
 
 function slackEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function formatDuration(ms: number): string {
-  if (ms <= 0) return '<1s';
-  const totalSec = Math.floor(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  const parts: string[] = [];
-  if (h) parts.push(`${h}h`);
-  if (m) parts.push(`${m}m`);
-  if (s || parts.length === 0) parts.push(`${s}s`);
-  return parts.join(' ');
 }

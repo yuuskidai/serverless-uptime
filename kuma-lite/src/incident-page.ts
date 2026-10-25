@@ -1,3 +1,5 @@
+import { AVAILABILITY_ROLE_SQL, availabilitySince, availabilityHistorySql } from './monitor-policy';
+import { monitorFreshness, type FreshnessCheck, type MonitorFreshness } from './monitor-readiness';
 import type { CheckRow, ComponentHealth, Env, Monitor, MonitorState } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
 import { publicFacingUrl } from './url-display';
@@ -24,7 +26,7 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
 
   const dbStartedAt = Date.now();
   const monitor = await db.prepare(
-    `SELECT * FROM monitors WHERE id = ?`,
+    `SELECT * FROM monitors WHERE id = ? AND enabled = 1 AND ${AVAILABILITY_ROLE_SQL}`,
   )
     .bind(monitorId)
     .first<Monitor>();
@@ -36,7 +38,11 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     );
   }
 
-  const [state, checksResult] = await Promise.all([
+  if (to <= availabilitySince(monitor)) {
+    return htmlResponse(shell('公開監視の開始前', errorBlock('この期間は公開HTTPS監視の開始前です。')), 200);
+  }
+
+  const [state, checksResult, latest] = await Promise.all([
     db.prepare(`SELECT * FROM monitor_state WHERE monitor_id = ?`)
       .bind(monitorId)
       .first<MonitorState>(),
@@ -48,19 +54,22 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     // never binds for this query.
     db.prepare(
       `SELECT * FROM checks
-         WHERE monitor_id = ? AND ts >= ? AND ts < ? AND status = 'down' AND in_maintenance = 0
+         WHERE monitor_id = ? AND ts >= ? AND ts < ? AND ${availabilityHistorySql()} AND status = 'down' AND in_maintenance = 0
          ORDER BY ts ASC
          LIMIT ?`,
     )
-      .bind(monitorId, from, to, MAX_ROWS)
+      .bind(monitorId, Math.max(from, availabilitySince(monitor)), to, MAX_ROWS)
       .all<CheckRow>(),
+    db.prepare(`SELECT ts, scheduled_slot, config_revision FROM checks
+      WHERE monitor_id = ? AND ${availabilityHistorySql()} ORDER BY ts DESC LIMIT 1`)
+      .bind(monitorId).first<FreshnessCheck>(),
   ]);
   const failures = checksResult.results ?? [];
 
   const dbMs = Date.now() - dbStartedAt;
   const html = shell(
     `${monitor.name} の状況詳細`,
-    renderBody({ monitor, state, from, to, failures }),
+    renderBody({ monitor, state, from: Math.max(from, availabilitySince(monitor)), to, failures, freshness: monitorFreshness(monitor, latest) }),
   );
   console.log(
     JSON.stringify({
@@ -82,6 +91,7 @@ interface RenderArgs {
   from: number;
   to: number;
   failures: CheckRow[];
+  freshness: MonitorFreshness;
 }
 
 function dominantKind(failures: CheckRow[]): IncidentKind {
@@ -100,16 +110,17 @@ function dominantKind(failures: CheckRow[]): IncidentKind {
 }
 
 function renderBody(args: RenderArgs): string {
-  const { monitor, state, from, to, failures } = args;
+  const { monitor, state, from, to, failures, freshness } = args;
   if (failures.length === 0) {
-    return renderHealthyWindow(monitor, from, to);
+    return renderNoFailuresWindow(monitor, from, to);
   }
 
   const kind = dominantKind(failures);
   const copy = KIND_COPY[kind];
   const firstFailureTs = failures[0]?.ts ?? null;
   const lastFailureTs = failures[failures.length - 1]?.ts ?? null;
-  const isOngoing = state?.current_status === 'down';
+  const unknown = freshness !== 'fresh';
+  const isOngoing = !unknown && state?.current_status === 'down';
   // Pull the most recent structured reason from the failure window so
   // the headline can be replaced with the site's own business-language
   // explanation when present (e.g. "決済 (Stripe) で応答遅延が発生").
@@ -118,14 +129,14 @@ function renderBody(args: RenderArgs): string {
   const detail = latestStructured?.reason ? null : copy.detail;
   const components = latestStructured?.components ?? [];
 
-  const verdict = isOngoing
+  const verdict = unknown ? { tone: 'amber' as const, label: '現在の状態は未確認' } : isOngoing
     ? { tone: 'red' as const, label: '継続中' }
     : { tone: 'green' as const, label: '復旧済' };
 
   const startCell = firstFailureTs !== null
     ? `<span class="tabular-nums" data-jst-friendly="${firstFailureTs}">${formatJstFriendly(firstFailureTs)}</span>`
     : '—';
-  const endCell = isOngoing
+  const endCell = unknown ? '未確認' : isOngoing
     ? '<span class="text-amber-300">継続中</span>'
     : lastFailureTs !== null
     ? `<span class="tabular-nums" data-jst-friendly="${lastFailureTs}">${formatJstFriendly(lastFailureTs)}</span>`
@@ -141,7 +152,7 @@ function renderBody(args: RenderArgs): string {
     ? `約 ${formatHumanDuration(durationMs)}`
     : '1秒未満';
   const durationLabel = isOngoing ? '経過時間' : '影響時間';
-  const endLabel = isOngoing ? '状況' : '復旧';
+  const endLabel = unknown || isOngoing ? '現在の状況' : '復旧';
 
   return `
     ${renderHeader(monitor)}
@@ -257,22 +268,22 @@ function renderComponentsBlock(components: ComponentHealth[]): string {
   `;
 }
 
-function renderHealthyWindow(monitor: Monitor, from: number, to: number): string {
+function renderNoFailuresWindow(monitor: Monitor, from: number, to: number): string {
   return `
     ${renderHeader(monitor)}
     <main class="space-y-6">
       <section class="glass rounded-2xl p-6 sm:p-8 text-center">
-        <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-green-500/15 border border-green-500/30 mb-4">
-          <svg class="w-6 h-6 text-green-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-500/15 border border-slate-500/30 mb-4">
+          <svg class="w-6 h-6 text-slate-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
             <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
           </svg>
         </div>
-        <h2 class="text-lg font-semibold text-slate-100">この時間帯に問題はありませんでした</h2>
+        <h2 class="text-lg font-semibold text-slate-100">この期間に障害サンプルは記録されていません</h2>
         <p class="mt-2 text-sm text-slate-400">
           <span class="tabular-nums" data-jst-friendly="${from}">${formatJstFriendly(from)}</span>
           から
           <span class="tabular-nums" data-jst-friendly="${to}">${formatJstFriendly(to)}</span>
-          までのチェックはすべて成功しています。
+          までの障害サンプルを確認しました。チェック未取得の期間の正常性は確認できません。
         </p>
       </section>
     </main>

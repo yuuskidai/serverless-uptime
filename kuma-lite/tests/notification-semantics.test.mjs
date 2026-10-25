@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as urlDisplay from '../src/url-display.ts';
+import * as monitorPolicy from '../src/monitor-policy.ts';
 
 function load(file,dependencies,globals={}){
  const module={exports:{}};const source=readFileSync(new URL('../src/'+file+'.ts',import.meta.url),'utf8');
@@ -16,7 +17,7 @@ function fixture(options={}){
  const posts=[],reactions=[],discord=[],jobs=[];
  const bot={defaultChannelId:'synthetic-channel',slack:{async postBlocks(_channel,payload){posts.push(payload);if(options.post)return options.post(payload);return {ts:'synthetic-thread'};},async addReaction(...args){reactions.push(args);}}};
  const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>bot},'./url-display':urlDisplay},{fetch:async(_url,init)=>{discord.push(JSON.parse(init.body));assert.equal(init.redirect,'manual');assert.ok(init.signal instanceof AbortSignal);return new Response(null,{status:204});}});
- const transition=load('state-notifications',{'./notifier':notifier,'./rca':{async enqueueRca(_env,job){jobs.push(job);}}},{setTimeout:(callback,ms)=>setTimeout(callback,options.shortDeadline&&ms===18000?5:ms)});
+ const transition=load('state-notifications',{'./notifier':notifier,'./monitor-policy':monitorPolicy,'./rca':{async enqueueRca(_env,job){jobs.push(job);}}},{setTimeout:(callback,ms)=>setTimeout(callback,options.shortDeadline&&ms===18000?5:ms)});
  return {notifier,transition,posts,reactions,discord,jobs,env:{DISCORD_WEBHOOK_URL:'https://synthetic.invalid/discord'},monitor:{id:1,name:'Synthetic',url:'https://synthetic.invalid/healthz'},detail:{reason:'応答遅延が継続',components:[],version:null}};
 }
 const text=f=>JSON.stringify({posts:f.posts,discord:f.discord});
@@ -64,4 +65,23 @@ test('Slack API requests use bounded native fetch deadlines and do not follow cr
  const client=new SlackClient({token:'synthetic-token',fetchImpl:async(_url,init)=>{seen.push(init);return Response.json({ok:true});}});
  await client.call('chat.postMessage',{channel:'synthetic-channel',text:'synthetic'});
  assert.equal(seen[0].redirect,'manual');assert.ok(seen[0].signal instanceof AbortSignal);
+});
+
+for (const kind of ['down','degraded','partial','up']) test(`internal ${kind} notifications never report application DOWN/RECOVERED or enqueue RCA`,async()=>{
+ const f=fixture();f.monitor.monitor_role='diagnostic';
+ const notification=await f.transition.notifyTransition(f.env,f.monitor,{healthz_reason:'内部診断待ち',error:null,healthz_components:null,healthz_version:null},{kind,previousStatus:'down',nextStatus:'up',downDurationMs:0,previousSlackAlertTs:'internal-thread'},1000);
+ assert.equal(notification.slackAlertTs,kind==='up'||kind==='partial'?null:'synthetic-thread');
+ assert.match(text(f),/INTERNAL PATH/);assert.doesNotMatch(text(f),/DOWN|RECOVERED|RESPONSE RESTORED|incident\?/);
+ assert.match(text(f),/公開サービスの稼働判定とは別/);assert.equal(f.jobs.length,0);assert.equal(f.reactions.length,0);
+ assert.equal(f.posts[0].threadTs,'internal-thread');
+});
+test('shadow transitions have no notifications, reactions or RCA jobs',async()=>{
+ const f=fixture();f.monitor.monitor_role='shadow';
+ await f.transition.notifyTransition(f.env,f.monitor,{healthz_reason:'synthetic',error:null,healthz_components:null,healthz_version:null},{kind:'down'},1000);
+ assert.equal(f.posts.length+f.discord.length+f.jobs.length+f.reactions.length,0);
+});
+test('availability RCA carries the configuration revision of the committed observation',async()=>{
+ const f=fixture();f.monitor.config_revision=9;
+ await f.transition.notifyTransition(f.env,f.monitor,{healthz_reason:'synthetic',error:null,healthz_components:null,healthz_version:null},{kind:'down',previousSlackAlertTs:null},1000);
+ assert.equal(f.jobs.length,1);assert.equal(f.jobs[0].configRevision,9);
 });

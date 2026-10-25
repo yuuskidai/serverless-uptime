@@ -1,7 +1,8 @@
 import type { CheckResult, ComponentHealth, Env, Monitor } from './types';
-import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp, notifyPartialRecovery } from './notifier';
+import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp, notifyPartialRecovery, notifyInternalPath } from './notifier';
 import { enqueueRca } from './rca';
 import type { StateTransition } from './state-transition';
+import { isAvailabilityMonitor } from './monitor-policy';
 
 /** Called only after the check and state transition committed under the lease. */
 export async function notifyTransition(
@@ -11,7 +12,8 @@ export async function notifyTransition(
   transition: StateTransition,
   ts: number,
 ): Promise<{ slackAlertTs: string | null } | null> {
-  if (!transition.kind) return null;
+  if (!transition.kind || monitor.monitor_role === 'shadow') return null;
+  if (!isAvailabilityMonitor(monitor) && monitor.monitor_role !== 'diagnostic') return null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = true;
   try {
@@ -29,6 +31,10 @@ async function deliverTransition(
   env: Env, monitor: Monitor, result: CheckResult, transition: StateTransition, ts: number, active: () => boolean,
 ): Promise<{ slackAlertTs: string | null } | null> {
   try {
+    if (monitor.monitor_role === 'diagnostic') {
+      return await notifyInternalPath(env, monitor, buildIncidentDetail(result, '内部診断の状態が変化しました'),
+        transition.kind!, transition.previousSlackAlertTs);
+    }
     if (transition.kind === 'down' || transition.kind === 'degraded') {
       const detail = buildIncidentDetail(result, transition.kind === 'down' ? 'unknown error' : '一部の機能が不調');
       const sent = transition.kind === 'down'
@@ -39,6 +45,7 @@ async function deliverTransition(
       if (sent.slackAlertTs && active()) {
         await enqueueRca(env, {
           monitorId: monitor.id,
+          configRevision: monitor.config_revision ?? 1,
           alertTs: sent.slackAlertTs,
           downSince: ts,
           reason: detail.reason,

@@ -8,7 +8,7 @@ export default {
     let output;
     switch (input.action) {
       case 'claim':
-        output = await execution.claimMonitorSlot(env, input.monitorId, input.slotMs);
+        output = await execution.claimMonitorSlot(env, input.monitorId, input.slotMs, input.configRevision);
         break;
       case 'release':
         await execution.releaseMonitorSlot(env, input.lease);

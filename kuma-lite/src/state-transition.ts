@@ -3,6 +3,7 @@ import type { CheckResult, CheckStatus, Monitor, MonitorState } from './types';
 export interface OrderedMonitorState extends MonitorState {
   last_check_slot: number;
   consecutive_successes: number;
+  config_revision?: number;
 }
 
 export interface StateTransition {
@@ -24,12 +25,17 @@ export function deriveTransition(
   inMaintenance: boolean,
 ): StateTransition {
   const previousStatus = previous?.current_status ?? 'up';
+  const revision = monitor.config_revision ?? 1;
+  // A missing scheduled observation or a configuration change breaks a streak.
+  // Preserve an open incident: changing routes must never manufacture recovery.
+  const contiguous = previous != null && (previous.config_revision ?? 1) === revision &&
+    slotMs - previous.last_check_slot === Math.max(1, monitor.interval_minutes ?? 1) * 60_000;
   const next: OrderedMonitorState = {
     monitor_id: monitor.id,
     current_status: previousStatus,
-    consecutive_failures: previous?.consecutive_failures ?? 0,
-    consecutive_degraded: previous?.consecutive_degraded ?? 0,
-    consecutive_successes: previous?.consecutive_successes ?? 0,
+    consecutive_failures: contiguous ? previous.consecutive_failures : 0,
+    consecutive_degraded: contiguous ? previous.consecutive_degraded : 0,
+    consecutive_successes: contiguous ? previous.consecutive_successes : 0,
     last_notified_at: previous?.last_notified_at ?? null,
     down_since: previous?.down_since ?? null,
     slack_alert_ts: previous?.slack_alert_ts ?? null,
@@ -37,6 +43,7 @@ export function deriveTransition(
     maintenance_to: null,
     maintenance_reason: null,
     last_check_slot: slotMs,
+    config_revision: revision,
   };
   const threshold = Math.max(1, monitor.retry_threshold ?? 2);
   const maintenanceEnded = !inMaintenance && previous?.maintenance_from != null &&

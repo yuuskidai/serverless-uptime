@@ -61,6 +61,10 @@ export type CheckBinaryStatus = 'up' | 'down';
  */
 export type HealthzStatus = 'ok' | 'degraded' | 'down';
 
+export type ProbeTransport = 'legacy' | 'public_fetch' | 'service_binding';
+export type MonitorRole = 'availability' | 'diagnostic' | 'shadow';
+export type ResponseMode = 'legacy_http' | 'strict_healthz';
+
 export interface Monitor {
   id: number;
   name: string;
@@ -89,6 +93,14 @@ export interface Monitor {
    * 1042`. NULL for cross-account / non-Cloudflare targets.
    */
   service_binding: string | null;
+  /** Undefined only in old fixtures; persisted rows always carry explicit defaults. */
+  probe_transport?: ProbeTransport;
+  monitor_role?: MonitorRole;
+  parent_monitor_id?: number | null;
+  response_mode?: ResponseMode;
+  config_revision?: number;
+  /** Boundary for public availability statistics; previous internal history stays intact. */
+  availability_since_ms?: number | null;
   method: string;
   expected_status: number;
   keyword: string | null;
@@ -123,10 +135,14 @@ export interface CheckRow {
   in_maintenance: number; // 0 | 1
   /** Bounded ProbeTrace[]; NULL on historical rows. Never contains request URLs or credentials. */
   probe_trace_json: string | null;
+  config_revision?: number | null;
+  monitor_role?: MonitorRole | null;
+  probe_transport?: ProbeTransport | null;
 }
 
 export interface MonitorState {
   monitor_id: number;
+  config_revision?: number;
   current_status: CheckStatus;
   consecutive_failures: number;
   consecutive_degraded: number;

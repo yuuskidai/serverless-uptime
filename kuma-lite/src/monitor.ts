@@ -4,15 +4,17 @@ import type {
 } from './types';
 
 type UntracedResult = Omit<CheckResult, 'probe_trace_json'>;
+type ProbeFetcher = Pick<Fetcher, 'fetch'>;
 const BODY_LIMIT_BYTES = 8192;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
 
 /** Probe only the configured path. A service binding does not measure public DNS/TLS or a remote region. */
 export async function performCheck(env: Env, monitor: Monitor): Promise<CheckResult> {
   const { fetcher, transport } = resolveFetcher(env, monitor);
+  const strict = monitor.response_mode === 'strict_healthz';
   const traces: ProbeTrace[] = [];
   const run = async (attempt: ProbeTrace['attempt'], url: string) => {
-    const result = await probe(fetcher, url, monitor.method || 'GET', monitor.timeout_ms ?? 10_000, attempt, transport);
+    const result = await probe(fetcher, url, monitor.method || 'GET', monitor.timeout_ms ?? 10_000, attempt, transport, strict);
     traces.push(result.trace);
     // No URL, headers, response body or provider metadata enters this diagnostic event.
     console.info({ event: 'monitor_probe', monitor_id: monitor.id, ...result.trace });
@@ -23,6 +25,8 @@ export async function performCheck(env: Env, monitor: Monitor): Promise<CheckRes
   });
   const primary = await run('primary', monitor.url);
   if (primary.parsedHealthz) return finish(resultFromHealthz(monitor, primary));
+  // A site root or login page cannot replace this endpoint's readiness contract.
+  if (strict) return finish(downResult(primary, null, false, primary.error ?? 'Invalid health response'));
   if (primary.bodySample !== null && !primary.networkFailure) return finish(resultFromLegacy(monitor, primary));
 
   if (monitor.fallback_url) {
@@ -56,18 +60,31 @@ interface ProbeOutcome {
   trace: ProbeTrace;
 }
 
-function resolveFetcher(env: Env, monitor: Monitor): { fetcher: Fetcher; transport: ProbeTrace['transport'] } {
-  if (monitor.service_binding) {
-    const bound = (env as unknown as Record<string, Fetcher | undefined>)[monitor.service_binding];
-    if (bound) return { fetcher: bound, transport: 'service_binding' };
+function resolveFetcher(env: Env, monitor: Monitor): { fetcher: ProbeFetcher; transport: ProbeTrace['transport'] } {
+  const configured = monitor.probe_transport ?? 'legacy';
+  if (configured !== 'legacy' && configured !== 'public_fetch' && configured !== 'service_binding') {
+    return { fetcher: failedFetcher('Unknown probe transport'), transport: 'public_fetch' };
+  }
+  if (configured === 'service_binding' || (configured === 'legacy' && monitor.service_binding)) {
+    const bound = monitor.service_binding
+      ? (env as unknown as Record<string, Fetcher | undefined>)[monitor.service_binding] : undefined;
+    if (bound && typeof bound.fetch === 'function') return { fetcher: bound, transport: 'service_binding' };
+    if (configured === 'service_binding') {
+      return { fetcher: failedFetcher('Service binding is unavailable'), transport: 'service_binding' };
+    }
     console.warn(`monitor ${monitor.id} has an unavailable service binding; using public fetch`);
   }
-  return { fetcher: { fetch: globalThis.fetch.bind(globalThis) } as Fetcher, transport: 'public_fetch' };
+  return { fetcher: { fetch: globalThis.fetch.bind(globalThis) }, transport: 'public_fetch' };
+}
+
+function failedFetcher(reason: string): ProbeFetcher {
+  return { fetch: async () => { throw new Error(`Monitor configuration error: ${reason}`); } };
 }
 
 async function probe(
-  fetcher: Fetcher, url: string, method: string, timeoutMs: number,
+  fetcher: ProbeFetcher, url: string, method: string, timeoutMs: number,
   attempt: ProbeTrace['attempt'], transport: ProbeTrace['transport'],
+  strict: boolean,
 ): Promise<ProbeOutcome> {
   const start = performance.now();
   const elapsed = () => Math.max(0, Math.round((performance.now() - start) * 10) / 10);
@@ -88,8 +105,15 @@ async function probe(
   try {
     // The deadline covers headers AND body. A stalled body/cancel acknowledgement must not hold a Cron lease forever.
     const operation = (async () => {
+      if (strict) {
+        const target = new URL(url);
+        if (target.protocol !== 'https:' || target.username || target.password || method !== 'GET') {
+          throw new Error('Strict health checks require credential-free HTTPS GET');
+        }
+      }
       response = await fetcher.fetch(url, {
-        method, signal, redirect: 'follow',
+        method, signal, redirect: strict ? 'manual' : 'follow',
+        ...(strict ? { cache: 'no-store' as const, cf: { cacheTtl: 0, cacheEverything: false } } : {}),
         headers: { 'User-Agent': 'kuma-lite/0.3 (uptime monitor)', 'X-Monitor-Request-ID': trace.request_id },
       });
       if (signal.aborted) {
@@ -110,7 +134,8 @@ async function probe(
       // Even a parseable JSON prefix can hide unread trailing data after the byte cap.
       // A truncated JSON response cannot prove readiness; only legacy non-JSON pages use a sample.
       const looksJson = /^[{\[]/.test(body.text.trimStart()) || (contentType ?? '').toLowerCase().includes('json');
-      if (body.truncated && (parsed !== null || looksJson)) throw new Error('Health response exceeds 8192 bytes');
+      if (body.truncated && (strict || parsed !== null || looksJson)) throw new Error('Health response exceeds 8192 bytes');
+      if (strict) validateStrictHealthz(response, parsed);
       return { body: body.text, parsed };
     })();
     const { body, parsed } = await Promise.race([operation, aborted]);
@@ -127,6 +152,49 @@ async function probe(
     clearTimeout(timer);
     signal.removeEventListener('abort', onAbort);
     if (signal.aborted && !response?.body?.locked) void response?.body?.cancel().catch(() => undefined);
+  }
+}
+
+/** Fail closed for the readiness probes; legacy HTTP monitors retain their existing contract. */
+function validateStrictHealthz(response: Response, payload: HealthzPayload | null): void {
+  if (!/^application\/json(?:\s*;|\s*$)/i.test(response.headers.get('content-type') ?? '')) {
+    throw new Error('Health response must use application/json');
+  }
+  if (!payload || typeof payload.status !== 'string' || !['ok', 'degraded', 'down'].includes(payload.status) ||
+      !Array.isArray(payload.components) || payload.components.length === 0 || payload.components.length > 20) {
+    throw new Error('Health response has an invalid readiness schema');
+  }
+  const names = new Set<string>();
+  let hasDatabase = false;
+  for (const component of payload.components) {
+    if (!component || typeof component !== 'object' || typeof component.name !== 'string' ||
+        !component.name.trim() || component.name.length > 200 ||
+        typeof component.status !== 'string' || !['ok', 'degraded', 'down'].includes(component.status) ||
+        (component.reason !== undefined && component.reason !== null && typeof component.reason !== 'string') ||
+        (component.latency_ms !== undefined && (typeof component.latency_ms !== 'number' ||
+          !Number.isFinite(component.latency_ms) || component.latency_ms < 0 || component.latency_ms > Number.MAX_SAFE_INTEGER))) {
+      throw new Error('Health response has an invalid component');
+    }
+    const name = component.name.trim().toLowerCase();
+    if (names.has(name)) throw new Error('Health response has duplicate components');
+    names.add(name);
+    if (isDatabase(component)) {
+      if (hasDatabase || component.latency_ms === undefined) throw new Error('Health response has an invalid Database component');
+      hasDatabase = true;
+    }
+  }
+  if (!hasDatabase) throw new Error('Health response is missing the Database component');
+  // A valid explicit DOWN may retain its component evidence on HTTP 503. No other
+  // HTTP error, redirect or contradictory ok JSON can establish availability.
+  if (response.status !== 200 && !(response.status === 503 && payload.status === 'down')) {
+    throw new Error(`Health endpoint returned HTTP ${response.status}`);
+  }
+  const cacheControl = response.headers.get('cache-control') ?? '';
+  const age = response.headers.get('age');
+  const cacheStatus = response.headers.get('cf-cache-status')?.trim().toUpperCase();
+  if (!/(?:^|,)\s*no-store\s*(?:,|$)/i.test(cacheControl) ||
+      (age !== null && Number(age) > 0) || (cacheStatus && ['HIT', 'STALE', 'UPDATING', 'REVALIDATED'].includes(cacheStatus))) {
+    throw new Error('Health response cannot establish fresh readiness (cache policy)');
   }
 }
 
@@ -181,8 +249,10 @@ function resultFromHealthz(monitor: Monitor, p: ProbeOutcome): UntracedResult {
   const threshold = positiveThreshold(monitor.db_latency_threshold_ms);
   const components = original.map(component => {
     if (!threshold || !isDatabase(component) || component.latency_ms === undefined || component.status === 'down') return component;
-    if (component.latency_ms >= threshold && component.status === 'ok') {
-      return { ...component, status: 'degraded' as const, reason: `Database 応答が監視閾値 ${threshold}ms を超過` };
+    if (component.latency_ms >= threshold && (component.status === 'ok' ||
+        (component.status === 'degraded' && isLatencyReason(component.reason)))) {
+      return { ...component, status: 'degraded' as const,
+        reason: `Database 応答が監視閾値 ${threshold}ms を超過 (${component.latency_ms}ms)` };
     }
     if (component.latency_ms < threshold && component.status === 'degraded' && isLatencyReason(component.reason)) {
       return { ...component, status: 'ok' as const, reason: null };
@@ -202,6 +272,11 @@ function resultFromHealthz(monitor: Monitor, p: ProbeOutcome): UntracedResult {
   }
   if (unhealthy.some(component => component.status === 'down')) status = 'down';
   else if (status === 'ok' && unhealthy.length > 0) status = 'degraded';
+  if (unhealthy.length > 0 && unhealthy.every(component => isDatabase(component) && component.status === 'degraded') &&
+      (!reason || isLatencyReason(reason)) &&
+      originalUnhealthy.every(component => isDatabase(component) && isLatencyReason(component.reason))) {
+    reason = unhealthy[0].reason ?? reason;
+  }
   if (!reason && unhealthy.length > 0) reason = unhealthy[0].reason ?? `${unhealthy[0].name} が不調です`;
   return {
     status: status === 'down' ? 'down' : 'up', status_code: p.statusCode, latency_ms: p.latencyMs,
@@ -277,40 +352,48 @@ function errorMessage(err: unknown): string { return (err instanceof Error ? err
 
 export async function cleanupOldChecks(env: Env): Promise<void> {
   const days = Number.parseInt(env.RETENTION_DAYS ?? '7', 10) || 7;
-  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const cutoff = now - days * 24 * 60 * 60 * 1000;
   // Roll any completed days into daily_summary before pruning the raw
   // rows that fed them. INSERT OR IGNORE so days already summarised
   // (by a previous cron tick or by the migration's seed insert) are
   // left alone — only newly-completed days get added. Computed first
   // so a prune that races a summary insert can't leave a hole.
   //
-  // down_streak is the longest run of consecutive down (non-maintenance)
-  // checks that day, computed via the classic "islands" trick: within a
-  // (monitor_id, day_ms) partition ordered by ts, row_number() minus the
-  // running sum of is_down stays constant for a contiguous run of down
-  // ticks and changes whenever an up tick breaks the run. Grouping by
-  // that value and counting gives each run's length; MAX() is the
-  // longest. See status-page.ts:buildBuckets for how this distinguishes
-  // a single-tick blip (down_streak = 1, bar stays green) from a real
-  // outage (down_streak >= 2, bar goes amber).
-  const todayMidnight = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+  // down_streak requires neighboring scheduled slots of the same revision.
+  // Missing observations, maintenance/up rows and configuration changes break
+  // an island. Historical checks have no slot, so use their minute-rounded ts
+  // rather than interpreting separated old rows as consecutive observations.
+  const todayMidnight = Math.floor(now / 86_400_000) * 86_400_000;
   await env.DB.prepare(
     `INSERT OR IGNORE INTO daily_summary (monitor_id, day_ms, ups, downs, maints, down_streak)
      WITH days AS (
-       SELECT monitor_id,
+       SELECT id, monitor_id,
               (ts / 86400000) * 86400000 AS day_ms,
               status,
               in_maintenance,
               CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
+              COALESCE(scheduled_slot, (ts / 60000) * 60000) AS slot_ms,
+              COALESCE(config_revision, 1) AS revision,
+              MAX(1, COALESCE((SELECT interval_minutes FROM monitors WHERE id = checks.monitor_id), 1)) * 60000 AS interval_ms,
               ts
          FROM checks
         WHERE ts < ?
      ),
+     ordered AS (
+       SELECT *,
+              LAG(is_down) OVER observation_order AS previous_down,
+              LAG(slot_ms) OVER observation_order AS previous_slot,
+              LAG(revision) OVER observation_order AS previous_revision
+         FROM days
+       WINDOW observation_order AS (PARTITION BY monitor_id, day_ms ORDER BY ts, id)
+     ),
      islands AS (
        SELECT monitor_id, day_ms, is_down,
-              ROW_NUMBER() OVER (PARTITION BY monitor_id, day_ms ORDER BY ts)
-                - SUM(is_down) OVER (PARTITION BY monitor_id, day_ms ORDER BY ts) AS island_id
-         FROM days
+              SUM(CASE WHEN is_down = 1 AND previous_down = 1 AND revision = previous_revision
+                            AND slot_ms - previous_slot = interval_ms THEN 0 ELSE 1 END)
+                OVER (PARTITION BY monitor_id, day_ms ORDER BY ts, id) AS island_id
+         FROM ordered
      ),
      streaks AS (
        SELECT monitor_id, day_ms, MAX(run_len) AS down_streak
@@ -334,5 +417,19 @@ export async function cleanupOldChecks(env: Env): Promise<void> {
   )
     .bind(todayMidnight)
     .run();
-  await env.DB.prepare(`DELETE FROM checks WHERE ts < ?`).bind(cutoff).run();
+  // The cutover day has a mixed daily_summary (old binding + public HTTPS).
+  // Public charts read that day's post-cutover raw slice instead. Retain only
+  // that bounded slice until its UTC day leaves the 30-day chart window; the
+  // rest of the raw history still follows RETENTION_DAYS.
+  await env.DB.prepare(
+    `DELETE FROM checks WHERE ts < ? AND NOT EXISTS (
+       SELECT 1 FROM monitors m
+        WHERE m.id = checks.monitor_id AND m.monitor_role = 'availability'
+          AND m.availability_since_ms > 0 AND m.availability_since_ms % 86400000 <> 0
+          AND m.availability_since_ms >= ?
+          AND checks.ts >= m.availability_since_ms
+          AND checks.ts < ((m.availability_since_ms + 86399999) / 86400000) * 86400000
+          AND checks.monitor_role = 'availability' AND checks.probe_transport = 'public_fetch'
+     )`,
+  ).bind(cutoff, todayMidnight - 29 * 86_400_000).run();
 }

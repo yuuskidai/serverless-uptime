@@ -15,8 +15,8 @@ export function loadTs(file, overrides = {}) {
   }).outputText;
   const module = { exports: {} };
   runInNewContext(output, {
-    module, exports: module.exports, crypto: webcrypto, Date, Error, Response,
-    console: { error() {}, warn() {}, log() {} },
+    module, exports: module.exports, crypto: webcrypto, Date, Error, Response, URL, performance,
+    console: { error() {}, warn() {}, log() {}, info() {} },
     setTimeout, clearTimeout,
     require(id) {
       if (Object.hasOwn(overrides, id)) return overrides[id];

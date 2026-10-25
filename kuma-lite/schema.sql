@@ -23,6 +23,14 @@ CREATE TABLE IF NOT EXISTS monitors (
   -- account as kuma-lite, since same-zone *.workers.dev fetches are
   -- blocked by the runtime with error code 1042.
   service_binding TEXT,
+  -- Explicit route and audience; legacy retains the pre-route behavior.
+  probe_transport TEXT NOT NULL DEFAULT 'legacy' CHECK (probe_transport IN ('legacy', 'public_fetch', 'service_binding')),
+  monitor_role TEXT NOT NULL DEFAULT 'availability' CHECK (monitor_role IN ('availability', 'diagnostic', 'shadow')),
+  parent_monitor_id INTEGER REFERENCES monitors(id),
+  response_mode TEXT NOT NULL DEFAULT 'legacy_http' CHECK (response_mode IN ('legacy_http', 'strict_healthz')),
+  config_revision INTEGER NOT NULL DEFAULT 1,
+  -- Public HTTPS statistics start here; older binding history is retained.
+  availability_since_ms INTEGER,
   method TEXT DEFAULT 'GET',
   expected_status INTEGER DEFAULT 200,
   keyword TEXT,
@@ -69,6 +77,10 @@ CREATE TABLE IF NOT EXISTS checks (
   in_maintenance INTEGER DEFAULT 0,
   scheduled_slot INTEGER,
   probe_trace_json TEXT,
+  -- Immutable execution-time identity, never inferred from current settings.
+  config_revision INTEGER,
+  monitor_role TEXT,
+  probe_transport TEXT,
   FOREIGN KEY (monitor_id) REFERENCES monitors(id)
 );
 
@@ -122,6 +134,7 @@ CREATE TABLE IF NOT EXISTS monitor_state (
   consecutive_degraded INTEGER DEFAULT 0,
   consecutive_successes INTEGER NOT NULL DEFAULT 0,
   last_check_slot INTEGER NOT NULL DEFAULT -1,
+  config_revision INTEGER NOT NULL DEFAULT 1,
   last_notified_at INTEGER,
   down_since INTEGER,
   -- Slack thread for the current DOWN/DEGRADED alert. Partial recovery
