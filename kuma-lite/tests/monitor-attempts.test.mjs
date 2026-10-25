@@ -37,6 +37,7 @@ for (const [label,mutate,reason] of [
   ['disabled',f=>f.sqlite.exec('UPDATE monitors SET enabled=0'),'monitor_disabled'],
   ['revision',f=>f.sqlite.exec('UPDATE monitors SET config_revision=2'),'configuration_changed'],
   ['already recorded',f=>f.sqlite.prepare("INSERT INTO monitor_state(monitor_id,current_status,last_check_slot) VALUES(1,'up',?)").run(SLOT),'already_recorded'],
+  ['newer result already recorded',f=>f.sqlite.prepare("INSERT INTO monitor_state(monitor_id,current_status,last_check_slot) VALUES(1,'up',?)").run(SLOT+60000),'superseded_slot'],
   ['newer slot already claimed',f=>f.sqlite.prepare('INSERT INTO monitor_execution(monitor_id,claimed_slot,lease_token,lease_until) VALUES(1,?,?,0)').run(SLOT+60000,'other'),'superseded_slot'],
 ]) test(`rejected ${label} observation is durable without a fabricated check`,async()=>{
   const f=sqliteEnv();

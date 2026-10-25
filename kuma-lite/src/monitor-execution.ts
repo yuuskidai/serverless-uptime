@@ -99,7 +99,8 @@ export async function claimMonitorSlotDecision(
          WHEN target_id IS NULL THEN 'monitor_missing'
          WHEN enabled <> 1 OR enabled IS NULL THEN 'monitor_disabled'
          WHEN current_revision <> config_revision THEN 'configuration_changed'
-         WHEN COALESCE(last_check_slot, -1) >= scheduled_slot THEN 'already_recorded'
+         WHEN last_check_slot = scheduled_slot THEN 'already_recorded'
+         WHEN last_check_slot > scheduled_slot THEN 'superseded_slot'
          WHEN claimed_slot >= scheduled_slot THEN 'superseded_slot'
          WHEN lease_until > ${DB_NOW_MS} THEN 'lease_busy'
          ELSE 'claimable' END AS claim_reason

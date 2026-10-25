@@ -50,6 +50,10 @@ test('real workerd isolates share D1 atomic claims, expiry fences, CAS, and tran
     assert.equal(await call(1, { action: 'claim', monitorId: 1, slotMs }), null);
     assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=1').first()).n, 1);
     assert.equal((await db.prepare("SELECT count(*) AS n FROM monitor_attempts WHERE monitor_id=1 AND decision='committed'").first()).n, 1);
+    const older=await call(0,{action:'claimDecision',monitorId:1,slotMs:slotMs-60000});
+    assert.equal(older.lease,null);
+    assert.equal(older.attempt.reason,'superseded_slot');
+    assert.equal(older.attempt.observed_last_check_slot,slotMs);
   });
 
   await t.test('expiry allows a newer isolate; stale commit/release/notification metadata cannot affect it', async () => {
