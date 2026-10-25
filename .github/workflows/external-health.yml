@@ -2,16 +2,16 @@ name: External HTTPS witness
 
 on:
   schedule:
-    - cron: '2-59/5 * * * *'
+    - cron: "2-59/5 * * * *"
   workflow_dispatch:
   push:
     branches: [master]
     paths:
-      - '.github/workflows/external-health.yml'
-      - 'kuma-lite/external-targets.json'
-      - 'kuma-lite/scripts/external-health-probe.mjs'
-      - 'kuma-lite/src/external-observations.ts'
-      - 'kuma-lite/src/github-oidc.ts'
+      - ".github/workflows/external-health.yml"
+      - "kuma-lite/external-targets.json"
+      - "kuma-lite/scripts/external-health-probe.mjs"
+      - "kuma-lite/src/external-observations.ts"
+      - "kuma-lite/src/github-oidc.ts"
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
       - name: Check public endpoints and monitoring freshness
         run: node scripts/external-health-probe.mjs
       - name: Preserve independent observation

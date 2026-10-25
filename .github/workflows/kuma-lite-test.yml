@@ -4,14 +4,14 @@ on:
   push:
     branches: [master]
     paths:
-      - 'kuma-lite/**'
-      - '.github/workflows/kuma-lite-test.yml'
-      - '.github/workflows/external-health.yml'
+      - "kuma-lite/**"
+      - ".github/workflows/kuma-lite-test.yml"
+      - ".github/workflows/external-health.yml"
   pull_request:
     paths:
-      - 'kuma-lite/**'
-      - '.github/workflows/kuma-lite-test.yml'
-      - '.github/workflows/external-health.yml'
+      - "kuma-lite/**"
+      - ".github/workflows/kuma-lite-test.yml"
+      - ".github/workflows/external-health.yml"
 
 permissions:
   contents: read
@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '24.22.1'
+          node-version: "24.22.1"
           cache: npm
           cache-dependency-path: kuma-lite/package-lock.json
       - run: npm ci --ignore-scripts --no-audit --no-fund

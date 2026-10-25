@@ -101,10 +101,15 @@ function validateConfig(config: GithubOidcConfig): void {
 
 function validateClaims(value: Record<string, unknown>, config: GithubOidcConfig, now: number): GithubOidcClaims {
   const ref = 'refs/heads/master';
+  const [owner, repository] = config.repository.split('/');
+  // Both GitHub-documented formats bind the same strictly checked numeric IDs.
+  // https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims
+  const subjects = [`repo:${config.repository}:ref:${ref}`,
+    `repo:${owner}@${config.ownerId}/${repository}@${config.repositoryId}:ref:${ref}`];
   if (value.iss !== ISSUER || value.aud !== config.audience || value.repository !== config.repository ||
       value.repository_id !== config.repositoryId || value.repository_owner_id !== config.ownerId ||
       value.ref !== ref || value.workflow_ref !== config.workflowRef ||
-      value.sub !== `repo:${config.repository}:ref:${ref}` ||
+      typeof value.sub !== 'string' || !subjects.includes(value.sub) ||
       typeof value.event_name !== 'string' || !['schedule', 'push', 'workflow_dispatch'].includes(value.event_name) ||
       typeof value.run_id !== 'string' || !/^[1-9]\d{0,19}$/.test(value.run_id) ||
       typeof value.run_attempt !== 'string' || !/^[1-9]\d{0,5}$/.test(value.run_attempt)) return invalid();
@@ -112,7 +117,10 @@ function validateClaims(value: Record<string, unknown>, config: GithubOidcConfig
   if (typeof iat !== 'number' || typeof nbf !== 'number' || typeof exp !== 'number' ||
       !Number.isSafeInteger(iat) || !Number.isSafeInteger(nbf) || !Number.isSafeInteger(exp) ||
       iat <= 0 || nbf <= 0 || exp <= 0 ||
-      iat > now + 30 || iat < now - 600 || nbf > now + 30 || nbf < iat - 60 || nbf > iat + 30 ||
+      // GitHub's documented token backdates nbf by ten minutes. The issued-at
+      // age, expiry and signature still independently bound token acceptance.
+      // https://docs.github.com/en/actions/concepts/security/openid-connect
+      iat > now + 30 || iat < now - 600 || nbf > now + 30 || nbf < iat - 600 || nbf > iat + 30 ||
       exp <= now || exp <= iat || exp <= nbf || exp - iat > 900) return invalid();
   if (value.sha !== undefined && (typeof value.sha !== 'string' || !/^[a-f0-9]{40}$/i.test(value.sha))) return invalid();
   return {

@@ -47,6 +47,37 @@ test('actual RSA signature is verified against fixed issuer keys and exact workf
     method: 'GET', redirect: 'error', headers: { Accept: 'application/json' } }]);
 });
 
+for (const backdate of [300, 600]) test(`accepts GitHub signed nbf backdated ${backdate} seconds without extending token expiry`, async () => {
+  const f = fixture();
+  const nbf = baseClaims.iat - backdate;
+  const claims = await verifyGithubOidc(await token({ nbf }), config, f.options);
+  assert.equal(claims.nbf, nbf); assert.equal(claims.exp, baseClaims.exp);
+  assert.equal(claims.repository_id, config.repositoryId);
+});
+
+test('rejects nbf backdated beyond the documented ten-minute allowance', async () => {
+  const f = fixture();
+  await assert.rejects(verifyGithubOidc(await token({ nbf: baseClaims.iat - 601 }), config, f.options), isInvalid);
+  assert.equal(f.calls.length, 0);
+});
+
+test('accepts the exact immutable GitHub subject for the same owner/repository IDs and branch', async () => {
+  const f = fixture();
+  const sub = `repo:owner@${config.ownerId}/project@${config.repositoryId}:ref:refs/heads/master`;
+  assert.equal((await verifyGithubOidc(await token({ sub }), config, f.options)).sub, sub);
+});
+
+for (const sub of [
+  `repo:owner@99/project@${config.repositoryId}:ref:refs/heads/master`,
+  `repo:owner@${config.ownerId}/project@99:ref:refs/heads/master`,
+  `repo:owner@${config.ownerId}/other@${config.repositoryId}:ref:refs/heads/master`,
+  `repo:owner@${config.ownerId}/project@${config.repositoryId}:ref:refs/heads/other`,
+]) test('immutable subject must exactly match configured names, IDs and master branch', async () => {
+  const f = fixture();
+  await assert.rejects(verifyGithubOidc(await token({ sub }), config, f.options), isInvalid);
+  assert.equal(f.calls.length, 0);
+});
+
 for (const event_name of ['schedule', 'push', 'workflow_dispatch']) {
   test(`allowed workflow trigger ${event_name} retains strict repository identity`, async () => {
     const f = fixture();

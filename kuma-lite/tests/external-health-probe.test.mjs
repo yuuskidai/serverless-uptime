@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
-import { probeTarget, probeReadiness, runExternalWitness } from '../scripts/external-health-probe.mjs';
+import { probeTarget, probeReadiness, runExternalWitness, identityRejectionSummary } from '../scripts/external-health-probe.mjs';
 
 const config = JSON.parse(readFileSync(new URL('../external-targets.json', import.meta.url), 'utf8'));
 const target = config.targets[0];
@@ -132,4 +132,46 @@ test('idempotent receiver retry sends the exact same observation body', async ()
     return reply();
   } });
   assert.equal(result.reporting.accepted, true); assert.equal(bodies.length, 2); assert.equal(bodies[0], bodies[1]);
+});
+
+test('identity rejection diagnostic exposes only numeric deltas and comparison flags', () => {
+  const seconds = Math.floor(Date.now() / 1000);
+  const runtime = { GITHUB_REPOSITORY: config.repository, GITHUB_REPOSITORY_ID: '1229702777',
+    GITHUB_REPOSITORY_OWNER_ID: '85591602', GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'a'.repeat(40) };
+  const payload = { iss: 'https://token.actions.githubusercontent.com', aud: config.receiver,
+    repository: config.repository, repository_id: runtime.GITHUB_REPOSITORY_ID,
+    repository_owner_id: runtime.GITHUB_REPOSITORY_OWNER_ID, ref: 'refs/heads/master',
+    workflow_ref: `${config.repository}/.github/workflows/external-health.yml@refs/heads/master`,
+    sub: `repo:${config.repository}:ref:refs/heads/master`, run_id: '12345', run_attempt: '1',
+    sha: runtime.GITHUB_SHA, event_name: 'push', iat: seconds, nbf: seconds - 600, exp: seconds + 300,
+    jti: 'SECRET_ID', private_metadata: 'SECRET_NEVER_LOGGED' };
+  const token = `${Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'trusted-key' })).toString('base64url')}.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.SECRET_SIGNATURE`;
+  const diagnostic = identityRejectionSummary(token, config, runtime, seconds * 1000);
+  assert.equal(diagnostic.decoded, true); assert.equal(diagnostic.claims_verified, false);
+  assert.equal(diagnostic.timing_seconds.issued_minus_not_before, 600);
+  assert.equal(diagnostic.timing_seconds.lifetime, 300);
+  for (const [key, matches] of Object.entries(diagnostic.expected_matches)) assert.equal(matches, key !== 'immutable_subject', key);
+  const serialized = JSON.stringify(diagnostic);
+  assert.equal(serialized.includes('SECRET'), false); assert.equal(serialized.includes(token), false);
+  assert.equal(serialized.includes('jti'), false); assert.equal(serialized.includes(config.repository), false);
+  assert.deepEqual(identityRejectionSummary('malformed', config, runtime), { decoded: false, claims_verified: false });
+});
+
+test('receiver401 persists safe identity diagnosis rather than token material', async () => {
+  const seconds = Math.floor(Date.now() / 1000);
+  const runtime = { GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'a'.repeat(40),
+    ACTIONS_ID_TOKEN_REQUEST_URL: 'https://vstoken.actions.githubusercontent.com/identity', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'PRIVATE_REQUEST_TOKEN' };
+  const oidc = `${Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'trusted-key' })).toString('base64url')}.${Buffer.from(JSON.stringify({
+    iat: seconds, nbf: seconds - 600, exp: seconds + 300, private_claim: 'SECRET_PAYLOAD',
+  })).toString('base64url')}.PRIVATE_SIGNATURE`;
+  const result = await runExternalWitness(config, runtime, { fetcher: async url => {
+    if (String(url).includes('vstoken.actions')) return reply({ value: oidc });
+    if (url === config.receiver) return reply({ error: 'unauthorized' }, { status: 401 });
+    if (url === config.readiness_url) return reply({ status: 'ok', monitoring_data: 'fresh' });
+    return reply();
+  } });
+  assert.equal(result.reporting.error, 'identity_rejected');
+  assert.equal(result.reporting.identity_diagnostics.timing_seconds.issued_minus_not_before, 600);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_'), false);
+  assert.equal(JSON.stringify(result).includes('SECRET_PAYLOAD'), false);
 });

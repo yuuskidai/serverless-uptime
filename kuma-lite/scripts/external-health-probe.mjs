@@ -161,6 +161,48 @@ async function identityToken(receiver, runtime, fetcher) {
   return token.value.value;
 }
 
+/** Diagnostic comparisons only. Never output raw identity claims or token bytes. */
+export function identityRejectionSummary(token, config, runtime, now = Date.now()) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return { decoded: false, claims_verified: false };
+    const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    if (!object(header) || !object(claims)) return { decoded: false, claims_verified: false };
+    const delta = (left, right) => Number.isSafeInteger(left) && Number.isSafeInteger(right) &&
+      Number.isSafeInteger(left - right) ? left - right : null;
+    const repository = runtime.GITHUB_REPOSITORY ?? config.repository;
+    const [ownerName, repositoryName] = repository.split('/');
+    return {
+      decoded: true,
+      claims_verified: false,
+      timing_seconds: {
+        issued_age: delta(Math.floor(now / 1000), claims.iat),
+        issued_minus_not_before: delta(claims.iat, claims.nbf),
+        lifetime: delta(claims.exp, claims.iat),
+        expires_in: delta(claims.exp, Math.floor(now / 1000)),
+      },
+      expected_matches: {
+        algorithm_rs256: header.alg === 'RS256',
+        key_id_syntax: typeof header.kid === 'string' && /^[A-Za-z0-9._-]{1,256}$/.test(header.kid),
+        issuer: claims.iss === 'https://token.actions.githubusercontent.com',
+        audience: claims.aud === config.receiver,
+        repository: claims.repository === repository,
+        repository_id: typeof runtime.GITHUB_REPOSITORY_ID === 'string' && claims.repository_id === runtime.GITHUB_REPOSITORY_ID,
+        owner_id: typeof runtime.GITHUB_REPOSITORY_OWNER_ID === 'string' && claims.repository_owner_id === runtime.GITHUB_REPOSITORY_OWNER_ID,
+        ref: claims.ref === 'refs/heads/master',
+        workflow_ref: claims.workflow_ref === `${repository}/.github/workflows/external-health.yml@refs/heads/master`,
+        legacy_subject: claims.sub === `repo:${repository}:ref:refs/heads/master`,
+        immutable_subject: claims.sub === `repo:${ownerName}@${runtime.GITHUB_REPOSITORY_OWNER_ID}/${repositoryName}@${runtime.GITHUB_REPOSITORY_ID}:ref:refs/heads/master`,
+        run_id: claims.run_id === runtime.GITHUB_RUN_ID,
+        run_attempt: claims.run_attempt === runtime.GITHUB_RUN_ATTEMPT,
+        source_sha: claims.sha === runtime.GITHUB_SHA,
+        allowed_trigger: ['schedule', 'push', 'workflow_dispatch'].includes(claims.event_name),
+      },
+    };
+  } catch { return { decoded: false, claims_verified: false }; }
+}
+
 export async function runExternalWitness(config, runtime = process.env, options = {}) {
   if (!config || config.version !== 1 || !Array.isArray(config.targets) || config.targets.length !== 2) throw new Error('invalid_target_configuration');
   const run_id = runtime.GITHUB_RUN_ID;
@@ -189,6 +231,10 @@ export async function runExternalWitness(config, runtime = process.env, options 
       result.reporting.status = submission.http_status;
       if (submission.http_status === 200 && submission.value?.accepted === true) { result.reporting.accepted = true; break; }
       result.reporting.error = 'receiver_unavailable';
+      if (submission.http_status === 401) {
+        result.reporting.error = 'identity_rejected';
+        result.reporting.identity_diagnostics = identityRejectionSummary(token, config, runtime);
+      }
       if (submission.http_status !== null && ![404, 408, 429, 500, 502, 503, 504].includes(submission.http_status)) break;
       if (attempt < 2) await new Promise(resolve => setTimeout(resolve, Math.min(5000, Math.max(1, options.retryDelayMs ?? 5000))));
     }
