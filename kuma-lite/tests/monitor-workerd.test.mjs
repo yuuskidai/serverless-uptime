@@ -42,11 +42,14 @@ test('real workerd isolates share D1 atomic claims, expiry fences, CAS, and tran
     await seed(1);
     const claims = await Promise.all(Array.from({ length: 8 }, (_, i) => call(i % 2, { action: 'claim', monitorId: 1, slotMs })));
     assert.equal(claims.filter(Boolean).length, 1);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM monitor_attempts WHERE monitor_id=1').first()).n, 8);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM monitor_attempts WHERE monitor_id=1 AND decision='denied' AND reason='superseded_slot'").first()).n, 7);
     const lease = claims.find(Boolean);
     assert.equal(await call(0, { action: 'commit', lease, result: result() }), true);
     await call(1, { action: 'release', lease });
     assert.equal(await call(1, { action: 'claim', monitorId: 1, slotMs }), null);
     assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=1').first()).n, 1);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM monitor_attempts WHERE monitor_id=1 AND decision='committed'").first()).n, 1);
   });
 
   await t.test('expiry allows a newer isolate; stale commit/release/notification metadata cannot affect it', async () => {
@@ -128,5 +131,57 @@ test('real workerd isolates share D1 atomic claims, expiry fences, CAS, and tran
     assert.equal(await call(1, { action: 'reserve', lease: current }), false);
     await call(1, { action: 'thread', lease: current, thread: 'late-route-thread' });
     assert.equal((await db.prepare('SELECT slack_alert_ts FROM monitor_state WHERE monitor_id=6').first()).slack_alert_ts, null);
+  });
+
+  await t.test('actual D1 permits the next probe while an independent notification lease is live', async () => {
+    await seed(7);
+    const first = await call(0, { action:'claim', monitorId:7, slotMs });
+    assert.equal(await call(0,{action:'commit',lease:first,result:result('down')}),true);
+    await call(0,{action:'release',lease:first});
+    const second = await call(0,{action:'claim',monitorId:7,slotMs:slotMs+60000});
+    assert.equal(await call(0,{action:'commit',lease:second,result:result('down')}),true);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM notification_outbox WHERE monitor_id=7 AND status='pending'").first()).n,1);
+    await call(0,{action:'release',lease:second});
+    await db.prepare(`INSERT INTO notification_delivery_state(monitor_id,lease_token,lease_until)
+      VALUES(7,'notification-owner',CAST(strftime('%s','now') AS INTEGER)*1000+30000)`).run();
+    const third = await call(1,{action:'claim',monitorId:7,slotMs:slotMs+120000});
+    assert.ok(third);
+    assert.equal(await call(1,{action:'commit',lease:third,result:result('up')}),true);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM notification_outbox WHERE monitor_id=7 AND status='pending'").first()).n,2);
+    assert.equal((await db.prepare('SELECT current_status FROM monitor_state WHERE monitor_id=7').first()).current_status,'up');
+    assert.equal((await db.prepare('SELECT lease_token FROM notification_delivery_state WHERE monitor_id=7').first()).lease_token,'notification-owner');
+  });
+
+  await t.test('actual D1 records a missing target decision and preserves the unrounded delivery times',async()=>{
+    const decision=await call(0,{action:'claimDecision',monitorId:999,slotMs,
+      timing:{scheduledTime:slotMs+52009,receivedAt:slotMs+80000,runId:'local-synthetic-run'}});
+    assert.equal(decision.lease,null);assert.equal(decision.attempt.reason,'monitor_missing');
+    const audit=await db.prepare('SELECT * FROM monitor_attempts WHERE attempt_id=?').bind(decision.attempt.attempt_id).first();
+    assert.equal(audit.scheduled_time,slotMs+52009);assert.equal(audit.received_at,slotMs+80000);
+    assert.equal(audit.run_id,'local-synthetic-run');
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=999').first()).n,0);
+  });
+
+  await t.test('actual D1 outbox failure cannot commit an unnotifiable state transition',async()=>{
+    await seed(8);
+    const first=await call(0,{action:'claim',monitorId:8,slotMs});
+    assert.equal(await call(0,{action:'commit',lease:first,result:result('down')}),true);
+    await call(0,{action:'release',lease:first});
+    const next=await call(1,{action:'claim',monitorId:8,slotMs:slotMs+60000});
+    await db.prepare("CREATE TRIGGER refuse_outbox BEFORE INSERT ON notification_outbox WHEN NEW.monitor_id=8 BEGIN SELECT RAISE(ABORT,'outbox rollback'); END").run();
+    await assert.rejects(()=>workers[1].fetch('http://local-test.invalid/',{method:'POST',body:JSON.stringify({action:'commit',lease:next,result:result('down')})}),/outbox rollback/);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=8').first()).n,1);
+    assert.equal((await db.prepare('SELECT last_check_slot FROM monitor_state WHERE monitor_id=8').first()).last_check_slot,slotMs);
+    assert.equal((await db.prepare('SELECT count(*) AS n FROM notification_outbox WHERE monitor_id=8').first()).n,0);
+    assert.equal((await db.prepare('SELECT decision FROM monitor_attempts WHERE attempt_id=?').bind(next.attemptId).first()).decision,'claimed');
+  });
+
+  await t.test('actual D1 audit failure cannot roll back the probe unlock',async()=>{
+    await seed(9);
+    const lease=await call(0,{action:'claim',monitorId:9,slotMs});
+    await db.prepare("CREATE TRIGGER reject_release_audit BEFORE UPDATE ON monitor_attempts WHEN NEW.monitor_id=9 AND NEW.released_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'audit failure'); END").run();
+    assert.equal(await call(0,{action:'release',lease}),true);
+    assert.equal((await db.prepare('SELECT lease_until FROM monitor_execution WHERE monitor_id=9').first()).lease_until,0);
+    assert.ok(await call(1,{action:'claim',monitorId:9,slotMs:slotMs+60000}));
   });
 });

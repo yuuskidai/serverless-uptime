@@ -15,7 +15,9 @@ export function loadTs(file, overrides = {}) {
   }).outputText;
   const module = { exports: {} };
   runInNewContext(output, {
-    module, exports: module.exports, crypto: webcrypto, Date, Error, Response, URL, performance,
+    module, exports: module.exports, crypto: webcrypto, Date, Error, Response, Request, URL, performance,
+    AbortController, TextEncoder, TextDecoder, Uint8Array, atob, btoa,
+    fetch: (...args) => globalThis.fetch(...args),
     console: { error() {}, warn() {}, log() {}, info() {} },
     setTimeout, clearTimeout,
     require(id) {
@@ -37,9 +39,19 @@ export function sqliteEnv() {
     bind(...next) { return wrap(query, next); },
     async first() { return sqlite.prepare(query).get(...args) ?? null; },
     async all() { return { results: sqlite.prepare(query).all(...args), success: true }; },
-    async run() {
-      const info = sqlite.prepare(query).run(...args);
-      return { success: true, meta: { changes: Number(info.changes) } };
+    async run() { return this.executeSync(); },
+    executeSync() {
+      const statement = sqlite.prepare(query);
+      if (statement.columns().length > 0) {
+        const results = statement.all(...args);
+        const info = sqlite.prepare('SELECT changes() AS changes, last_insert_rowid() AS last_row_id').get();
+        return { success: true, results, meta: {
+          changes: /^\s*(SELECT|PRAGMA|EXPLAIN)\b/i.test(query) ? 0 : Number(info.changes),
+          last_row_id: Number(info.last_row_id),
+        } };
+      }
+      const info = statement.run(...args);
+      return { success: true, results: [], meta: { changes: Number(info.changes), last_row_id: Number(info.lastInsertRowid) } };
     },
     query, args,
   });
@@ -51,7 +63,9 @@ export function sqliteEnv() {
         const out = [];
         for (let i = 0; i < statements.length; i++) {
           hooks.beforeBatchStatement?.(i);
-          out.push(await statements[i].run());
+          // A D1 batch is serialized as one transaction; do not yield to a
+          // competing test invocation between its individual statements.
+          out.push(statements[i].executeSync());
         }
         sqlite.exec('COMMIT');
         return out;

@@ -16,11 +16,9 @@ compatibility_flags = ["nodejs_compat"]
 # Workers & Pages → kuma-lite → Logs. Free plan retains 3 days of logs;
 # paid plans retain 7 days.
 #
-# head_sampling_rate only applies to fetch invocations — scheduled (cron)
-# invocations are always recorded at 100% regardless of this value. Sampling
-# the public-page traffic at 10% is enough to spot recurring issues while
-# leaving headroom against the 20M-logs/month included quota when /status
-# gets linked publicly.
+# Persistent logs are sampled, including observed scheduled invocations.
+# Per-attempt decisions and notification delivery are retained independently
+# in D1; a missing sampled log is not evidence that a Cron did not execute.
 [observability]
 enabled = true
 head_sampling_rate = 0.1
@@ -149,3 +147,14 @@ database_id = "<your-d1-database-id>"
 #   npx wrangler preview base-config secret put API_TOKEN
 # RCA bindings are not mirrored into `previews`: Previews never run
 # crons, so they never raise alerts to analyse.
+
+# Optional trusted identity for GitHub-hosted external monitoring. Configure
+# these as persistent Worker secrets (the values are identity/configuration,
+# not shared probe credentials) so Workers Builds preserves them on deploy.
+#   EXTERNAL_PROBE_AUDIENCE       — exact HTTPS receiver URL ending in /api/external-observations
+#   EXTERNAL_PROBE_REPOSITORY     — owner/repository
+#   EXTERNAL_PROBE_REPOSITORY_ID  — stable numeric GitHub repository id
+#   EXTERNAL_PROBE_OWNER_ID       — stable numeric GitHub owner id
+#   EXTERNAL_PROBE_WORKFLOW_REF   — owner/repository/.github/workflows/external-health.yml@refs/heads/master
+# The receiver verifies short-lived GitHub OIDC signatures and these claims;
+# the management API token is never distributed to external runners.

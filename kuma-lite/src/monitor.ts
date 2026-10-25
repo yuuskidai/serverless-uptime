@@ -434,4 +434,16 @@ export async function cleanupOldChecks(env: Env): Promise<void> {
           AND checks.monitor_role = 'availability' AND checks.probe_transport = 'public_fetch'
      )`,
   ).bind(cutoff, todayMidnight - 29 * 86_400_000).run();
+  // Execution decisions retain missing/deleted monitor IDs for diagnosis. Delivery
+  // work is never pruned while pending; ambiguous sends keep a longer audit trail.
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM monitor_runs WHERE received_at < ?').bind(cutoff),
+    env.DB.prepare('DELETE FROM monitor_attempts WHERE observed_at < ?').bind(cutoff),
+    env.DB.prepare(`DELETE FROM notification_outbox WHERE status IN ('sent', 'cancelled', 'failed')
+      AND completed_at IS NOT NULL AND completed_at < ?`).bind(cutoff),
+    env.DB.prepare(`DELETE FROM notification_outbox WHERE status = 'uncertain'
+      AND completed_at IS NOT NULL AND completed_at < ?`).bind(now - Math.max(30, days) * 86_400_000),
+    // Run deletion cascades to its observations; never delete delivery thread state.
+    env.DB.prepare('DELETE FROM external_probe_runs WHERE recorded_at < ?').bind(cutoff),
+  ]);
 }

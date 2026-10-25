@@ -7,6 +7,13 @@ export interface Env {
   RETENTION_DAYS: string;
   HIDDEN_MONITOR_IDS?: string;
 
+  // Trusted GitHub Actions identity for the supplemental external witness.
+  EXTERNAL_PROBE_AUDIENCE?: string;
+  EXTERNAL_PROBE_REPOSITORY?: string;
+  EXTERNAL_PROBE_REPOSITORY_ID?: string;
+  EXTERNAL_PROBE_OWNER_ID?: string;
+  EXTERNAL_PROBE_WORKFLOW_REF?: string;
+
   // Slack via chat-sdk. Configure all three (or none) to enable Slack
   // notifications and the `/status` slash command. SLACK_DEFAULT_CHANNEL
   // is the channel id (e.g. "C0123ABCD") where DOWN/recovery alerts

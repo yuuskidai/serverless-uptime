@@ -157,3 +157,122 @@ CREATE TABLE IF NOT EXISTS monitor_execution (
   lease_until INTEGER NOT NULL,
   FOREIGN KEY (monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
 );
+
+-- Fresh-install structures from 0011_notification_outbox.sql
+-- Apply once to the monitoring database. Probe execution leases are unchanged.
+CREATE TABLE notification_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+  scheduled_slot INTEGER NOT NULL,
+  config_revision INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('down', 'degraded', 'partial', 'up')),
+  observed_at INTEGER NOT NULL,
+  result_json TEXT NOT NULL CHECK (length(result_json) <= 32768),
+  transition_json TEXT NOT NULL CHECK (length(transition_json) <= 16384),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'sent', 'cancelled', 'uncertain', 'failed')),
+  created_at INTEGER NOT NULL,
+  lease_token TEXT,
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  completed_at INTEGER,
+  slack_alert_ts TEXT,
+  last_error TEXT,
+  UNIQUE (monitor_id, scheduled_slot, config_revision, kind)
+);
+CREATE INDEX idx_notification_outbox_pending ON notification_outbox(monitor_id, status, scheduled_slot, id);
+
+-- Owns delivery order and thread identity independently of the latest probe state.
+CREATE TABLE notification_delivery_state (
+  monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE,
+  lease_token TEXT,
+  lease_until INTEGER NOT NULL DEFAULT 0,
+  active_outbox_id INTEGER,
+  last_processed_slot INTEGER NOT NULL DEFAULT -1,
+  slack_alert_ts TEXT
+);
+INSERT INTO notification_delivery_state (monitor_id, slack_alert_ts)
+  SELECT monitor_id, slack_alert_ts FROM monitor_state;
+
+-- Fresh-install structures from 0012_monitor_attempts.sql
+-- Additive monitoring-only audit. Apply once after 0011. Audit IDs and phase
+-- decisions contain no URLs, request headers, response bodies or credentials.
+-- No monitor FK: a missing/deleted monitor must remain diagnosable until audit
+-- retention expires; deleting a target must not erase the rejection evidence.
+CREATE TABLE monitor_runs (
+  run_id TEXT PRIMARY KEY,
+  scheduled_time INTEGER NOT NULL,
+  scheduled_slot INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  cron TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  error_phase TEXT,
+  timings_json TEXT CHECK (timings_json IS NULL OR length(timings_json) <= 8192)
+);
+CREATE INDEX idx_monitor_runs_received ON monitor_runs(received_at);
+CREATE TABLE monitor_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  run_id TEXT,
+  monitor_id INTEGER NOT NULL,
+  scheduled_time INTEGER NOT NULL,
+  scheduled_slot INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  config_revision INTEGER NOT NULL,
+  monitor_role TEXT NOT NULL,
+  probe_transport TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  observed_claimed_slot INTEGER,
+  observed_lease_until INTEGER,
+  observed_last_check_slot INTEGER,
+  observed_revision INTEGER,
+  observed_enabled INTEGER,
+  observed_at INTEGER NOT NULL,
+  claimed_at INTEGER,
+  probe_started_at INTEGER,
+  committed_at INTEGER,
+  released_at INTEGER,
+  finished_at INTEGER,
+  release_outcome TEXT,
+  error_phase TEXT,
+  timings_json TEXT CHECK (timings_json IS NULL OR length(timings_json) <= 8192)
+);
+CREATE INDEX idx_monitor_attempts_slot ON monitor_attempts(monitor_id, scheduled_slot DESC);
+CREATE INDEX idx_monitor_attempts_observed ON monitor_attempts(observed_at);
+
+-- Fresh-install structures from 0013_external_observations.sql
+-- Supplemental observations from the fixed GitHub Actions witness. This never
+-- advances the primary monitor state or replaces a missing scheduled check.
+CREATE TABLE external_probe_runs (
+  run_id TEXT NOT NULL,
+  run_attempt TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  readiness_status TEXT NOT NULL CHECK (readiness_status IN ('fresh', 'unknown')),
+  readiness_http_status INTEGER,
+  readiness_total_ms REAL NOT NULL,
+  PRIMARY KEY (run_id, run_attempt)
+) WITHOUT ROWID;
+CREATE INDEX idx_external_probe_runs_recorded ON external_probe_runs(recorded_at);
+
+CREATE TABLE external_observations (
+  run_id TEXT NOT NULL,
+  run_attempt TEXT NOT NULL,
+  monitor_id INTEGER NOT NULL,
+  monitor_config_revision INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  finished_at INTEGER NOT NULL,
+  total_ms REAL NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok', 'degraded', 'down')),
+  http_status INTEGER,
+  database_ms REAL,
+  db_threshold_ms INTEGER NOT NULL,
+  error TEXT,
+  request_id TEXT NOT NULL,
+  PRIMARY KEY (run_id, run_attempt, monitor_id),
+  FOREIGN KEY (run_id, run_attempt) REFERENCES external_probe_runs(run_id, run_attempt) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX idx_external_observations_latest ON external_observations(monitor_id, finished_at DESC);

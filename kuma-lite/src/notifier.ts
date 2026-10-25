@@ -2,6 +2,13 @@ import type { ComponentHealth, Env, Monitor } from './types';
 import { buildSlackBot } from './slack-bot';
 import { publicFacingDisplay, publicFacingUrl } from './url-display';
 
+export class NotificationDeliveryError extends Error {
+  constructor(public readonly code: 'not_configured' | 'uncertain', public readonly slackAlertTs: string | null = null) {
+    super(code === 'not_configured' ? 'No notification channel is configured' : 'Notification delivery was not confirmed');
+    this.name = 'NotificationDeliveryError';
+  }
+}
+
 export interface NotifyDownResult {
   /**
    * Slack message ts of the posted DOWN alert when the Slack post
@@ -36,6 +43,8 @@ export interface IncidentDetail {
   components: ComponentHealth[];
   /** Short build SHA the monitored site reports under `version`. */
   version: string | null;
+  /** Observation time, preserved when delivery is delayed. */
+  observedAt?: number;
 }
 
 /** Internal transport diagnostics never describe application availability or open public incidents. */
@@ -49,10 +58,11 @@ export async function notifyInternalPath(
   const message = normal ? '内部診断で正常応答を確認しました。' : detail.reason;
   const guidance = '公開サービスの稼働判定とは別の内部診断です。';
   const bot = buildSlackBot(env);
-  const [, slack] = await Promise.allSettled([
+  requireNotificationChannel(env);
+  const [discord, slack] = await Promise.allSettled([
     env.DISCORD_WEBHOOK_URL ? postWebhook(env.DISCORD_WEBHOOK_URL, {
       embeds: [{ title, description: `${truncate(message, 800)}\n\n${guidance}`,
-        color: normal ? 0x94a3b8 : 0xfbbf24, timestamp: new Date().toISOString() }],
+        color: normal ? 0x94a3b8 : 0xfbbf24, timestamp: observedIso(detail) }],
     }) : Promise.resolve(),
     bot?.defaultChannelId ? bot.slack.postBlocks(bot.defaultChannelId, {
       text: slackEscape(`${title} — ${message}`),
@@ -64,6 +74,9 @@ export async function notifyInternalPath(
       threadTs: threadTs ?? undefined,
     }) : Promise.resolve(null),
   ]);
+  if (discord.status === 'rejected' || slack.status === 'rejected') {
+    throw new NotificationDeliveryError('uncertain', slack.status === 'fulfilled' && slack.value ? slack.value.ts || null : null);
+  }
   // Only a new diagnostic incident starts a thread. Partial/normal replies keep
   // the original thread metadata and never replace it with a child reply's ts.
   return { slackAlertTs: (kind === 'down' || kind === 'degraded') &&
@@ -75,12 +88,15 @@ export async function notifyDown(
   monitor: Monitor,
   detail: IncidentDetail,
 ): Promise<NotifyDownResult> {
-  const [, slackResult] = await Promise.allSettled([
+  requireNotificationChannel(env);
+  const [discordResult, slackResult] = await Promise.allSettled([
     sendDiscordDown(env, monitor, detail),
     sendSlackDown(env, monitor, detail),
   ]);
-  const slackAlertTs =
-    slackResult.status === 'fulfilled' ? slackResult.value : null;
+  const slackAlertTs = slackResult.status === 'fulfilled' ? slackResult.value : null;
+  if (discordResult.status === 'rejected' || slackResult.status === 'rejected') {
+    throw new NotificationDeliveryError('uncertain', slackAlertTs);
+  }
   return { slackAlertTs };
 }
 
@@ -90,21 +106,27 @@ export async function notifyUp(
   downDurationMs: number,
   slackAlertTs: string | null,
   previousStatus: 'down' | 'degraded' = 'down',
+  observedAt?: number,
 ): Promise<void> {
-  await Promise.allSettled([
-    sendDiscordRecovery(env, monitor, downDurationMs, previousStatus),
-    sendSlackRecovery(env, monitor, downDurationMs, slackAlertTs, previousStatus),
+  requireNotificationChannel(env);
+  const detail: IncidentDetail = { reason: '', components: [], version: null, observedAt };
+  const results = await Promise.allSettled([
+    sendDiscordRecovery(env, monitor, downDurationMs, previousStatus, detail),
+    sendSlackRecovery(env, monitor, downDurationMs, slackAlertTs, previousStatus, detail),
   ]);
+  if (results.some(item => item.status === 'rejected')) throw new NotificationDeliveryError('uncertain');
 }
 
 /** A responding-but-degraded site has not fully recovered; keep the incident thread open. */
 export async function notifyPartialRecovery(
   env: Env, monitor: Monitor, detail: IncidentDetail, downDurationMs: number, slackAlertTs: string | null,
 ): Promise<void> {
-  await Promise.allSettled([
+  requireNotificationChannel(env);
+  const results = await Promise.allSettled([
     sendDiscordRecovery(env, monitor, downDurationMs, 'partial', detail),
     sendSlackRecovery(env, monitor, downDurationMs, slackAlertTs, 'partial', detail),
   ]);
+  if (results.some(item => item.status === 'rejected')) throw new NotificationDeliveryError('uncertain');
 }
 
 type RecoveryKind = 'down' | 'degraded' | 'partial';
@@ -130,12 +152,15 @@ export async function notifyDegraded(
   monitor: Monitor,
   detail: IncidentDetail,
 ): Promise<NotifyDownResult> {
-  const [, slackResult] = await Promise.allSettled([
+  requireNotificationChannel(env);
+  const [discordResult, slackResult] = await Promise.allSettled([
     sendDiscordDegraded(env, monitor, detail),
     sendSlackDegraded(env, monitor, detail),
   ]);
-  const slackAlertTs =
-    slackResult.status === 'fulfilled' ? slackResult.value : null;
+  const slackAlertTs = slackResult.status === 'fulfilled' ? slackResult.value : null;
+  if (discordResult.status === 'rejected' || slackResult.status === 'rejected') {
+    throw new NotificationDeliveryError('uncertain', slackAlertTs);
+  }
   return { slackAlertTs };
 }
 
@@ -153,7 +178,7 @@ async function sendDiscordDown(
         title: `🔴 DOWN: ${monitor.name}`,
         description: discordIncidentBody(monitor, detail, 'Reason'),
         color: 0xff0000,
-        timestamp: new Date().toISOString(),
+        timestamp: observedIso(detail),
         footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
@@ -172,7 +197,7 @@ async function sendDiscordDegraded(
         title: `🟡 DEGRADED: ${monitor.name}`,
         description: discordIncidentBody(monitor, detail, 'Reason'),
         color: 0xfbbf24,
-        timestamp: new Date().toISOString(),
+        timestamp: observedIso(detail),
         footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
@@ -194,7 +219,7 @@ async function sendDiscordRecovery(
         title: content.title,
         description: [publicFacingUrl(monitor.url), content.message, content.duration].filter(Boolean).join('\n\n'),
         color: kind === 'partial' ? 0xfbbf24 : 0x00cc66,
-        timestamp: new Date().toISOString(),
+        timestamp: observedIso(detail),
       },
     ],
   });
@@ -265,7 +290,7 @@ async function sendSlackDown(
         },
         {
           type: 'mrkdwn',
-          text: `*Triggered*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+          text: `*Triggered*\n<!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
         },
       ],
     },
@@ -310,7 +335,7 @@ async function sendSlackDegraded(
         },
         {
           type: 'mrkdwn',
-          text: `*Detected*\n<!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+          text: `*Detected*\n<!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
         },
       ],
     },
@@ -365,14 +390,13 @@ async function sendSlackRecovery(
       elements: [
         {
           type: 'mrkdwn',
-          text: `${kind === 'partial' ? ':large_yellow_circle: Response restored; degradation continues' : ':large_green_circle: Full recovery observed'} at <!date^${unixSec()}^{date_short_pretty} {time}|${new Date().toISOString()}>`,
+          text: `${kind === 'partial' ? ':large_yellow_circle: Response restored; degradation continues' : ':large_green_circle: Full recovery observed'} at <!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
         },
       ],
     },
   ];
 
-  await Promise.allSettled([
-    bot.slack.postBlocks(channel, {
+  await bot.slack.postBlocks(channel, {
       text: slackEscape(fallback),
       blocks,
       threadTs: slackAlertTs ?? undefined,
@@ -380,11 +404,11 @@ async function sendSlackRecovery(
       // resolution is visible without expanding the thread. No-op when
       // there's no thread (top-level fallback path).
       replyBroadcast: Boolean(slackAlertTs),
-    }),
-    slackAlertTs && kind !== 'partial'
-      ? bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark')
-      : Promise.resolve(),
-  ]);
+  });
+  // A failed decorative reaction does not mean the recovery message was undelivered.
+  if (slackAlertTs && kind !== 'partial') {
+    await bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark').catch(() => undefined);
+  }
 }
 
 // ── Block Kit helpers ────────────────────────────────────────────────────
@@ -449,8 +473,16 @@ function statusLabel(s: ComponentHealth['status']): string {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function unixSec(): number {
-  return Math.floor(Date.now() / 1000);
+function requireNotificationChannel(env: Env): void {
+  if (!env.DISCORD_WEBHOOK_URL && !buildSlackBot(env)?.defaultChannelId) throw new NotificationDeliveryError('not_configured');
+}
+
+function observedIso(detail?: IncidentDetail): string {
+  return new Date(detail?.observedAt ?? Date.now()).toISOString();
+}
+
+function unixSec(observedAt?: number): number {
+  return Math.floor((observedAt ?? Date.now()) / 1000);
 }
 
 function truncate(s: string, max: number): string {

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "repository": "yuuskidai/serverless-uptime",
+  "receiver": "https://helth.opus-system.workers.dev/api/external-observations",
+  "readiness_url": "https://helth.opus-system.workers.dev/readyz",
+  "targets": [
+    { "monitor_id": 5, "name": "Partner Portal", "url": "https://partner-portal.opus-system.jp/healthz", "db_threshold_ms": 1000 },
+    { "monitor_id": 6, "name": "Core OS", "url": "https://core-os.opus-system.jp/healthz", "db_threshold_ms": 1000 }
+  ]
+}

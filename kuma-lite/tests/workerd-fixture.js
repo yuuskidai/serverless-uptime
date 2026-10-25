@@ -10,6 +10,10 @@ export default {
       case 'claim':
         output = await execution.claimMonitorSlot(env, input.monitorId, input.slotMs, input.configRevision);
         break;
+      case 'claimDecision':
+        output = await execution.claimMonitorSlotDecision(env, input.monitorId, input.slotMs, input.configRevision,
+          input.timing);
+        break;
       case 'release':
         await execution.releaseMonitorSlot(env, input.lease);
         output = true;

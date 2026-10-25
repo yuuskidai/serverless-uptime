@@ -5,6 +5,9 @@ import { handleRcaBatch, type RcaJob } from './rca';
 import { cleanupOldChecks } from './monitor';
 import { runChecks } from './monitor-runner';
 import { monitoringReadiness } from './monitor-readiness';
+import { drainNotificationOutbox } from './notification-outbox';
+import { handleExternalObservation } from './external-observations';
+import { beginScheduledRun, advanceScheduledRun, finishScheduledRun } from './scheduled-runs';
 import { renderRssFeed } from './rss-feed';
 import {
   apiSchemaErrorResponse,
@@ -41,18 +44,39 @@ export default {
     // apply the migration without combing through D1 errors.
     ctx.waitUntil(
       (async () => {
-        const schemaStarted = Date.now();
-        const check = await ensureSchema(env);
-        const schemaMs = Math.max(0, Date.now() - schemaStarted);
-        if (!check.ok) {
-          logSchemaProblem(check, 'scheduled cron');
-          return;
+        const run = await beginScheduledRun(env, event.cron, event.scheduledTime, receivedAt);
+        const timings: Record<string, number> = {};
+        let phase = 'schema';
+        try {
+          const schemaStarted = Date.now();
+          const check = await ensureSchema(env);
+          timings.schema_ms = Math.max(0, Date.now() - schemaStarted);
+          if (!check.ok) {
+            logSchemaProblem(check, 'scheduled cron');
+            await finishScheduledRun(env, run, 'schema_missing', phase, timings);
+            return;
+          }
+          phase = 'offset';
+          await advanceScheduledRun(env, run, 'offset', timings);
+          // Preserve the deliberate five-second offset. Durable leases, rather
+          // than the offset, protect probes and notification delivery separately.
+          const offsetStarted = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          timings.offset_ms = Math.max(0, Date.now() - offsetStarted);
+          phase = 'checks';
+          await advanceScheduledRun(env, run, 'checks', timings);
+          const backlog = drainNotificationOutbox(env).catch(() => {
+            console.error({ event: 'notification_outbox_backlog_unconfirmed', run_id: run.runId });
+          });
+          try {
+            await runChecks(env, event.scheduledTime, { receivedAt, runId: run.runId,
+              schemaMs: timings.schema_ms, offsetMs: timings.offset_ms });
+          } finally { await backlog; }
+          await finishScheduledRun(env, run, 'completed', null, timings);
+        } catch (error) {
+          await finishScheduledRun(env, run, 'failed', phase, timings);
+          throw error;
         }
-        // Preserve the existing five-second scheduling offset. This is
-        // not mutual exclusion: D1 slot claims and leases prevent overlap.
-        const offsetStarted = Date.now();
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await runChecks(env, event.scheduledTime, { receivedAt, schemaMs, offsetMs: Math.max(0, Date.now() - offsetStarted) });
       })(),
     );
   },
@@ -83,6 +107,10 @@ export default {
       logSchemaProblem(schema, `fetch ${url.pathname}`);
       if (url.pathname.startsWith('/api/')) return apiSchemaErrorResponse();
       return publicSchemaErrorResponse();
+    }
+
+    if (url.pathname === '/api/external-observations' && req.method === 'POST') {
+      return handleExternalObservation(req, env);
     }
 
     if (url.pathname.startsWith('/api/')) {

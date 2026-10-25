@@ -1,6 +1,6 @@
 import type { Env, Monitor, MonitorRole, ProbeTransport, ResponseMode } from './types';
 
-const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
 
 export async function handleApiRequest(req: Request, env: Env): Promise<Response> {
   if (!authorize(req, env)) {
@@ -13,11 +13,12 @@ export async function handleApiRequest(req: Request, env: Env): Promise<Response
   const resource = segments[1];
   const id = segments[2];
 
-  if (resource !== 'monitors') {
-    return jsonError(404, 'not found');
-  }
-
   try {
+    if (['runs', 'attempts', 'notifications', 'external-observations'].includes(resource) && !id) {
+      if (req.method !== 'GET') return jsonError(405, 'method not allowed');
+      return await readOperations(env, resource, url);
+    }
+    if (resource !== 'monitors') return jsonError(404, 'not found');
     if (!id) {
       if (req.method === 'GET') return await listMonitors(env);
       if (req.method === 'POST') return await createMonitor(req, env);
@@ -301,6 +302,7 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
   const safeCutover = routeChanged ? ` AND NOT EXISTS (
       SELECT 1 FROM monitor_execution WHERE monitor_id = monitors.id
         AND lease_until > CAST(strftime('%s','now') AS INTEGER) * 1000)
+    AND ${notificationIdleSql('monitors.id')}
     AND NOT EXISTS (SELECT 1 FROM monitor_state WHERE monitor_id = monitors.id AND current_status <> 'up')` : '';
   const safeParent = route.monitor_role === 'availability' ? '' :
     ' AND NOT EXISTS (SELECT 1 FROM monitors AS child WHERE child.parent_monitor_id = monitors.id)';
@@ -317,12 +319,102 @@ async function updateMonitor(req: Request, env: Env, id: number): Promise<Respon
 
 async function deleteMonitor(env: Env, id: number): Promise<Response> {
   if (await hasChildren(env, id)) return jsonError(409, 'remove child monitors before deleting their parent');
-  await env.DB.batch([
-    env.DB.prepare(`DELETE FROM checks WHERE monitor_id = ?`).bind(id),
-    env.DB.prepare(`DELETE FROM monitor_state WHERE monitor_id = ?`).bind(id),
-    env.DB.prepare(`DELETE FROM monitors WHERE id = ?`).bind(id),
+  if (await env.DB.prepare(`SELECT id FROM monitors WHERE id = ? AND NOT (${notificationIdleSql('monitors.id')})`)
+    .bind(id).first()) return jsonError(409, 'notification delivery must finish before deleting the monitor');
+  const results = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM checks WHERE monitor_id = ? AND ${monitorDeletionAllowedSql('checks.monitor_id')}`).bind(id),
+    env.DB.prepare(`DELETE FROM monitor_state WHERE monitor_id = ? AND ${monitorDeletionAllowedSql('monitor_state.monitor_id')}`).bind(id),
+    env.DB.prepare(`DELETE FROM monitors WHERE id = ? AND ${monitorDeletionAllowedSql('monitors.id')}`).bind(id),
   ]);
+  if (results[2].meta.changes !== 1 && await env.DB.prepare('SELECT id FROM monitors WHERE id = ?').bind(id).first()) {
+    return jsonError(409, 'notification ownership or child monitors changed; retry after delivery');
+  }
   return json(200, { ok: true });
+}
+
+function monitorDeletionAllowedSql(monitorId: string): string {
+  return `${notificationIdleSql(monitorId)} AND NOT EXISTS (
+    SELECT 1 FROM monitors AS child WHERE child.parent_monitor_id = ${monitorId})`;
+}
+
+/** Re-evaluated in the same write transaction as route/delete operations. */
+function notificationIdleSql(monitorId: string): string {
+  return `NOT EXISTS (SELECT 1 FROM notification_delivery_state n WHERE n.monitor_id = ${monitorId}
+      AND n.lease_until > CAST(strftime('%s','now') AS INTEGER) * 1000)
+    AND NOT EXISTS (SELECT 1 FROM notification_outbox o WHERE o.monitor_id = ${monitorId}
+      AND o.status IN ('pending', 'processing'))`;
+}
+
+interface OperationFilters {
+  from: number;
+  to: number;
+  limit: number;
+  monitorId: number | null;
+  status: string | null;
+}
+
+function operationFilters(url: URL, resource: string): OperationFilters | { error: string } {
+  const allowed = new Set(['from', 'to', 'limit', ...(resource === 'runs' ? [] : ['monitor_id']),
+    ...(resource === 'notifications' ? ['status'] : [])]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) return { error: 'unsupported or repeated query parameter' };
+  }
+  const integer = (key: string, fallback: number | null): number | null | undefined => {
+    const value = url.searchParams.get(key);
+    if (value === null) return fallback;
+    if (!/^\d+$/.test(value)) return undefined;
+    const n = Number(value);
+    return Number.isSafeInteger(n) ? n : undefined;
+  };
+  const to = integer('to', Date.now() + 1);
+  const from = integer('from', typeof to === 'number' ? Math.max(0, to - 3_600_000) : 0);
+  const limit = integer('limit', 50);
+  const monitorId = integer('monitor_id', null);
+  if (typeof to !== 'number' || typeof from !== 'number' || to <= from || to - from > 86_400_000 ||
+    to > Date.now() + 60_000 || typeof limit !== 'number' || limit < 1 || limit > 200 ||
+    monitorId === undefined || (monitorId !== null && monitorId < 1)) {
+    return { error: 'queries require an increasing range of at most 24 hours, limit 1..200, and a positive monitor_id' };
+  }
+  const status = url.searchParams.get('status');
+  if (status !== null && !['pending', 'processing', 'sent', 'cancelled', 'uncertain', 'failed'].includes(status)) {
+    return { error: 'invalid notification status' };
+  }
+  return { from, to, limit, monitorId, status };
+}
+
+async function readOperations(env: Env, resource: string, url: URL): Promise<Response> {
+  const filters = operationFilters(url, resource);
+  if ('error' in filters) return jsonError(400, filters.error);
+  const { from, to, limit, monitorId, status } = filters;
+  let table: string, columns: string, timestamp: string;
+  if (resource === 'runs') {
+    table = 'monitor_runs'; timestamp = 'received_at';
+    columns = `run_id, scheduled_time, scheduled_slot, received_at, cron, stage, updated_at,
+      finished_at, error_phase, timings_json`;
+  } else if (resource === 'attempts') {
+    table = 'monitor_attempts'; timestamp = 'observed_at';
+    columns = `attempt_id, run_id, monitor_id, scheduled_time, scheduled_slot, received_at, config_revision,
+      monitor_role, probe_transport, decision, reason, observed_claimed_slot, observed_lease_until,
+      observed_last_check_slot, observed_revision, observed_enabled, observed_at, claimed_at,
+      probe_started_at, committed_at, released_at, finished_at, release_outcome, error_phase, timings_json`;
+  } else if (resource === 'notifications') {
+    table = 'notification_outbox'; timestamp = 'created_at';
+    // Delivery payloads and ownership tokens are intentionally excluded from inspection output.
+    columns = `id, monitor_id, scheduled_slot, config_revision, kind, observed_at, status, created_at,
+      attempts, completed_at, slack_alert_ts, last_error`;
+  } else {
+    table = 'external_observations'; timestamp = 'observed_at';
+    columns = `run_id, run_attempt, monitor_id, monitor_config_revision, observed_at, finished_at, total_ms, status,
+      http_status, database_ms, db_threshold_ms, error, request_id`;
+  }
+  const clauses = [`${timestamp} >= ?`, `${timestamp} < ?`];
+  const params: (string | number)[] = [from, to];
+  if (monitorId !== null) { clauses.push('monitor_id = ?'); params.push(monitorId); }
+  if (status !== null) { clauses.push('status = ?'); params.push(status); }
+  params.push(limit);
+  const result = await env.DB.prepare(`SELECT ${columns} FROM ${table} WHERE ${clauses.join(' AND ')}
+    ORDER BY ${timestamp} DESC LIMIT ?`).bind(...params).all();
+  return json(200, { [resource.replace(/-/g, '_')]: result.results ?? [], from, to, limit });
 }
 
 interface MonitorRoute {

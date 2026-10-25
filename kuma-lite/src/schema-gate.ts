@@ -54,6 +54,17 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
   { table: 'checks', column: 'monitor_role' },
   { table: 'checks', column: 'probe_transport' },
   { table: 'monitor_state', column: 'config_revision' },
+  { table: 'monitor_attempts', column: 'attempt_id' },
+  { table: 'monitor_attempts', column: 'reason' },
+  { table: 'monitor_attempts', column: 'scheduled_time' },
+  { table: 'monitor_attempts', column: 'run_id' },
+  { table: 'monitor_attempts', column: 'release_outcome' },
+  { table: 'monitor_runs', column: 'run_id' },
+  { table: 'notification_outbox', column: 'status' },
+  { table: 'notification_outbox', column: 'transition_json' },
+  { table: 'notification_delivery_state', column: 'lease_token' },
+  { table: 'external_probe_runs', column: 'payload_hash' },
+  { table: 'external_observations', column: 'monitor_config_revision' },
 ];
 
 let cached: SchemaCheck | null = null;

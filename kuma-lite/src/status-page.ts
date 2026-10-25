@@ -9,6 +9,7 @@ import { classify, KIND_HEADLINE } from './kinds';
 import { publicFacingUrl } from './url-display';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql, availabilitySince } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
+import { readExternalWitnesses, type ExternalWitness } from './external-observations';
 
 const TIMEZONE = 'Asia/Tokyo';
 // Buffer between the cron tick (every minute at :00) and our reload, so the
@@ -142,6 +143,7 @@ interface MonitorView {
   /** Latest healthz components (already parsed). */
   latestComponents: ComponentHealth[];
   maintenance: MaintenanceView | null;
+  external: ExternalWitness | null;
 }
 
 export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
@@ -213,7 +215,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   // The error-sample query is gated by scale (see SAMPLE_ERROR_MAX_SCALE_MS
   // for why); when we skip it we resolve to null in place.
   const dbStartedAt = Date.now();
-  const [statesResult, latestResult, aggregateResult, errResult] = await Promise.all([
+  const [statesResult, latestResult, aggregateResult, errResult, externalWitnesses] = await Promise.all([
     db.prepare(`SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`)
       .bind(...ids)
       .all<MonitorState>(),
@@ -256,6 +258,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
           .bind(sinceWindow, ...ids)
           .all<ErrRow>()
       : Promise.resolve(null),
+    readExternalWitnesses(env, now),
   ]);
 
   const stateById = new Map<number, MonitorState>();
@@ -350,6 +353,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       latestReason: freshness !== 'fresh' ? '監視情報が古いか、まだ取得されていません。現在の稼働状態は未確認です。' : latest?.healthz_reason ?? null,
       latestComponents: freshness === 'fresh' ? parseComponents(latest?.healthz_components ?? null) : [],
       maintenance,
+      external: externalWitnesses.get(monitor.id) ?? null,
     };
   });
 
@@ -1023,6 +1027,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       </div>
 
       ${reasonLine}
+      ${renderExternalWitness(view.external)}
 
       <div class="mt-5">
         <div class="bar-row" role="img"
@@ -1050,6 +1055,29 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       </div>
     </article>
   `;
+}
+
+/** A separate observation, never a replacement for the primary monitor state. */
+function renderExternalWitness(witness: ExternalWitness | null): string {
+  const label = witness?.status === 'ok' ? '正常' : witness?.status === 'degraded' ? '遅延・一部不調'
+    : witness?.status === 'down' ? '応答確認できず' : '未確認';
+  const time = witness?.observedAt != null ? ` · ${formatJstDateTime(witness.observedAt)}` : '';
+  const elapsed = witness?.status !== 'unknown' && witness?.totalMs != null ? ` · ${Math.round(witness.totalMs)} ミリ秒` : '';
+  // Provenance links are reconstructed from the configured GitHub repository.
+  // Do not render a database-supplied arbitrary URL even for this optional link.
+  const url = safeExternalRunUrl(witness?.runUrl ?? null);
+  const provenance = url ? ` · <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="underline">確認記録</a>` : '';
+  return `<p class="mt-2 text-xs text-slate-400 leading-snug">外部確認: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">約5分ごとの補助確認。更新が古い場合は未確認です。</span></p>`;
+}
+
+function safeExternalRunUrl(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'github.com' && (!url.port || url.port === '443') && !url.username && !url.password &&
+      !url.search && !url.hash && /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[1-9]\d*(?:\/attempts\/[1-9]\d*)?$/.test(url.pathname)
+      ? url.toString() : null;
+  } catch { return null; }
 }
 
 /**

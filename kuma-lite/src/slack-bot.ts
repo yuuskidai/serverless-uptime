@@ -4,6 +4,7 @@ import { createSlackAdapter, SlackWorkersAdapter } from './chat-adapters/slack';
 import type { Env, Monitor } from './types';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
+import { readExternalWitnesses } from './external-observations';
 
 export interface SlackBot {
   chat: Chat<{ slack: SlackWorkersAdapter }>;
@@ -72,7 +73,8 @@ export async function renderStatusBlocks(
 ): Promise<{ text: string; blocks: unknown[] }> {
   const latest = (column: string) => `(SELECT c.${column} FROM checks c WHERE c.monitor_id = m.id
     AND ${availabilityHistorySql('c')} ORDER BY c.ts DESC LIMIT 1)`;
-  const rows = await env.DB.prepare(
+  const now = Date.now();
+  const [rows, externalWitnesses] = await Promise.all([env.DB.prepare(
     `SELECT m.*, s.current_status,
             ${latest('ts')} AS latest_ts,
             ${latest('scheduled_slot')} AS latest_slot,
@@ -81,13 +83,12 @@ export async function renderStatusBlocks(
        LEFT JOIN monitor_state s ON s.monitor_id = m.id
       WHERE m.enabled = 1 AND ${AVAILABILITY_ROLE_SQL.replace('COALESCE(monitor_role', 'COALESCE(m.monitor_role')}
       ORDER BY m.id`,
-  ).all<MonitorWithState>();
+  ).all<MonitorWithState>(), readExternalWitnesses(env, now)]);
   const monitors = rows.results ?? [];
   if (monitors.length === 0) return {
     text: 'No monitors are configured.',
     blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: No monitors are configured.' } }],
   };
-  const now = Date.now();
   const views = monitors.map(monitor => ({
     monitor,
     state: monitorFreshness(monitor, monitor.latest_ts === null ? null : {
@@ -105,8 +106,13 @@ export async function renderStatusBlocks(
   for (const {monitor, state} of views) {
     const label = state === 'unknown' ? ':white_circle: 監視情報が古いか、まだ取得されていません'
       : state === 'down' ? ':red_circle: DOWN' : state === 'degraded' ? ':large_yellow_circle: DEGRADED' : ':large_green_circle: UP';
+    const external = externalWitnesses.get(monitor.id);
+    const externalLabel = external?.status === 'ok' ? '正常' : external?.status === 'degraded' ? '遅延・一部不調'
+      : external?.status === 'down' ? '応答確認できず' : '未確認';
+    const externalTime = external?.observedAt != null
+      ? ` · <!date^${Math.floor(external.observedAt/1000)}^{date_short_pretty} {time}|${new Date(external.observedAt).toISOString()}>` : '';
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text:
-      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` } });
+      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>\n外部確認: ${externalLabel}${externalTime}（約5分ごとの補助確認）` } });
   }
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
     `:clock1: as of <!date^${Math.floor(now/1000)}^{date_short_pretty} {time}|${new Date(now).toISOString()}>` }] });

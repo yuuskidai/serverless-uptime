@@ -88,6 +88,71 @@ Use a real labeled vantage point; a service binding or a workspace request is no
 Japan/APAC coverage. External probes must not receive the monitor's general management token.
 Public health establishes bounded endpoint and DB readiness, not authenticated business-flow completion.
 
+## Independent notification delivery and execution audit
+
+Migrations 0011–0013 are additive and monitoring-only. Apply each once after 0010;
+never reapply 0009 or 0010. Fresh installations use `schema.sql` instead.
+
+The accepted check, state transition and notification outbox event commit in one
+D1 transaction. Probe ownership is released before any notification adapter runs.
+`notification_delivery_state` owns a separate expiring lease, delivery order and
+incident thread; a recovery can queue while its earlier DOWN is still being sent.
+Its original detection time is retained. A periodic drain also handles old pending work.
+Route changes and deletion reject active/pending notification ownership as well as
+probe conflicts. Settings changes cannot silently erase a pending DOWN or recovery:
+a fresh current observation can replace a cancelled old-revision event once.
+
+Delivery outcomes are `sent`, `cancelled`, `failed` or `uncertain`. A lost provider
+acknowledgement or expired processing lease cannot safely be retried automatically;
+it remains visible for investigation. `sent` is an acknowledged delivery outcome,
+not a guarantee that every external recipient read the message. Pending/processing
+work is not pruned; uncertain outcomes are retained for at least 30 days.
+
+`monitor_runs` records exact schedule/receipt times and the top-level lifecycle.
+`monitor_attempts` records the decision for each delivered monitor attempt, including
+the observed configuration, previous slot and lease expiry. Claim and rejection
+decisions are captured in the claim transaction. Reasons distinguish disabled,
+changed configuration, already-recorded/superseded slots and a busy lease. Commit,
+release and error phases retain their outcomes. Missing observations stay missing.
+Audit updates are bounded and do not gate probe entry or probe-lease release; an
+unacknowledged audit is logged without retrying an ownership mutation. Read-only
+monitor/state requests have a five-second deadline; write acknowledgements remain
+protected by the database lease and revision fences rather than blind retries.
+
+Authenticated inspection endpoints are `GET /api/runs`, `/api/attempts`,
+`/api/notifications` and `/api/external-observations`. Filters are bounded to 24 hours
+and at most 200 rows. Ownership tokens, notification payloads and credentials are
+not included. Normal audit and external records follow the configured raw retention.
+
+## Supplemental GitHub-hosted witness
+
+`.github/workflows/external-health.yml` probes the fixed HTTPS targets and the
+monitor's `/readyz` from a GitHub-hosted runner every five minutes. It preserves
+the sanitized result in the GitHub run, summary and seven-day artifact even if
+the Cloudflare receiver is unavailable. Target health, monitor freshness and
+report-delivery failures are separate. Public cards and Slack status show this
+external confirmation separately and never clear a primary incident with it.
+
+The receiver accepts only a short-lived GitHub OIDC token for the configured
+repository numeric ID, owner, master ref, workflow reference, subject and exact
+audience. It verifies RS256 against the fixed GitHub issuer/JWKS. No management
+API token or shared probe secret is sent to GitHub. Run/attempt/result identity
+makes identical retransmissions idempotent and conflicting payloads fail. Both
+targets' configuration is checked atomically; no partial healthy result is stored.
+Observations more than 15 minutes old are displayed as unknown, not healthy.
+
+Configure the five `EXTERNAL_PROBE_*` identity values listed in
+`wrangler.toml.example` before enabling the workflow. Persistent Worker secrets
+are a convenient configuration store preserved by Workers Builds; these identity
+values are not a shared authentication secret. Keep the fixed non-secret target
+configuration in `external-targets.json` consistent with monitored URLs/DB thresholds.
+
+GitHub schedule is best effort: it can start late or drop runs, and public-repository
+schedules can disable after 60 days of repository inactivity. Monitor result age and
+workflow status. This witness is outside Cloudflare, but does not establish a Japan/
+APAC location or one-minute execution SLA. It is supplemental; primary cadence and
+the configured consecutive-failure policy remain separate.
+
 ## Separate latency thresholds
 
 - `db_latency_threshold_ms`: nullable positive safe integer. Compares only an identifiable

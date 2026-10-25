@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { loadTs, result, root, sqliteEnv } from './helpers.mjs';
 
 const execution = loadTs('monitor-execution');
@@ -209,6 +209,11 @@ test('daily cleanup does not probe; delayed minute invocation retains its origin
     './status-page': {}, './slack-bot': {},
     './monitor': { cleanupOldChecks: async () => calls.push('cleanup') },
     './monitor-runner': { runChecks: async (_env, scheduledTime) => calls.push(scheduledTime) },
+    './notification-outbox': { drainNotificationOutbox: async () => {} },
+    './scheduled-runs': {
+      beginScheduledRun: async (_env, _cron, scheduledTime, receivedAt) => ({ runId:'synthetic-run',scheduledTime,receivedAt }),
+      advanceScheduledRun: async () => {}, finishScheduledRun: async () => {},
+    },
     './schema-gate': { ensureSchema: async () => ({ ok: true }), logSchemaProblem() {} },
   });
   const ctx = { waitUntil(p) { pending.push(p); } };
@@ -263,7 +268,7 @@ test('schema gate rejects a missing lease migration and self-heals after the tab
   } finally { f.close(); }
 });
 
-test('full historical schema upgraded through 0010 matches a fresh canonical install', () => {
+test('full historical schema upgraded through current monitoring migrations matches a fresh canonical install', () => {
   const fresh = new DatabaseSync(':memory:'), upgraded = new DatabaseSync(':memory:');
   try {
     fresh.exec(readFileSync(new URL('schema.sql', root), 'utf8'));
@@ -273,6 +278,9 @@ test('full historical schema upgraded through 0010 matches a fresh canonical ins
     upgraded.exec(readFileSync(new URL('migrations/0007_latency_threshold.sql', root), 'utf8'));
     upgraded.exec(readFileSync(new URL('migrations/0009_monitor_execution.sql', root), 'utf8'));
     upgraded.exec(readFileSync(new URL('migrations/0010_monitor_routes.sql', root), 'utf8'));
+    for (const file of readdirSync(new URL('migrations/', root)).filter(file => /^\d{4}_.*\.sql$/.test(file) && Number(file.slice(0,4)) > 10).sort()) {
+      upgraded.exec(readFileSync(new URL(`migrations/${file}`, root), 'utf8'));
+    }
     function shape(db) {
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
       return tables.map(({ name }) => ({

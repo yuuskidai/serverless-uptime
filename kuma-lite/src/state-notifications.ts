@@ -1,10 +1,10 @@
 import type { CheckResult, ComponentHealth, Env, Monitor } from './types';
-import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp, notifyPartialRecovery, notifyInternalPath } from './notifier';
+import { type IncidentDetail, notifyDegraded, notifyDown, notifyUp, notifyPartialRecovery, notifyInternalPath, NotificationDeliveryError } from './notifier';
 import { enqueueRca } from './rca';
 import type { StateTransition } from './state-transition';
 import { isAvailabilityMonitor } from './monitor-policy';
 
-/** Called only after the check and state transition committed under the lease. */
+/** Called by the independently leased outbox after the observation committed. */
 export async function notifyTransition(
   env: Env,
   monitor: Monitor,
@@ -16,12 +16,13 @@ export async function notifyTransition(
   if (!isAvailabilityMonitor(monitor) && monitor.monitor_role !== 'diagnostic') return null;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let active = true;
+  let acknowledgedThread: string | null = null;
   try {
     return await Promise.race([
-      deliverTransition(env, monitor, result, transition, ts, () => active),
-      new Promise<null>(resolve => { timer = setTimeout(() => {
+      deliverTransition(env, monitor, result, transition, ts, () => active, thread=>{acknowledgedThread=thread;}),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => {
         console.warn('monitor notification deadline exceeded', monitor.id);
-        resolve(null);
+        reject(new NotificationDeliveryError('uncertain',acknowledgedThread));
       }, 18_000); }),
     ]);
   } finally { active = false; if (timer !== undefined) clearTimeout(timer); }
@@ -29,20 +30,22 @@ export async function notifyTransition(
 
 async function deliverTransition(
   env: Env, monitor: Monitor, result: CheckResult, transition: StateTransition, ts: number, active: () => boolean,
+  acknowledged: (thread: string | null)=>void,
 ): Promise<{ slackAlertTs: string | null } | null> {
-  try {
-    if (monitor.monitor_role === 'diagnostic') {
-      return await notifyInternalPath(env, monitor, buildIncidentDetail(result, '内部診断の状態が変化しました'),
-        transition.kind!, transition.previousSlackAlertTs);
-    }
-    if (transition.kind === 'down' || transition.kind === 'degraded') {
-      const detail = buildIncidentDetail(result, transition.kind === 'down' ? 'unknown error' : '一部の機能が不調');
-      const sent = transition.kind === 'down'
-        ? await notifyDown(env, monitor, detail)
-        : await notifyDegraded(env, monitor, detail);
-      // A provider may finish after our deadline. Do not start a fresh AI queue job once
-      // notification ownership has expired; already-sent external messages cannot be retracted.
-      if (sent.slackAlertTs && active()) {
+  if (monitor.monitor_role === 'diagnostic') {
+    return notifyInternalPath(env, monitor, buildIncidentDetail(result, '内部診断の状態が変化しました', ts),
+      transition.kind!, transition.previousSlackAlertTs);
+  }
+  if (transition.kind === 'down' || transition.kind === 'degraded') {
+    const detail = buildIncidentDetail(result, transition.kind === 'down' ? 'unknown error' : '一部の機能が不調', ts);
+    const sent = transition.kind === 'down'
+      ? await notifyDown(env, monitor, detail)
+      : await notifyDegraded(env, monitor, detail);
+    acknowledged(sent.slackAlertTs);
+    // Analysis is supplementary. A failed queue publish must not relabel an
+    // acknowledged alert as undelivered or cause the alert to be replayed.
+    if (sent.slackAlertTs && active()) {
+      try {
         await enqueueRca(env, {
           monitorId: monitor.id,
           configRevision: monitor.config_revision ?? 1,
@@ -51,24 +54,21 @@ async function deliverTransition(
           reason: detail.reason,
           kind: transition.kind,
         });
-      }
-      return sent;
+      } catch { console.warn('notification RCA enqueue failed', monitor.id); }
     }
-    if (transition.kind === 'partial') {
-      await notifyPartialRecovery(env, monitor, buildIncidentDetail(result, '遅延または一部不調が継続'),
-        transition.downDurationMs, transition.previousSlackAlertTs);
-    } else {
-      await notifyUp(env, monitor, transition.downDurationMs, transition.previousSlackAlertTs,
-        transition.previousStatus === 'degraded' ? 'degraded' : 'down');
-    }
-    return null;
-  } catch (err) {
-    console.error('monitor transition notification failed:', err instanceof Error ? err.message : 'unknown error');
-    return null;
+    return sent;
   }
+  if (transition.kind === 'partial') {
+    await notifyPartialRecovery(env, monitor, buildIncidentDetail(result, '遅延または一部不調が継続', ts),
+      transition.downDurationMs, transition.previousSlackAlertTs);
+  } else {
+    await notifyUp(env, monitor, transition.downDurationMs, transition.previousSlackAlertTs,
+      transition.previousStatus === 'degraded' ? 'degraded' : 'down', ts);
+  }
+  return null;
 }
 
-function buildIncidentDetail(result: CheckResult, fallbackReason: string): IncidentDetail {
+function buildIncidentDetail(result: CheckResult, fallbackReason: string, observedAt: number): IncidentDetail {
   const reason = result.healthz_reason ?? result.error ?? fallbackReason;
   let unhealthy: ComponentHealth[] = [];
   if (result.healthz_components) {
@@ -93,5 +93,6 @@ function buildIncidentDetail(result: CheckResult, fallbackReason: string): Incid
     reason,
     components: unhealthy,
     version: result.healthz_version,
+    observedAt,
   };
 }

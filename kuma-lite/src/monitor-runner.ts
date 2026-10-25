@@ -1,14 +1,15 @@
 import { performCheck } from './monitor';
 import {
-  claimMonitorSlot,
+  claimMonitorSlotDecision,
   commitMonitorResult,
-  reserveTransitionNotification,
   readMonitorState,
   releaseMonitorSlot,
-  saveAlertThread,
   scheduledSlot,
+  withReadDeadline,
+  type AttemptPhase,
+  type AttemptFailure,
 } from './monitor-execution';
-import { notifyTransition } from './state-notifications';
+import { drainNotificationOutbox } from './notification-outbox';
 import { deriveTransition } from './state-transition';
 import type { Env, Monitor } from './types';
 
@@ -16,6 +17,7 @@ const BATCH_SIZE = 40;
 
 export interface RunTiming {
   receivedAt: number;
+  runId?: string;
   schemaMs?: number;
   offsetMs?: number;
 }
@@ -23,7 +25,12 @@ export interface RunTiming {
 export async function runChecks(env: Env, scheduledTime: number, timing: RunTiming = { receivedAt: Date.now() }): Promise<void> {
   const slotMs = scheduledSlot(scheduledTime);
   const selectStarted = Date.now();
-  const monitors = await env.DB.prepare('SELECT * FROM monitors WHERE enabled = 1').all<Monitor>();
+  const monitors = await withReadDeadline(env.DB.prepare('SELECT * FROM monitors WHERE enabled = 1').all<Monitor>())
+    .catch(error => {
+      console.error({ event: 'monitor_list_incomplete', scheduled_time: scheduledTime, scheduled_slot: slotMs,
+        received_at: timing.receivedAt, phase: 'select', phase_elapsed_ms: Math.max(0, Date.now() - selectStarted) });
+      throw error;
+    });
   const selectMs = Math.max(0, Date.now() - selectStarted);
   const due = (monitors.results ?? []).filter((monitor) => {
     const interval = Math.max(1, monitor.interval_minutes ?? 1);
@@ -51,23 +58,30 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
   timing: RunTiming, selectMs: number): Promise<void> {
   const phases = { lease_ms: 0, state_ms: 0, probe_ms: 0, commit_ms: 0 };
   let stage = Date.now();
-  const lease = await claimMonitorSlot(env, monitor.id, slotMs, monitor.config_revision ?? 1);
+  const { lease, attempt } = await claimMonitorSlotDecision(env, monitor.id, slotMs, monitor.config_revision ?? 1,
+    { scheduledTime, receivedAt: timing.receivedAt, runId: timing.runId });
   phases.lease_ms = Math.max(0, Date.now() - stage);
   if (!lease) {
     console.log({ event: 'monitor_execution_skipped', monitor_id: monitor.id,
       config_revision: monitor.config_revision ?? 1, monitor_role: monitor.monitor_role ?? 'availability',
       scheduled_time: scheduledTime, scheduled_slot: slotMs, received_at: timing.receivedAt,
       schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs,
-      lease_ms: phases.lease_ms, reason: 'lease_or_configuration_unavailable' });
+      lease_ms: phases.lease_ms, attempt_id: attempt.attempt_id, reason: attempt.reason,
+      observed_claimed_slot: attempt.observed_claimed_slot, observed_lease_until: attempt.observed_lease_until,
+      observed_last_check_slot: attempt.observed_last_check_slot, observed_revision: attempt.observed_revision });
+    await drainSafely(env, monitor.id);
     return;
   }
-  let phase = 'state';
+  let phase: AttemptPhase = 'state';
+  let probeStartedAt: number | null = null;
+  let failure: AttemptFailure | undefined;
   try {
     stage = Date.now();
     const previous = await readMonitorState(env, monitor.id);
     phases.state_ms = Math.max(0, Date.now() - stage);
     // A real per-monitor start, rather than the former shared pre-SELECT time.
     const ts = Date.now();
+    probeStartedAt = ts;
     stage = ts;
     phase = 'probe';
     const result = await performCheck(env, monitor);
@@ -81,21 +95,34 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     console.log({ event: 'monitor_execution', monitor_id: monitor.id, monitor_role: monitor.monitor_role ?? 'availability',
       config_revision: monitor.config_revision ?? 1, scheduled_time: scheduledTime, scheduled_slot: slotMs,
       received_at: timing.receivedAt, probe_started_at: ts, committed_at: committed ? Date.now() : null,
-      schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases, committed });
-    if (!committed || monitor.monitor_role === 'shadow' || !transition.kind ||
-      !(await reserveTransitionNotification(env, lease))) return;
-    phase = 'notification';
-    const sent = await notifyTransition(env, monitor, result, transition, ts);
-    if (sent?.slackAlertTs) await saveAlertThread(env, lease, sent.slackAlertTs);
+      schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases, committed,
+      attempt_id: lease.attemptId ?? lease.token });
   } catch (error) {
+    // Capture diagnostics locally. Unlock comes before any separate audit I/O.
+    failure = {phase,reason:'operation_failed',probeStartedAt};
     console.error({ event: 'monitor_execution_incomplete', monitor_id: monitor.id,
       config_revision: monitor.config_revision ?? 1, monitor_role: monitor.monitor_role ?? 'availability',
       scheduled_time: scheduledTime, scheduled_slot: slotMs, received_at: timing.receivedAt, phase,
       phase_elapsed_ms: Math.max(0, Date.now() - stage), schema_ms: timing.schemaMs ?? 0,
-      offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases });
+      offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases, attempt_id: lease.attemptId ?? lease.token });
     throw error;
   } finally {
     // Keep claimed_slot as a durable deduplication watermark after release.
-    await releaseMonitorSlot(env, lease);
+    try {
+      await releaseMonitorSlot(env, lease,
+        { schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases },
+        failure ?? lease.auditFailure);
+    } catch {
+      console.error({ event: 'monitor_release_unacknowledged', monitor_id: monitor.id,
+        scheduled_slot: slotMs, attempt_id: lease.attemptId ?? lease.token });
+    }
   }
+  // Delivery owns a different lease and thread state. Even a slow provider
+  // cannot block the next scheduled probe of this monitor.
+  await drainSafely(env, monitor.id);
+}
+
+async function drainSafely(env: Env, monitorId: number): Promise<void> {
+  try { await drainNotificationOutbox(env, monitorId); }
+  catch { console.error({ event: 'notification_outbox_drain_incomplete', monitor_id: monitorId }); }
 }

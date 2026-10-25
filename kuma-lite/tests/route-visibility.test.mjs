@@ -155,3 +155,44 @@ test('cutover-day bars retain the same streak rules after the day has passed', a
     });
   }
 });
+
+test('external confirmation remains supplemental when the primary monitor is down', async t => {
+  const f = fixture(t), now = Date.now();
+  f.sqlite.prepare("UPDATE monitor_state SET current_status='down' WHERE monitor_id=1").run();
+  check(f, { status: 'down' });
+  const witness = { status: 'ok', observedAt: now - 1000, ageMs: 1000, totalMs: 208,
+    runId: '123', runAttempt: '2', runUrl: 'https://github.com/example/monitor/actions/runs/123/attempts/2' };
+  const helper = { readExternalWitnesses: async () => new Map([[1, witness], [2, { ...witness, runUrl: 'https://private.example/secret' }]]) };
+  const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
+  const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
+  assert.match(html, /> 停止中/);
+  assert.match(html, /外部確認: 正常/);
+  assert.match(html, /約5分ごとの補助確認/);
+  assert.match(html, /https:\/\/github\.com\/example\/monitor\/actions\/runs\/123\/attempts\/2/);
+  assert.doesNotMatch(html, /private\.example/);
+  const { renderStatusBlocks: slack } = loadTs('slack-bot', {
+    chat: { Chat: class {} }, '@chat-adapter/state-memory': { createMemoryState: () => ({}) },
+    './chat-adapters/slack': { createSlackAdapter: () => ({}) }, './external-observations': helper,
+  });
+  const message = await slack(f.env);
+  assert.match(message.text, /DOWN/);
+  assert.match(JSON.stringify(message.blocks), /外部確認: 正常/);
+});
+
+test('stale external confirmation is unknown and arbitrary provenance links cannot reach public HTML', async t => {
+  const f = fixture(t); check(f);
+  for (const runUrl of [
+    'javascript:alert(1)', 'https://github.com.evil.invalid/a/b/actions/runs/1',
+    'https://user:password@github.com/a/b/actions/runs/1', 'https://github.com:444/a/b/actions/runs/1',
+    'https://github.com/a/b/actions/runs/1?private=token', 'https://github.com/a/b/actions/runs/1#fragment',
+  ]) {
+    const { renderStatusPage: render } = loadTs('status-page', { './external-observations': {
+      readExternalWitnesses: async () => new Map([[1, { status: 'unknown', observedAt: Date.now() - 1000000,
+        totalMs: null, ageMs: 1000000, runId: '1', runAttempt: '1', runUrl }]]),
+    } });
+    const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
+    assert.match(html, /外部確認: 未確認/);
+    assert.doesNotMatch(html, />確認記録<|javascript:|password@github|private=token/);
+    assert.match(html, /すべて正常に稼働中/);
+  }
+});
