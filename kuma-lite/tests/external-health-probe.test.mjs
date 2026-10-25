@@ -119,6 +119,7 @@ test('receiver unavailability does not turn healthy services into failed service
   } });
   assert.equal(result.service_failure, false); assert.equal(result.reporting.accepted, false);
   assert.equal(result.reporting.status, 401);
+  assert.equal(result.reporting.receiver_error_code, 'unauthorized');
 });
 
 test('idempotent receiver retry sends the exact same observation body', async () => {
@@ -132,6 +133,35 @@ test('idempotent receiver retry sends the exact same observation body', async ()
     return reply();
   } });
   assert.equal(result.reporting.accepted, true); assert.equal(bodies.length, 2); assert.equal(bodies[0], bodies[1]);
+  assert.equal(result.reporting.error, null); assert.equal(result.reporting.receiver_error_code, null);
+});
+
+for (const code of ['identity_verification_unavailable', 'observation_storage_unavailable', 'external_witness_not_configured']) {
+  test(`receiver diagnosis safely preserves the known ${code} code`, async () => {
+    const runtime = { GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'a'.repeat(40),
+      ACTIONS_ID_TOKEN_REQUEST_URL: 'https://vstoken.actions.githubusercontent.com/identity', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'private' };
+    const result = await runExternalWitness(config, runtime, { retryDelayMs: 1, fetcher: async url => {
+      if (String(url).includes('vstoken.actions')) return reply({ value: 'header.payload.signature' });
+      if (url === config.receiver) return reply({ error: code }, { status: 503 });
+      if (url === config.readiness_url) return reply({ status: 'ok', monitoring_data: 'fresh' });
+      return reply();
+    } });
+    assert.equal(result.reporting.receiver_error_code, code);
+    assert.equal(result.reporting.accepted, false); assert.equal(result.service_failure, false);
+  });
+}
+
+test('receiver diagnosis never copies unknown response messages into the report', async () => {
+  const runtime = { GITHUB_RUN_ID: '12345', GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'a'.repeat(40),
+    ACTIONS_ID_TOKEN_REQUEST_URL: 'https://vstoken.actions.githubusercontent.com/identity', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'private' };
+  const result = await runExternalWitness(config, runtime, { fetcher: async url => {
+    if (String(url).includes('vstoken.actions')) return reply({ value: 'header.payload.signature' });
+    if (url === config.receiver) return reply({ error: 'PRIVATE_RESPONSE_OR_TOKEN' }, { status: 401 });
+    if (url === config.readiness_url) return reply({ status: 'ok', monitoring_data: 'fresh' });
+    return reply();
+  } });
+  assert.equal(result.reporting.receiver_error_code, null);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_RESPONSE'), false);
 });
 
 test('identity rejection diagnostic exposes only numeric deltas and comparison flags', () => {

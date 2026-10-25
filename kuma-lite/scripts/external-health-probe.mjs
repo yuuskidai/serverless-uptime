@@ -6,6 +6,9 @@ import { resolve } from 'node:path';
 const CONFIG_URL = new URL('../external-targets.json', import.meta.url);
 const JSON_LIMIT = 8192;
 const TIMEOUT_MS = 10_000;
+const RECEIVER_ERROR_CODES = new Set(['method_not_allowed', 'json_required', 'external_witness_not_configured',
+  'unauthorized', 'identity_verification_unavailable', 'invalid_observation', 'target_configuration_changed',
+  'observation_replay_conflict', 'observation_storage_unavailable']);
 const latencyReason = value => typeof value === 'string' && /^応答が \d+(?:\.\d+)?ms を超過 \(\d+(?:\.\d+)?ms\)$/.test(value);
 const databaseName = name => /^(database|db|d1)$/i.test(name.trim());
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -229,7 +232,11 @@ export async function runExternalWitness(config, runtime = process.env, options 
       const submission = await fetchJson(receiver.href, { fetcher, method: 'POST', body,
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
       result.reporting.status = submission.http_status;
-      if (submission.http_status === 200 && submission.value?.accepted === true) { result.reporting.accepted = true; break; }
+      result.reporting.receiver_error_code = typeof submission.value?.error === 'string' && RECEIVER_ERROR_CODES.has(submission.value.error)
+        ? submission.value.error : null;
+      if (submission.http_status === 200 && submission.value?.accepted === true) {
+        result.reporting.accepted = true; result.reporting.error = null; result.reporting.receiver_error_code = null; break;
+      }
       result.reporting.error = 'receiver_unavailable';
       if (submission.http_status === 401) {
         result.reporting.error = 'identity_rejected';
