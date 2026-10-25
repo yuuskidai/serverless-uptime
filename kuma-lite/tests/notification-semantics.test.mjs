@@ -16,7 +16,7 @@ function load(file,dependencies,globals={}){
 function fixture(options={}){
  const posts=[],reactions=[],discord=[],jobs=[];
  const bot={defaultChannelId:'synthetic-channel',slack:{async postBlocks(_channel,payload){posts.push(payload);if(options.post)return options.post(payload);return {ts:'synthetic-thread'};},async addReaction(...args){reactions.push(args);}}};
- const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>bot},'./url-display':urlDisplay},{fetch:async(_url,init)=>{discord.push(JSON.parse(init.body));assert.equal(init.redirect,'manual');assert.ok(init.signal instanceof AbortSignal);return new Response(null,{status:204});}});
+ const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>bot},'./url-display':urlDisplay},{fetch:async(_url,init)=>{discord.push(JSON.parse(init.body));assert.equal(init.redirect,'manual');assert.ok(init.signal instanceof AbortSignal);return options.discordResponse?options.discordResponse():new Response(null,{status:204});}});
  const transition=load('state-notifications',{'./notifier':notifier,'./monitor-policy':monitorPolicy,'./rca':{async enqueueRca(_env,job){jobs.push(job);if(options.enqueue)return options.enqueue();}}},{setTimeout:(callback,ms)=>setTimeout(callback,options.shortDeadline&&ms===18000?5:ms)});
  return {notifier,transition,posts,reactions,discord,jobs,env:{DISCORD_WEBHOOK_URL:'https://synthetic.invalid/discord'},monitor:{id:1,name:'Synthetic',url:'https://synthetic.invalid/healthz'},detail:{reason:'応答遅延が継続',components:[],version:null}};
 }
@@ -65,6 +65,28 @@ test('Slack API requests use bounded native fetch deadlines and do not follow cr
  const client=new SlackClient({token:'synthetic-token',fetchImpl:async(_url,init)=>{seen.push(init);return Response.json({ok:true});}});
  await client.call('chat.postMessage',{channel:'synthetic-channel',text:'synthetic'});
  assert.equal(seen[0].redirect,'manual');assert.ok(seen[0].signal instanceof AbortSignal);
+});
+
+test('a successful Discord response releases its unused body without waiting for cancellation acknowledgment',{timeout:1000},async()=>{
+ let cancelled=0;
+ const f=fixture({discordResponse:()=>new Response(new ReadableStream({cancel(){cancelled++;return new Promise(()=>{});}}),{status:200})});
+ const sent=await f.notifier.notifyDown(f.env,f.monitor,f.detail);
+ assert.equal(sent.slackAlertTs,'synthetic-thread');assert.equal(cancelled,1);
+});
+for(const status of [429,500])test(`Slack HTTP ${status} releases its unused body and preserves the error without waiting for cancellation acknowledgment`,{timeout:1000},async()=>{
+ let cancelled=0;
+ class SyntheticError extends Error{}
+ class RateLimitError extends Error{constructor(_adapter,retryAfter){super('ratelimited');this.retryAfter=retryAfter;}}
+ class SlackNetworkError extends Error{constructor(_adapter,message){super(message);}}
+ const {SlackClient}=load('chat-adapters/slack/client',{'./errors':{AdapterRateLimitError:RateLimitError,
+  AuthenticationError:SyntheticError,NetworkError:SlackNetworkError,ValidationError:SyntheticError}});
+ const client=new SlackClient({token:'synthetic-token',fetchImpl:async()=>new Response(new ReadableStream({
+  cancel(){cancelled++;return new Promise(()=>{});},
+ }),{status,headers:{'Retry-After':'7'}})});
+ await assert.rejects(client.call('chat.postMessage'),error=>status===429
+  ?error instanceof RateLimitError&&error.retryAfter===7
+  :error instanceof SlackNetworkError&&error.message==='chat.postMessage returned HTTP 500');
+ assert.equal(cancelled,1);
 });
 
 for (const kind of ['down','degraded','partial','up']) test(`internal ${kind} notifications never report application DOWN/RECOVERED or enqueue RCA`,async()=>{

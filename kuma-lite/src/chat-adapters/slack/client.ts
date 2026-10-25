@@ -103,6 +103,7 @@ export class SlackClient {
 
     if (response.status === 429) {
       const retryAfter = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
+      void response.body?.cancel().catch(() => undefined);
       throw new AdapterRateLimitError(
         ADAPTER,
         Number.isFinite(retryAfter) ? retryAfter : undefined,
@@ -110,6 +111,7 @@ export class SlackClient {
     }
 
     if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
       throw new NetworkError(
         ADAPTER,
         `${method} returned HTTP ${response.status}`,

@@ -263,6 +263,7 @@ async function postWebhook(url: string, payload: unknown): Promise<void> {
     const body = await response.text().catch(() => '');
     throw new Error(`Discord webhook failed: ${response.status} ${body.slice(0, 200)}`);
   }
+  void response.body?.cancel().catch(() => undefined);
 }
 
 // ── Slack via chat-sdk + Block Kit ───────────────────────────────────────
