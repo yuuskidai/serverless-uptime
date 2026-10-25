@@ -20,6 +20,7 @@ export interface RunTiming {
   runId?: string;
   schemaMs?: number;
   offsetMs?: number;
+  offsetWaitMs?: number;
 }
 
 export async function runChecks(env: Env, scheduledTime: number, timing: RunTiming = { receivedAt: Date.now() }): Promise<void> {
@@ -58,14 +59,18 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
   timing: RunTiming, selectMs: number): Promise<void> {
   const phases = { lease_ms: 0, state_ms: 0, probe_ms: 0, commit_ms: 0 };
   let stage = Date.now();
+  const beforeClaim = { schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0,
+    offset_wait_ms: timing.offsetWaitMs ?? 0, select_ms: selectMs,
+    delivery_lag_ms: Math.max(0, timing.receivedAt - scheduledTime),
+    received_to_claim_ms: Math.max(0, stage - timing.receivedAt) };
   const { lease, attempt } = await claimMonitorSlotDecision(env, monitor.id, slotMs, monitor.config_revision ?? 1,
-    { scheduledTime, receivedAt: timing.receivedAt, runId: timing.runId });
+    { scheduledTime, receivedAt: timing.receivedAt, runId: timing.runId, timings: beforeClaim });
   phases.lease_ms = Math.max(0, Date.now() - stage);
   if (!lease) {
     console.log({ event: 'monitor_execution_skipped', monitor_id: monitor.id,
       config_revision: monitor.config_revision ?? 1, monitor_role: monitor.monitor_role ?? 'availability',
       scheduled_time: scheduledTime, scheduled_slot: slotMs, received_at: timing.receivedAt,
-      schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs,
+      ...beforeClaim,
       lease_ms: phases.lease_ms, attempt_id: attempt.attempt_id, reason: attempt.reason,
       observed_claimed_slot: attempt.observed_claimed_slot, observed_lease_until: attempt.observed_lease_until,
       observed_last_check_slot: attempt.observed_last_check_slot, observed_revision: attempt.observed_revision });
@@ -95,22 +100,29 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     console.log({ event: 'monitor_execution', monitor_id: monitor.id, monitor_role: monitor.monitor_role ?? 'availability',
       config_revision: monitor.config_revision ?? 1, scheduled_time: scheduledTime, scheduled_slot: slotMs,
       received_at: timing.receivedAt, probe_started_at: ts, committed_at: committed ? Date.now() : null,
-      schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases, committed,
+      ...beforeClaim, received_to_probe_ms: Math.max(0, ts - timing.receivedAt), ...phases, committed,
       attempt_id: lease.attemptId ?? lease.token });
   } catch (error) {
+    // A rejected await still consumed time. Keep that duration in the durable
+    // release audit, including a deadline that expired without a response.
+    const elapsed = Math.max(0, Date.now() - stage);
+    if (phase === 'state') phases.state_ms = elapsed;
+    else if (phase === 'probe') phases.probe_ms = elapsed;
+    else if (phase === 'commit') phases.commit_ms = elapsed;
     // Capture diagnostics locally. Unlock comes before any separate audit I/O.
     failure = {phase,reason:'operation_failed',probeStartedAt};
     console.error({ event: 'monitor_execution_incomplete', monitor_id: monitor.id,
       config_revision: monitor.config_revision ?? 1, monitor_role: monitor.monitor_role ?? 'availability',
       scheduled_time: scheduledTime, scheduled_slot: slotMs, received_at: timing.receivedAt, phase,
-      phase_elapsed_ms: Math.max(0, Date.now() - stage), schema_ms: timing.schemaMs ?? 0,
-      offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases, attempt_id: lease.attemptId ?? lease.token });
+      phase_elapsed_ms: elapsed,
+      ...beforeClaim, ...phases, attempt_id: lease.attemptId ?? lease.token });
     throw error;
   } finally {
     // Keep claimed_slot as a durable deduplication watermark after release.
     try {
       await releaseMonitorSlot(env, lease,
-        { schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0, select_ms: selectMs, ...phases },
+        { ...beforeClaim, ...phases,
+          received_to_probe_ms: probeStartedAt === null ? undefined : Math.max(0, probeStartedAt - timing.receivedAt) },
         failure ?? lease.auditFailure);
     } catch {
       console.error({ event: 'monitor_release_unacknowledged', monitor_id: monitor.id,

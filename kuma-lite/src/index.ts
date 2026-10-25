@@ -21,6 +21,18 @@ import type { Env } from './types';
 
 export type { Env };
 
+const SCHEDULED_OFFSET_MS = 5_000;
+
+/** Align to the original schedule rather than adding another delay on receipt.
+ * An invalid/future provider timestamp keeps the former bounded wait. */
+export function scheduledOffsetWaitMs(scheduledTime: number, now: number, receivedAt = now): number {
+  if (!Number.isSafeInteger(scheduledTime) || scheduledTime < 0 || scheduledTime > receivedAt) {
+    console.error({ event: 'scheduled_time_anomaly', scheduled_time: scheduledTime, received_at: receivedAt });
+    return SCHEDULED_OFFSET_MS;
+  }
+  return Math.max(0, Math.min(SCHEDULED_OFFSET_MS, SCHEDULED_OFFSET_MS - (now - scheduledTime)));
+}
+
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const receivedAt = Date.now();
@@ -53,15 +65,20 @@ export default {
           timings.schema_ms = Math.max(0, Date.now() - schemaStarted);
           if (!check.ok) {
             logSchemaProblem(check, 'scheduled cron');
-            await finishScheduledRun(env, run, 'schema_missing', phase, timings);
+            const reason = check.reason ?? 'schema_missing';
+            await finishScheduledRun(env, run, reason === 'schema_missing' ? 'schema_missing' : 'failed',
+              reason === 'schema_missing' ? phase : reason, timings);
             return;
           }
           phase = 'offset';
           await advanceScheduledRun(env, run, 'offset', timings);
-          // Preserve the deliberate five-second offset. Durable leases, rather
-          // than the offset, protect probes and notification delivery separately.
+          // Wait only for the remaining original offset. A late event still
+          // owns its original slot and must not incur an extra five seconds.
           const offsetStarted = Date.now();
-          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          timings.offset_wait_ms = scheduledOffsetWaitMs(event.scheduledTime, offsetStarted, receivedAt);
+          if (timings.offset_wait_ms > 0) {
+            await new Promise((resolve) => setTimeout(resolve, timings.offset_wait_ms));
+          }
           timings.offset_ms = Math.max(0, Date.now() - offsetStarted);
           phase = 'checks';
           await advanceScheduledRun(env, run, 'checks', timings);
@@ -70,7 +87,7 @@ export default {
           });
           try {
             await runChecks(env, event.scheduledTime, { receivedAt, runId: run.runId,
-              schemaMs: timings.schema_ms, offsetMs: timings.offset_ms });
+              schemaMs: timings.schema_ms, offsetMs: timings.offset_ms, offsetWaitMs: timings.offset_wait_ms });
           } finally { await backlog; }
           await finishScheduledRun(env, run, 'completed', null, timings);
         } catch (error) {

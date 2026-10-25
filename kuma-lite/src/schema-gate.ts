@@ -15,11 +15,14 @@ import type { Env } from './types';
  * migration.
  */
 
-interface SchemaCheck {
+export interface SchemaCheck {
   ok: boolean;
   /** "table.column" identifiers of the columns the gate could not find. */
   missing: string[];
+  reason?: 'schema_missing' | 'schema_timeout' | 'schema_unavailable';
 }
+
+export const SCHEMA_READ_BUDGET_MS = 5_000;
 
 /**
  * Canonical list of columns the current code path expects to read
@@ -69,9 +72,7 @@ const REQUIRED_COLUMNS: Array<{ table: string; column: string }> = [
 
 let cached: SchemaCheck | null = null;
 
-export async function ensureSchema(env: Env): Promise<SchemaCheck> {
-  if (cached?.ok) return cached;
-
+async function inspectSchema(env: Env): Promise<SchemaCheck> {
   // Dedupe by table so we PRAGMA each table once even when multiple
   // required columns share it, and run the PRAGMA calls in parallel
   // so the cold-isolate gate is one round-trip's worth of latency
@@ -83,24 +84,51 @@ export async function ensureSchema(env: Env): Promise<SchemaCheck> {
       try {
         const result = await env.DB.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
         colsByTable.set(table, new Set((result.results ?? []).map((r) => r.name)));
-      } catch (err) {
-        // The table itself might be missing on a totally fresh DB.
-        // Treat that as a missing-column signal rather than crashing
-        // the gate.
+      } catch {
+        // A failed read cannot establish whether a migration is missing.
         colsByTable.set(table, null);
-        console.error(`schema gate: PRAGMA table_info(${table}) failed`, err);
+        console.error({ event: 'schema_gate_unavailable', table });
       }
     }),
   );
+
+  if (Array.from(colsByTable.values()).some((cols) => cols === null)) {
+    return { ok: false, missing: [], reason: 'schema_unavailable' };
+  }
 
   const missing: string[] = [];
   for (const { table, column } of REQUIRED_COLUMNS) {
     const cols = colsByTable.get(table);
     if (!cols || !cols.has(column)) missing.push(`${table}.${column}`);
   }
-  const next: SchemaCheck = { ok: missing.length === 0, missing };
-  if (next.ok) cached = next; // cache only successful results so we self-heal
-  return next;
+  return missing.length === 0 ? { ok: true, missing } : { ok: false, missing, reason: 'schema_missing' };
+}
+
+/** Only reads are abandoned at the deadline. A late result cannot fill the
+ * positive cache, and the next invocation may recover without a write retry. */
+export async function ensureSchema(env: Env, timeoutMs = SCHEMA_READ_BUDGET_MS): Promise<SchemaCheck> {
+  if (cached?.ok) return cached;
+  const startedAt = performance.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    let next = await Promise.race([
+      inspectSchema(env),
+      new Promise<SchemaCheck>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, missing: [], reason: 'schema_timeout' }), timeoutMs);
+      }),
+    ]);
+    const elapsedMs = Math.max(0, performance.now() - startedAt);
+    // A stalled event loop can resolve I/O before an overdue timer callback.
+    // Enforce the absolute deadline again before accepting or caching a result.
+    if (elapsedMs >= timeoutMs) next = { ok: false, missing: [], reason: 'schema_timeout' };
+    if (next.reason === 'schema_timeout') {
+      console.error({ event: 'schema_gate_timeout', budget_ms: timeoutMs, elapsed_ms: elapsedMs });
+    }
+    if (next.ok) cached = next;
+    return next;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -183,6 +211,10 @@ export function apiSchemaErrorResponse(): Response {
  * schema gate failed" prefix.
  */
 export function logSchemaProblem(check: SchemaCheck, where: string): void {
+  if (check.reason === 'schema_timeout' || check.reason === 'schema_unavailable') {
+    console.error({ event: 'schema_gate_failed', reason: check.reason, where });
+    return;
+  }
   console.error(
     `kuma-lite schema gate failed in ${where}: missing columns [${check.missing.join(', ')}]`,
   );

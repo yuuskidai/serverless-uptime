@@ -37,6 +37,47 @@ test('duplicate minute delivery does not double-count failure thresholds or disp
   } finally { f.close(); }
 });
 
+test('a denied runner persists known receipt and pre-claim phase timing without another probe', async () => {
+  const f=sqliteEnv(), notifications=[];
+  try {
+    let probes=0;
+    const run=runner(async()=>{probes++;return result('up');},notifications);
+    await run(f.env,SLOT);
+    const receivedAt=Date.now()-10000;
+    await run(f.env,SLOT,{receivedAt,schemaMs:17,offsetMs:0,offsetWaitMs:0});
+    assert.equal(probes,1);
+    const denied=f.sqlite.prepare("SELECT timings_json FROM monitor_attempts WHERE decision='denied'").get();
+    const timing=JSON.parse(denied.timings_json);
+    assert.equal(timing.schema_ms,17);
+    assert.equal(timing.offset_ms,0);
+    assert.equal(timing.offset_wait_ms,0);
+    assert.ok(timing.select_ms>=0);
+    assert.ok(timing.received_to_claim_ms>=10000);
+    assert.equal(timing.delivery_lag_ms,Math.max(0,receivedAt-SLOT));
+    // Claim RPC duration is only known after its transaction has completed.
+    assert.equal(timing.lease_ms,undefined);
+  } finally {f.close();}
+});
+
+for (const phase of ['state','probe','commit']) {
+  test(`a failed ${phase} await persists its elapsed time after releasing the probe lease`, async () => {
+    const f=sqliteEnv(), notifications=[];
+    try {
+      const fail=async()=>{await new Promise(resolve=>setTimeout(resolve,35));throw Error(`failed ${phase}`);};
+      const overrides={...execution};
+      if(phase==='state')overrides.readMonitorState=fail;
+      if(phase==='commit')overrides.commitMonitorResult=fail;
+      const run=runner(phase==='probe'?fail:async()=>result('up'),notifications,overrides);
+      await assert.rejects(()=>run(f.env,SLOT),new RegExp(`failed ${phase}`));
+      const row=f.sqlite.prepare('SELECT error_phase,release_outcome,timings_json FROM monitor_attempts').get();
+      assert.equal(row.error_phase,phase);
+      assert.equal(row.release_outcome,'released');
+      assert.ok(JSON.parse(row.timings_json)[`${phase}_ms`]>=30);
+      assert.equal(f.sqlite.prepare('SELECT lease_until FROM monitor_execution').get().lease_until,0);
+    } finally {f.close();}
+  });
+}
+
 test('slow old recovery cannot overwrite a newer failure and a missing slot breaks its failure streak', async () => {
   const f = sqliteEnv(), notifications = [];
   try {

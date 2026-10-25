@@ -158,11 +158,15 @@ test('real workerd isolates share D1 atomic claims, expiry fences, CAS, and tran
 
   await t.test('actual D1 records a missing target decision and preserves the unrounded delivery times',async()=>{
     const decision=await call(0,{action:'claimDecision',monitorId:999,slotMs,
-      timing:{scheduledTime:slotMs+52009,receivedAt:slotMs+80000,runId:'local-synthetic-run'}});
+      timing:{scheduledTime:slotMs+52009,receivedAt:slotMs+80000,runId:'local-synthetic-run',
+        timings:{schema_ms:37,offset_ms:0,offset_wait_ms:0,select_ms:15,
+          delivery_lag_ms:27991,received_to_claim_ms:52}}});
     assert.equal(decision.lease,null);assert.equal(decision.attempt.reason,'monitor_missing');
     const audit=await db.prepare('SELECT * FROM monitor_attempts WHERE attempt_id=?').bind(decision.attempt.attempt_id).first();
     assert.equal(audit.scheduled_time,slotMs+52009);assert.equal(audit.received_at,slotMs+80000);
     assert.equal(audit.run_id,'local-synthetic-run');
+    assert.deepEqual(JSON.parse(audit.timings_json),{schema_ms:37,offset_ms:0,offset_wait_ms:0,
+      select_ms:15,delivery_lag_ms:27991,received_to_claim_ms:52});
     assert.equal((await db.prepare('SELECT count(*) AS n FROM checks WHERE monitor_id=999').first()).n,0);
   });
 

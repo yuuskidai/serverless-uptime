@@ -21,6 +21,7 @@ export interface ClaimTiming {
   scheduledTime: number;
   receivedAt: number;
   runId?: string;
+  timings?: AttemptTimings;
 }
 
 export interface MonitorAttemptDecision {
@@ -108,13 +109,13 @@ export async function claimMonitorSlotDecision(
      ) INSERT INTO monitor_attempts (
        attempt_id,run_id,monitor_id,scheduled_time,scheduled_slot,received_at,config_revision,
        monitor_role,probe_transport,decision,reason,observed_claimed_slot,observed_lease_until,
-       observed_last_check_slot,observed_revision,observed_enabled,observed_at,finished_at
+       observed_last_check_slot,observed_revision,observed_enabled,observed_at,finished_at,timings_json
      ) SELECT attempt_id,run_id,monitor_id,scheduled_time,scheduled_slot,received_at,config_revision,
        monitor_role,probe_transport,CASE WHEN claim_reason='claimable' THEN 'claimable' ELSE 'denied' END,
        claim_reason,claimed_slot,lease_until,last_check_slot,current_revision,enabled,${DB_NOW_MS},
-       CASE WHEN claim_reason = 'claimable' THEN NULL ELSE ${DB_NOW_MS} END
+       CASE WHEN claim_reason = 'claimable' THEN NULL ELSE ${DB_NOW_MS} END, ?
        FROM classified`).bind(monitorId, slotMs, timing.scheduledTime, timing.receivedAt, configRevision, token,
-         timing.runId ?? null),
+         timing.runId ?? null, timingsJson(timing.timings ?? {})),
     env.DB.prepare(
     `INSERT INTO monitor_execution (monitor_id, claimed_slot, lease_token, lease_until)
      SELECT id, ?, ?, ${DB_NOW_MS} + ? FROM monitors WHERE id = ? AND enabled = 1 AND config_revision = ?
@@ -286,8 +287,9 @@ export async function commitMonitorResult(
 }
 
 export type AttemptPhase = 'claim' | 'state' | 'probe' | 'commit' | 'release';
-export type AttemptTimings = Partial<Record<'schema_ms' | 'offset_ms' | 'select_ms' | 'lease_ms' | 'state_ms' |
-  'probe_ms' | 'commit_ms', number>>;
+export type AttemptTimings = Partial<Record<'schema_ms' | 'offset_ms' | 'offset_wait_ms' | 'select_ms' |
+  'lease_ms' | 'state_ms' | 'probe_ms' | 'commit_ms' | 'delivery_lag_ms' | 'received_to_claim_ms' |
+  'received_to_probe_ms', number>>;
 export interface AttemptFailure {
   phase: AttemptPhase;
   reason: 'operation_failed' | 'local_precondition';
@@ -312,7 +314,8 @@ async function boundedAttemptAudit(operation: Promise<unknown>, lease: MonitorLe
 
 function timingsJson(timings: AttemptTimings): string {
   const safe: Record<string, number> = {};
-  for (const key of ['schema_ms','offset_ms','select_ms','lease_ms','state_ms','probe_ms','commit_ms'] as const) {
+  for (const key of ['schema_ms','offset_ms','offset_wait_ms','select_ms','lease_ms','state_ms','probe_ms',
+    'commit_ms','delivery_lag_ms','received_to_claim_ms','received_to_probe_ms'] as const) {
     const value = timings[key];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) safe[key] = Math.min(value, Number.MAX_SAFE_INTEGER);
   }

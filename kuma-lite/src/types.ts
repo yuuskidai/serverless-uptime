@@ -195,6 +195,12 @@ export interface ProbeTrace {
   headers_ms: number | null;
   body_ms: number | null;
   total_ms: number;
+  /** Effective per-attempt deadline; existing monitor configuration is unchanged. */
+  timeout_ms: number;
+  /** NULL when the timer never ran, including expiry detected after completed I/O. */
+  timeout_callback_elapsed_ms: number | null;
+  /** Observed completion overrun; cannot identify the cause of runtime scheduling delay. */
+  deadline_overrun_ms: number;
   failure_phase: 'headers' | 'body' | null;
   body_truncated: boolean;
 }

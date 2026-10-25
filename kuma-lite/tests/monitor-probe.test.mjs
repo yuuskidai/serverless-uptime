@@ -14,7 +14,7 @@ function reply(value,{rtt=0,echo=true}={}){
 
 test('HTTP RTT never substitutes for database latency and the deprecated field never enables HTTP alarms',async()=>{
   reply(payload(),{rtt:2051});
-  const result=await performCheck({},base);
+  const result=await performCheck({}, {...base,timeout_ms:3000});
   assert.equal(result.healthz_status,'ok');
   assert.equal(result.latency_ms,2051);
   assert.equal(JSON.parse(result.healthz_components)[0].latency_ms,900);
@@ -29,7 +29,7 @@ test('explicit DB null disables the migrated override even while old latency fie
   assert.equal(result.healthz_status,'degraded');
 });
 test('HTTP ceiling is an independent opt-in and preserves the DB observation',async()=>{
-  reply(payload(),{rtt:2051});const result=await performCheck({}, {...base,http_latency_threshold_ms:2000});
+  reply(payload(),{rtt:2051});const result=await performCheck({}, {...base,timeout_ms:3000,http_latency_threshold_ms:2000});
   assert.equal(result.healthz_status,'degraded');
   assert.match(result.healthz_reason,/HTTP/);
   const components=JSON.parse(result.healthz_components);
@@ -81,6 +81,65 @@ test('headers that never arrive are bounded and phase is recorded',async()=>{
   mock.method(globalThis,'fetch',()=>new Promise(()=>{}));
   const result=await performCheck({}, {...base,timeout_ms:15});const [trace]=JSON.parse(result.probe_trace_json);
   assert.equal(result.status,'down');assert.equal(trace.failure_phase,'headers');assert.equal(trace.headers_ms,null);
+});
+test('a fetch that settles after the timeout result cancels its late body without waiting for acknowledgment',async()=>{
+  let resolveFetch,cancelled=0;
+  mock.method(globalThis,'fetch',()=>new Promise(resolve=>{resolveFetch=resolve;}));
+  const result=await performCheck({}, {...base,timeout_ms:15});
+  assert.equal(result.status,'down');assert.match(result.error,/Timeout after 15ms/);
+  assert.equal(cancelled,0);
+  const response=new Response(new ReadableStream({cancel(){cancelled++;return new Promise(()=>{});}}));
+  resolveFetch(response);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(cancelled,1);assert.equal(response.body.locked,false);
+});
+for(const transport of ['public_fetch','service_binding'])test(`late ${transport} headers cannot beat an overdue timer to establish readiness`,async()=>{
+  let clock=0,requestSignal;
+  mock.method(performance,'now',()=>clock);
+  const fetcher=async(_url,init)=>{
+    requestSignal=init.signal;clock=1001;
+    return Response.json(payload('ok'),{headers:{'Cache-Control':'no-store'}});
+  };
+  mock.method(globalThis,'fetch',fetcher);
+  const result=await performCheck({CORE_OS:{fetch:fetcher}}, {...base,probe_transport:transport,
+    service_binding:'CORE_OS',response_mode:'strict_healthz'});
+  const [trace]=JSON.parse(result.probe_trace_json);
+  assert.equal(result.status,'down');assert.match(result.error,/Timeout after 1000ms/);
+  assert.equal(requestSignal.aborted,true);assert.equal(trace.failure_phase,'headers');
+  assert.equal(trace.timeout_ms,1000);assert.equal(trace.total_ms,1001);
+  assert.equal(trace.timeout_callback_elapsed_ms,null);assert.equal(trace.deadline_overrun_ms,1);
+});
+for(const completion of ['chunk','eof'])test(`late body ${completion} cannot establish readiness before an overdue timer runs`,async()=>{
+  let clock=0,reads=0;
+  mock.method(performance,'now',()=>clock);
+  const bytes=new TextEncoder().encode(JSON.stringify(payload('ok')));
+  mock.method(globalThis,'fetch',async()=>{
+    clock=1;
+    return new Response(new ReadableStream({pull(controller){
+      if(reads++===0){
+        if(completion==='chunk')clock=1001;
+        controller.enqueue(bytes);
+      }else{clock=1001;controller.close();}
+    }},{highWaterMark:0}),{headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
+  });
+  const result=await performCheck({}, {...base,response_mode:'strict_healthz'});
+  const [trace]=JSON.parse(result.probe_trace_json);
+  assert.equal(result.status,'down');assert.match(result.error,/Timeout after 1000ms/);
+  assert.equal(trace.failure_phase,'body');assert.equal(trace.status_code,200);assert.equal(trace.headers_ms,1);
+  assert.equal(trace.body_ms,1000);assert.equal(trace.timeout_callback_elapsed_ms,null);
+  assert.equal(trace.total_ms,1001);assert.equal(trace.deadline_overrun_ms,1);
+});
+test('a delayed timeout callback records its actual elapsed time without hiding the overrun',async()=>{
+  let clock=0,fireTimer,requestedDelay;
+  mock.method(performance,'now',()=>clock);
+  mock.method(globalThis,'setTimeout',(callback,delay)=>{fireTimer=callback;requestedDelay=delay;return 0;});
+  mock.method(globalThis,'fetch',()=>new Promise(()=>{clock=21950;queueMicrotask(()=>fireTimer());}));
+  const result=await performCheck({}, {...base,timeout_ms:10000,response_mode:'strict_healthz'});
+  const [trace]=JSON.parse(result.probe_trace_json);
+  assert.equal(requestedDelay,10000);assert.equal(result.status,'down');assert.match(result.error,/Timeout after 10000ms/);
+  assert.equal(trace.failure_phase,'headers');assert.equal(trace.timeout_ms,10000);
+  assert.equal(trace.total_ms,21950);assert.equal(trace.timeout_callback_elapsed_ms,21950);
+  assert.equal(trace.deadline_overrun_ms,11950);
 });
 test('body byte cap cancels huge legacy pages before buffering them fully',async()=>{
   let cancelled=0;mock.method(globalThis,'fetch',async()=>new Response(new ReadableStream({start(c){c.enqueue(new Uint8Array(1_000_000).fill(65));},cancel(){cancelled++;return new Promise(()=>{});}})));

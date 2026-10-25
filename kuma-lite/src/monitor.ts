@@ -89,22 +89,39 @@ async function probe(
   const start = performance.now();
   const elapsed = () => Math.max(0, Math.round((performance.now() - start) * 10) / 10);
   const limit = Number.isFinite(timeoutMs) ? Math.min(30_000, Math.max(1, timeoutMs)) : 10_000;
+  const deadline = start + limit;
   const controller = new AbortController();
   const { signal } = controller;
   const trace: ProbeTrace = {
     attempt, transport, request_id: crypto.randomUUID(), response_request_id: null,
     request_id_matched: false, status_code: null, headers_ms: null, body_ms: null,
-    total_ms: 0, failure_phase: null, body_truncated: false,
+    total_ms: 0, timeout_ms: limit, timeout_callback_elapsed_ms: null, deadline_overrun_ms: 0,
+    failure_phase: null, body_truncated: false,
   };
   let rejectAbort!: (reason: unknown) => void;
   const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
   const onAbort = () => rejectAbort(signal.reason);
   signal.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(new Error(`Timeout after ${limit}ms`)), limit);
+  const timeoutError = () => new Error(`Timeout after ${limit}ms`);
+  const assertBeforeDeadline = () => {
+    // Workers' clock advances at I/O boundaries. A completed fetch/read can
+    // resume before an overdue timer, so checking the signal alone is unsafe.
+    if (!signal.aborted && performance.now() >= deadline) controller.abort(timeoutError());
+    signal.throwIfAborted();
+  };
+  const finishTiming = () => {
+    trace.total_ms = elapsed();
+    trace.deadline_overrun_ms = Math.max(0, Math.round((trace.total_ms - limit) * 10) / 10);
+  };
+  const timer = setTimeout(() => {
+    trace.timeout_callback_elapsed_ms = elapsed();
+    controller.abort(timeoutError());
+  }, Math.max(0, deadline - performance.now()));
   let response: Response | undefined;
   try {
     // The deadline covers headers AND body. A stalled body/cancel acknowledgement must not hold a Cron lease forever.
     const operation = (async () => {
+      assertBeforeDeadline();
       if (strict) {
         const target = new URL(url);
         if (target.protocol !== 'https:' || target.username || target.password || method !== 'GET') {
@@ -118,19 +135,22 @@ async function probe(
         ...(strict ? { cache: 'no-store' as const } : {}),
         headers: { 'User-Agent': 'kuma-lite/0.3 (uptime monitor)', 'X-Monitor-Request-ID': trace.request_id },
       });
-      if (signal.aborted) {
+      try { assertBeforeDeadline(); }
+      catch (error) {
+        // The timeout race may already have returned before this fetch settles.
+        // Its outer finally cannot cancel a response that did not exist yet.
         void response.body?.cancel().catch(() => undefined);
-        signal.throwIfAborted();
+        throw error;
       }
       trace.status_code = response.status;
       trace.headers_ms = elapsed();
       const echoed = response.headers.get('X-Monitor-Request-ID');
       trace.response_request_id = echoed && REQUEST_ID_PATTERN.test(echoed) ? echoed : null;
       trace.request_id_matched = trace.response_request_id === trace.request_id;
-      const body = await readBody(response, signal);
+      const body = await readBody(response, signal, assertBeforeDeadline);
       trace.body_truncated = body.truncated;
       trace.body_ms = Math.max(0, elapsed() - trace.headers_ms);
-      signal.throwIfAborted();
+      assertBeforeDeadline();
       const contentType = response.headers.get('content-type');
       const parsed = tryParseHealthz(body.text, contentType);
       // Even a parseable JSON prefix can hide unread trailing data after the byte cap.
@@ -138,14 +158,16 @@ async function probe(
       const looksJson = /^[{\[]/.test(body.text.trimStart()) || (contentType ?? '').toLowerCase().includes('json');
       if (body.truncated && (strict || parsed !== null || looksJson)) throw new Error('Health response exceeds 8192 bytes');
       if (strict) validateStrictHealthz(response, parsed);
+      assertBeforeDeadline();
       return { body: body.text, parsed };
     })();
     const { body, parsed } = await Promise.race([operation, aborted]);
-    trace.total_ms = elapsed();
+    finishTiming();
+    assertBeforeDeadline();
     return { statusCode: trace.status_code, latencyMs: trace.total_ms, bodySample: body,
       parsedHealthz: parsed, networkFailure: false, error: null, trace };
   } catch (err) {
-    trace.total_ms = elapsed();
+    finishTiming();
     trace.failure_phase = trace.headers_ms === null ? 'headers' : 'body';
     if (trace.headers_ms !== null) trace.body_ms = Math.max(0, trace.total_ms - trace.headers_ms);
     return { statusCode: trace.status_code, latencyMs: trace.total_ms, bodySample: null,
@@ -200,7 +222,7 @@ function validateStrictHealthz(response: Response, payload: HealthzPayload | nul
   }
 }
 
-async function readBody(response: Response, signal: AbortSignal): Promise<{ text: string; truncated: boolean }> {
+async function readBody(response: Response, signal: AbortSignal, assertBeforeDeadline: () => void): Promise<{ text: string; truncated: boolean }> {
   if (!response.body) return { text: '', truncated: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -209,9 +231,9 @@ async function readBody(response: Response, signal: AbortSignal): Promise<{ text
   signal.addEventListener('abort', cancel, { once: true });
   try {
     for (;;) {
-      signal.throwIfAborted();
+      assertBeforeDeadline();
       const part = await reader.read();
-      signal.throwIfAborted();
+      assertBeforeDeadline();
       if (part.done) break;
       const remaining = BODY_LIMIT_BYTES - total;
       if (part.value.byteLength > remaining) {

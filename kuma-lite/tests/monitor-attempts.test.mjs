@@ -32,6 +32,27 @@ test('claim decision persists raw scheduling and the exact rejected ownership sn
   } finally {f.close();}
 });
 
+test('a denied claim keeps bounded pre-claim timings in its existing atomic transaction', async () => {
+  const f=sqliteEnv();
+  try {
+    await execution.claimMonitorSlot(f.env,1,SLOT);
+    let batches=0;
+    const actualBatch=f.env.DB.batch;
+    f.env.DB.batch=statements=>{batches++;return actualBatch(statements);};
+    const denied=await execution.claimMonitorSlotDecision(f.env,1,SLOT+60000,1,
+      {scheduledTime:SLOT+60000,receivedAt:SLOT+65000,timings:{schema_ms:17,offset_ms:0,
+        offset_wait_ms:0,select_ms:12,delivery_lag_ms:5000,received_to_claim_ms:29,
+        lease_ms:NaN,probe_ms:-1,url:'https://example.invalid/private'}});
+    assert.equal(denied.lease,null);
+    assert.equal(denied.attempt.reason,'lease_busy');
+    assert.equal(batches,1);
+    const saved=f.sqlite.prepare('SELECT timings_json FROM monitor_attempts WHERE attempt_id=?').get(denied.attempt.attempt_id);
+    assert.deepEqual(JSON.parse(saved.timings_json),{schema_ms:17,offset_ms:0,offset_wait_ms:0,
+      select_ms:12,delivery_lag_ms:5000,received_to_claim_ms:29});
+    assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM checks').get().n,0);
+  } finally {f.close();}
+});
+
 for (const [label,mutate,reason] of [
   ['missing',f=>f.sqlite.exec('DELETE FROM monitors WHERE id=1'),'monitor_missing'],
   ['disabled',f=>f.sqlite.exec('UPDATE monitors SET enabled=0'),'monitor_disabled'],

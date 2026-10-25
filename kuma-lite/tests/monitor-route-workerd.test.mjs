@@ -89,3 +89,50 @@ test('real workerd accepts strict no-store public fetch and keeps service bindin
     assert.equal(trace.request_id_matched, true);
   });
 });
+
+test('real workerd deadlines bound delayed headers, unfinished bodies and service bindings', { timeout: 10000 }, async t => {
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
+    name: 'deadline-monitor', script: bundle, modules: true, compatibilityDate: '2025-01-01',
+    serviceBindings: { CORE_OS: 'delayed-health' },
+    outboundService: async request => {
+      if (new URL(request.url).pathname === '/headers') {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return Response.json(healthy, { headers });
+      }
+      let timer;
+      const bytes = new TextEncoder().encode(JSON.stringify(healthy));
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.slice(0, 1));
+          timer = setTimeout(() => { controller.enqueue(bytes.slice(1)); controller.close(); }, 200);
+        },
+        cancel() { clearTimeout(timer); },
+      }), { headers });
+    },
+  }, {
+    name: 'delayed-health', modules: true, compatibilityDate: '2025-01-01',
+    script: `export default { async fetch() {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      return Response.json(${JSON.stringify(healthy)}, { headers: ${JSON.stringify(headers)} });
+    } };`,
+  }] }));
+  t.after(() => mf.dispose());
+  const worker = await mf.getWorker('deadline-monitor');
+  for (const [transport, path, phase] of [
+    ['public_fetch', '/headers', 'headers'],
+    ['public_fetch', '/body', 'body'],
+    ['service_binding', '/headers', 'headers'],
+  ]) await t.test(`${transport} deadline covers ${phase}`, async () => {
+    const response = await worker.fetch('http://local-test.invalid/', {
+      method: 'POST', body: JSON.stringify({ ...monitor, probe_transport: transport,
+        url: `https://synthetic.invalid${path}`, timeout_ms: 50 }),
+    });
+    const result = await response.json();
+    assert.equal(result.status, 'down');assert.match(result.error, /Timeout after 50ms/);
+    const [trace] = JSON.parse(result.probe_trace_json);
+    assert.equal(trace.transport, transport);assert.equal(trace.failure_phase, phase);
+    assert.equal(trace.timeout_ms, 50);assert.ok(trace.total_ms < 2000);
+    assert.ok(trace.deadline_overrun_ms >= 0);
+    assert.ok(trace.timeout_callback_elapsed_ms === null || trace.timeout_callback_elapsed_ms >= 0);
+  });
+});

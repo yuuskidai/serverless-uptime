@@ -118,6 +118,12 @@ Audit updates are bounded and do not gate probe entry or probe-lease release; an
 unacknowledged audit is logged without retrying an ownership mutation. Read-only
 monitor/state requests have a five-second deadline; write acknowledgements remain
 protected by the database lease and revision fences rather than blind retries.
+Cold schema reads have the same five-second budget. A timed-out or unavailable
+read is distinct from missing migration columns and cannot populate the success cache.
+The deliberate five-second offset is measured from the provider's raw scheduled
+time; a delayed delivery does not add another five seconds. It retains its original
+slot, and a newer committed slot still supersedes it. Rejected attempts retain
+pre-claim timings; failed state/probe/commit waits retain their actual elapsed time.
 
 Authenticated inspection endpoints are `GET /api/runs`, `/api/attempts`,
 `/api/notifications` and `/api/external-observations`. Filters are bounded to 24 hours
@@ -183,6 +189,13 @@ A missing/mismatched echo is recorded; it does not make a healthy response fail.
 - `attempt`: `primary` or `fallback`; `transport`: `service_binding` or `public_fetch`.
 - `request_id`, validated `response_request_id`, and `request_id_matched`.
 - `status_code`, `headers_ms`, `body_ms`, `total_ms`, `failure_phase`, `body_truncated`.
+- `timeout_ms`, `timeout_callback_elapsed_ms` (null if the timer never ran),
+  and `deadline_overrun_ms` (observed completion beyond the configured deadline).
+
+Headers and body completions must also pass an absolute deadline check; a delayed
+timer cannot let an overdue healthy response establish readiness. These checks do
+not make JavaScript execute while its runtime is paused. Timer callback/completion
+overruns are diagnostic evidence, not proof of an application or provider substage.
 
 Monitor structured events use `event: "monitor_probe"` and `monitor_id` plus these fields.
 They contain no URL, query, cookies, authorization headers, response body, or provider metadata.
