@@ -41,11 +41,13 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
       fetch('https://api.cloudflare.com/client/v4/graphql', {
         method: 'POST', redirect: 'manual', signal: controller.signal,
         headers: {Authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, 'Content-Type': 'application/json'},
-        body: JSON.stringify({query: `query SecurityEvents($zone:String!,$start:Time!,$end:Time!,$hosts:[String!]) {
+        // Analytics requires its custom lowercase string scalar. Its typed filter
+        // supplies the schema's timestamp and hostname types without guessing them.
+        body: JSON.stringify({query: `query SecurityEvents($zone:string,$filter:FirewallEventsAdaptiveGroupsFilter_InputObject) {
           viewer { zones(filter:{zoneTag:$zone}) { firewallEventsAdaptiveGroups(limit:100,
-            filter:{datetime_geq:$start,datetime_lt:$end,clientRequestHTTPHost_in:$hosts},orderBy:[count_DESC]) {
+            filter:$filter,orderBy:[count_DESC]) {
               count dimensions { action clientRequestHTTPHost }
-          } } } }`, variables: {zone: ZONE_ID, start: new Date(start).toISOString(), end: new Date(end).toISOString(), hosts: HOSTS}}),
+          } } } }`, variables: {zone: ZONE_ID, filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:HOSTS}}}),
       }).then(value => {if(performance.now() >= deadline || controller.signal.aborted){if(value.body)void value.body.cancel().catch(()=>undefined);throw new AnalyticsFailure('request_timeout');}return value;}),
       new Promise<Response>((_, reject) => { controller.signal.addEventListener('abort', () => reject(new AnalyticsFailure('request_timeout')), {once:true}); }),
     ]);

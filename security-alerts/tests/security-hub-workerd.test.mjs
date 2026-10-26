@@ -127,7 +127,7 @@ test('security hub keeps trust, aggregation, durable delivery and runtime alarms
     await stub.testAlarm();let rows=await stub.testRows();assert.equal(queries.length,1);assert.equal(rows.control.analytics.cursor,end-5*60000);assert.equal(rows.control.analytics.status,'unknown');
     const alert=sent.find(x=>x.kind==='waf_activity');assert.ok(alert);assert.equal(alert.windowStart,end-10*60000);assert.equal(alert.windowEnd,end-5*60000);assert.equal(alert.detailCode,'sampled_waf');
     await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(rows.control.analytics.cursor,end);assert.equal(rows.control.analytics.status,'ok');assert.equal(rows.control.analytics.diagnostic,null);
-    assert.deepEqual(queries[0].variables.hosts,['core-os.opus-system.jp','partner-portal.opus-system.jp']);assert.doesNotMatch(queries[0].query,/clientIP|clientRequestPath|clientRequestQuery/);
+    assert.deepEqual(queries[0].variables.filter.clientRequestHTTPHost_in,['core-os.opus-system.jp','partner-portal.opus-system.jp']);assert.equal(queries[0].variables.filter.datetime_geq,new Date(end-10*60000).toISOString());assert.equal(queries[0].variables.filter.datetime_lt,new Date(end-5*60000).toISOString());assert.deepEqual(Object.keys(queries[0].variables).sort(),['filter','zone']);assert.doesNotMatch(queries[0].query,/clientIP|clientRequestPath|clientRequestQuery/);
   });
   await t.test('missing Analytics permission remains unknown, queues operational warning and avoids fabricated zero',async()=>{
     await reset();await stub.testControl({enabled:true});await stub.testAlarm();const rows=await stub.testRows();

@@ -28,7 +28,15 @@ test('WAF API response validation fails closed for permission, malformed and tru
  for(const payload of [{errors:[{message:'permission denied'}]}, {...valid([]),errors:'malformed'}, {data:{viewer:{zones:[]}}},valid(Array.from({length:100},()=>group)),valid([{...group,count:-1}]),valid([{...group,dimensions:{...group.dimensions,clientRequestHTTPHost:'attacker.invalid'}}])]){
   globalThis.fetch=async()=>Response.json(payload);await assert.rejects(pollWaf(env,start,end));
  }
- globalThis.fetch=async request=>{assert.equal(request,'https://api.cloudflare.com/client/v4/graphql');return Response.json(valid([group]));};
+ globalThis.fetch=async(request,options)=>{
+  assert.equal(request,'https://api.cloudflare.com/client/v4/graphql');
+  const payload=JSON.parse(options.body);
+  // Cloudflare's documented API uses the custom lowercase string scalar and a typed filter.
+  // Simulate its variable boundary instead of accepting any client JSON as the old fixture did.
+  if(!/\$zone\s*:\s*string\b/.test(payload.query)||!/\$filter\s*:\s*FirewallEventsAdaptiveGroupsFilter_InputObject\b/.test(payload.query))return Response.json({errors:[{message:'unknown type "String"'}]});
+  assert.deepEqual(payload.variables,{zone:'6a83ef6dd7723ac97485c613c9a5ca34',filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:['core-os.opus-system.jp','partner-portal.opus-system.jp']}});
+  assert.equal(options.redirect,'manual');assert.equal(options.method,'POST');return Response.json(valid([group]));
+ };
  assert.deepEqual(await pollWaf(env,start,end),[{action:'block',host:'core-os.opus-system.jp',count:2}]);
  globalThis.fetch=async()=>Response.json(valid([{...group,dimensions:{...group.dimensions,action:'skip'}}]));assert.deepEqual(await pollWaf(env,start,end),[]);
 });
