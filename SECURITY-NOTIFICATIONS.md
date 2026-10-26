@@ -14,6 +14,8 @@
 
 WAF の取得範囲は `opus-system.jp` Zone 配下の上記 2 ホスト。`workers.dev` への直接アクセスはこの Zone の WAF 取得範囲には含まれない。アプリ内の認証・権限イベントはアクセス先ホストにかかわらず対象だが、任意の HTTP 攻撃全般を検知するものではない。
 
+WAF は Free 向けの `firewallEventsAdaptive` サンプル記録から、処理区分・対象ホスト・時刻だけを取得して Worker 内で集計する。Cloudflare 固有の `string` 型と型付きフィルターを使用する。取得上限 1,000 件に達した区間も既知の観測は処理し、欠測を UNKNOWN と履歴に残してカーソルを一度だけ進める。256 KiB を超える応答は不正な応答として拒否し、完全取得と扱わない。
+
 Free の標準 DDoS 通知にはドメイン・ホスト・閾値のフィルタがない。アカウント全体の対象通知となり、WAF イベント集計とアプリの監査通知では Core OS / Partner Portal に対象を固定する。標準 WAF Security Events Alert は Business 以上のため、今回の方式では使用しない。
 
 ## 集計と通知の基準

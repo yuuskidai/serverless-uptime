@@ -1,5 +1,5 @@
 import { HOSTS, ZONE_ID } from './types';
-import type { AnalyticsDiagnosticCode, Env, WafGroup } from './types';
+import type { AnalyticsDiagnosticCode, Env, WafGroup, WafRead } from './types';
 import { boundedJSON, object } from './validation';
 const actions = ['block', 'managed_challenge', 'js_challenge', 'challenge', 'log'] as const;
 
@@ -31,7 +31,7 @@ function graphqlCode(errors: unknown[]): AnalyticsDiagnosticCode {
   }
   return 'graphql_error';
 }
-export async function pollWaf(env: Env, start: number, end: number): Promise<WafGroup[]> {
+export async function pollWaf(env: Env, start: number, end: number): Promise<WafRead> {
   if (!env.CF_ANALYTICS_TOKEN) throw new AnalyticsFailure('credential_missing');
   const controller = new AbortController(), deadline = performance.now() + 5000;
   const timer = setTimeout(() => controller.abort(), 5000);
@@ -43,10 +43,10 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
         headers: {Authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, 'Content-Type': 'application/json'},
         // Analytics requires its custom lowercase string scalar. Its typed filter
         // supplies the schema's timestamp and hostname types without guessing them.
-        body: JSON.stringify({query: `query SecurityEvents($zone:string,$filter:FirewallEventsAdaptiveGroupsFilter_InputObject) {
-          viewer { zones(filter:{zoneTag:$zone}) { firewallEventsAdaptiveGroups(limit:100,
-            filter:$filter,orderBy:[count_DESC]) {
-              count dimensions { action clientRequestHTTPHost }
+        body: JSON.stringify({query: `query SecurityEvents($zone:string,$filter:FirewallEventsAdaptiveFilter_InputObject) {
+          viewer { zones(filter:{zoneTag:$zone}) { firewallEventsAdaptive(limit:1000,
+            filter:$filter,orderBy:[datetime_ASC]) {
+              action clientRequestHTTPHost datetime
           } } } }`, variables: {zone: ZONE_ID, filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:HOSTS}}}),
       }).then(value => {if(performance.now() >= deadline || controller.signal.aborted){if(value.body)void value.body.cancel().catch(()=>undefined);throw new AnalyticsFailure('request_timeout');}return value;}),
       new Promise<Response>((_, reject) => { controller.signal.addEventListener('abort', () => reject(new AnalyticsFailure('request_timeout')), {once:true}); }),
@@ -56,7 +56,7 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
       const status=response.status;
       throw new AnalyticsFailure(status===401?'http_unauthorized':status===403?'http_forbidden':status===429?'http_rate_limited':status>=500?'http_server_error':'http_unexpected_status',status);
     }
-    const value = await boundedJSON(response, 65536, Math.max(1, Math.min(2000, deadline - performance.now())));
+    const value = await boundedJSON(response, 262144, Math.max(1, Math.min(2000, deadline - performance.now())));
     if (performance.now() >= deadline) throw new AnalyticsFailure('request_timeout',response.status);
     if (!object(value)) throw new AnalyticsFailure('invalid_response',response.status);
     if(value.errors!==undefined&&value.errors!==null){
@@ -67,21 +67,26 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
     if (!object(data) || !object(data.viewer) || !Array.isArray(data.viewer.zones)) throw new AnalyticsFailure('invalid_response',response.status);
     if(data.viewer.zones.length!==1)throw new AnalyticsFailure('zone_missing',response.status);
     const zone = data.viewer.zones[0];
-    if (!object(zone) || !Array.isArray(zone.firewallEventsAdaptiveGroups)) throw new AnalyticsFailure('dataset_missing',response.status);
-    const groups = zone.firewallEventsAdaptiveGroups;
-    if (groups.length >= 100) throw new AnalyticsFailure('result_truncated',response.status); // No false completeness at the response cap.
-    const result: WafGroup[] = [];
-    for (const group of groups) {
-      if (!object(group) || !object(group.dimensions) || !Number.isSafeInteger(group.count) || (group.count as number) < 0 || (group.count as number) > 1_000_000_000) throw new AnalyticsFailure('row_invalid',response.status);
-      const d = group.dimensions;
-      if (!HOSTS.includes(d.clientRequestHTTPHost as typeof HOSTS[number])) throw new AnalyticsFailure('row_invalid',response.status);
-      // Exclude requests allowed/skipped by rules. A block/challenge is an observation, not proof of intrusion.
-      if (!actions.includes(d.action as typeof actions[number]) || group.count === 0) continue;
-      if (d.ruleId !== null && d.ruleId !== undefined && (typeof d.ruleId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(d.ruleId))) throw new AnalyticsFailure('row_invalid',response.status);
-      result.push({action: d.action as WafGroup['action'], host: d.clientRequestHTTPHost as WafGroup['host'], count: group.count as number,
-        ...(typeof d.ruleId === 'string' ? {ruleId:d.ruleId} : {})});
+    if (!object(zone) || !Array.isArray(zone.firewallEventsAdaptive)) throw new AnalyticsFailure('dataset_missing',response.status);
+    const events = zone.firewallEventsAdaptive;
+    if(events.length>1000)throw new AnalyticsFailure('invalid_response',response.status);
+    const groups = new Map<string,WafGroup>();
+    for (const event of events) {
+      if(!object(event)||Object.keys(event).some(key=>!['action','clientRequestHTTPHost','datetime'].includes(key))
+        ||typeof event.action!=='string'||event.action.length>64
+        ||!HOSTS.includes(event.clientRequestHTTPHost as typeof HOSTS[number])
+        ||typeof event.datetime!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(event.datetime))throw new AnalyticsFailure('row_invalid',response.status);
+      const at=Date.parse(event.datetime);
+      if(!Number.isFinite(at)||at<start||at>=end)throw new AnalyticsFailure('row_invalid',response.status);
+      // Counts describe observed sampled records, never extrapolated attack totals.
+      // Only the requested safe fields are accepted; no raw identities are retained.
+      if(!actions.includes(event.action as typeof actions[number]))continue;
+      const host=event.clientRequestHTTPHost as typeof HOSTS[number],action=event.action as WafGroup['action'],key=`${host}:${action}`;
+      const group=groups.get(key);
+      if(group)group.count++;else groups.set(key,{host,action,count:1});
     }
-    return result;
+    // Reaching the bounded sample limit does not erase known safe observations.
+    return {groups:[...groups.values()],complete:events.length<1000};
   } catch(error) {
     if(error instanceof AnalyticsFailure)throw error;
     if(controller.signal.aborted||performance.now()>=deadline||(error instanceof Error&&error.message==='timeout'))throw new AnalyticsFailure('request_timeout',response?.status??null);

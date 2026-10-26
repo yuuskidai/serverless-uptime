@@ -31,7 +31,7 @@ test('security hub keeps trust, aggregation, durable delivery and runtime alarms
   const mf=new Miniflare(convertV4MiniflareOptions({workers:[{
     name:'security',script:bundle,modules:true,compatibilityDate:'2025-01-01',
     durableObjects:{SECURITY_HUB:{className:'TestHub',useSQLite:true}},bindings:{ADMIN_SECRET:secret,CF_ANALYTICS_TOKEN:'synthetic-analytics-token'},
-    outboundService:async request=>{queries.push(await request.json());return Response.json(analyticsReply);},
+    outboundService:async request=>{const query=await request.json();queries.push(query);return Response.json(typeof analyticsReply==='function'?analyticsReply(query):analyticsReply);},
     serviceBindings:{SLACK_NOTIFIER:{name:'notifier',entrypoint:'Notifier'}},
   },{
     name:'notifier',modules:true,compatibilityDate:'2025-01-01',
@@ -122,12 +122,24 @@ test('security hub keeps trust, aggregation, durable delivery and runtime alarms
   });
   await t.test('bounded WAF catch-up closes backlog and alerts use the actual sampled query interval',async()=>{
     await reset();const end=Math.floor((Date.now()-90000)/60000)*60000;
-    analyticsReply={data:{viewer:{zones:[{firewallEventsAdaptiveGroups:[{count:3,dimensions:{action:'block',clientRequestHTTPHost:'core-os.opus-system.jp'}}]}]}}};
+    analyticsReply=query=>({data:{viewer:{zones:[{firewallEventsAdaptive:Array.from({length:3},()=>({action:'block',clientRequestHTTPHost:'core-os.opus-system.jp',datetime:query.variables.filter.datetime_geq}))}]}}});
     await stub.testControl({enabled:true,analytics:{cursor:end-10*60000,lastSuccess:null,nextTry:0,status:'unknown',code:'analytics_gap',sampled:true,diagnostic:{code:'graphql_forbidden',httpStatus:200,at:Date.now()}}});
     await stub.testAlarm();let rows=await stub.testRows();assert.equal(queries.length,1);assert.equal(rows.control.analytics.cursor,end-5*60000);assert.equal(rows.control.analytics.status,'unknown');
     const alert=sent.find(x=>x.kind==='waf_activity');assert.ok(alert);assert.equal(alert.windowStart,end-10*60000);assert.equal(alert.windowEnd,end-5*60000);assert.equal(alert.detailCode,'sampled_waf');
     await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(rows.control.analytics.cursor,end);assert.equal(rows.control.analytics.status,'ok');assert.equal(rows.control.analytics.diagnostic,null);
     assert.deepEqual(queries[0].variables.filter.clientRequestHTTPHost_in,['core-os.opus-system.jp','partner-portal.opus-system.jp']);assert.equal(queries[0].variables.filter.datetime_geq,new Date(end-10*60000).toISOString());assert.equal(queries[0].variables.filter.datetime_lt,new Date(end-5*60000).toISOString());assert.deepEqual(Object.keys(queries[0].variables).sort(),['filter','zone']);assert.doesNotMatch(queries[0].query,/clientIP|clientRequestPath|clientRequestQuery/);
+  });
+  await t.test('a capped sampled window keeps known attacks, advances once, and retains explicit gap metadata after fresh success',async()=>{
+    await reset();const end=Math.floor((Date.now()-90000)/60000)*60000,start=end-10*60000,cappedEnd=end-5*60000;
+    analyticsReply={data:{viewer:{zones:[{firewallEventsAdaptive:Array.from({length:1000},(_,i)=>({action:'block',clientRequestHTTPHost:'core-os.opus-system.jp',datetime:new Date(start+i).toISOString()}))}]}}};
+    await stub.testControl({enabled:true,analytics:{cursor:start,lastSuccess:null,nextTry:0,status:'unknown',code:'not_started',sampled:true}});
+    await stub.testAlarm();let rows=await stub.testRows();assert.equal(queries.length,1);assert.equal(rows.control.analytics.cursor,cappedEnd);assert.equal(rows.control.analytics.status,'unknown');assert.equal(rows.control.analytics.gapCount,1);
+    assert.deepEqual(rows.control.analytics.lastGap,{start,end:cappedEnd,at:rows.control.analytics.lastGap.at,reason:'sample_limit'});assert.equal(rows.control.analytics.diagnostic.code,'result_truncated');
+    assert.ok(sent.some(x=>x.kind==='waf_activity'&&x.count===1000));assert.ok(sent.some(x=>x.kind==='pipeline_degraded'&&x.detailCode==='analytics_gap'));
+    // A later distinct complete interval can recover current readiness without deleting the prior gap.
+    analyticsReply={data:{viewer:{zones:[{firewallEventsAdaptive:[]}]}}};
+    await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(queries[1].variables.filter.datetime_geq,new Date(cappedEnd).toISOString());assert.equal(rows.control.analytics.cursor,end);assert.equal(rows.control.analytics.status,'ok');assert.equal(rows.control.analytics.gapCount,1);assert.equal(rows.control.analytics.lastGap.reason,'sample_limit');assert.equal(rows.control.analytics.diagnostic,null);
+    await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(rows.control.analytics.gapCount,1);assert.equal(sent.filter(x=>x.kind==='waf_activity').length,1);
   });
   await t.test('missing Analytics permission remains unknown, queues operational warning and avoids fabricated zero',async()=>{
     await reset();await stub.testControl({enabled:true});await stub.testAlarm();const rows=await stub.testRows();

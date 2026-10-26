@@ -6,8 +6,8 @@ const require=createRequire(new URL('../../kuma-lite/package.json',import.meta.u
 const {buildSync}=createRequire(require.resolve('wrangler/package.json'))('esbuild');
 const bundle=buildSync({stdin:{contents:`export {appEvent,boundedJSON} from './src/validation.ts';export {pollWaf,analyticsDiagnostic} from './src/analytics.ts';`,resolveDir:fileURLToPath(new URL('../',import.meta.url)),sourcefile:'analytics-fixture.js'},bundle:true,format:'esm',platform:'browser',write:false}).outputFiles[0].text;
 const {appEvent,boundedJSON,pollWaf,analyticsDiagnostic}=await import('data:text/javascript;base64,'+Buffer.from(bundle).toString('base64'));
-const valid=groups=>({data:{viewer:{zones:[{firewallEventsAdaptiveGroups:groups}]}}});
-const group={count:2,dimensions:{action:'block',clientRequestHTTPHost:'core-os.opus-system.jp'}};
+const valid=events=>({data:{viewer:{zones:[{firewallEventsAdaptive:events}]}}});
+const sample=(at,extra={})=>({action:'block',clientRequestHTTPHost:'core-os.opus-system.jp',datetime:new Date(at).toISOString(),...extra});
 
 test('event allowlist rejects extra fields, unsafe hashes and stale/future input',()=>{
  const now=Date.now(),event={version:1,eventId:crypto.randomUUID(),occurredAt:now,kind:'auth_failure',actorHash:'b'.repeat(64)};
@@ -22,10 +22,10 @@ test('bounded body rejects oversize and absolute deadline after a paused read',a
  await assert.rejects(boundedJSON(new Response(body),65536,5),/timeout/);
 });
 
-test('WAF API response validation fails closed for permission, malformed and truncated data',async t=>{
+test('Free sampled WAF records preserve bounded observations and reject invalid times, hosts and unexpected identity fields',async t=>{
  const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
  const env={CF_ANALYTICS_TOKEN:'synthetic-local-token'},start=Date.now()-120000,end=Date.now()-60000;
- for(const payload of [{errors:[{message:'permission denied'}]}, {...valid([]),errors:'malformed'}, {data:{viewer:{zones:[]}}},valid(Array.from({length:100},()=>group)),valid([{...group,count:-1}]),valid([{...group,dimensions:{...group.dimensions,clientRequestHTTPHost:'attacker.invalid'}}])]){
+ for(const payload of [{errors:[{message:'permission denied'}]}, {...valid([]),errors:'malformed'}, {data:{viewer:{zones:[]}}},valid(Array.from({length:1001},()=>sample(start))),valid([sample(start-1)]),valid([sample(end)]),valid([sample(start,{datetime:'not-a-date'})]),valid([sample(start,{clientRequestHTTPHost:'attacker.invalid'})]),valid([sample(start,{clientIP:'192.0.2.1'})])]){
   globalThis.fetch=async()=>Response.json(payload);await assert.rejects(pollWaf(env,start,end));
  }
  globalThis.fetch=async(request,options)=>{
@@ -33,12 +33,13 @@ test('WAF API response validation fails closed for permission, malformed and tru
   const payload=JSON.parse(options.body);
   // Cloudflare's documented API uses the custom lowercase string scalar and a typed filter.
   // Simulate its variable boundary instead of accepting any client JSON as the old fixture did.
-  if(!/\$zone\s*:\s*string\b/.test(payload.query)||!/\$filter\s*:\s*FirewallEventsAdaptiveGroupsFilter_InputObject\b/.test(payload.query))return Response.json({errors:[{message:'unknown type "String"'}]});
+  if(!/\$zone\s*:\s*string\b/.test(payload.query)||!/\$filter\s*:\s*FirewallEventsAdaptiveFilter_InputObject\b/.test(payload.query))return Response.json({errors:[{message:'unknown type "String"'}]});
   assert.deepEqual(payload.variables,{zone:'6a83ef6dd7723ac97485c613c9a5ca34',filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:['core-os.opus-system.jp','partner-portal.opus-system.jp']}});
-  assert.equal(options.redirect,'manual');assert.equal(options.method,'POST');return Response.json(valid([group]));
+  assert.equal(options.redirect,'manual');assert.equal(options.method,'POST');assert.doesNotMatch(payload.query,/clientIP|clientRequestPath|clientRequestQuery|userAgent|firewallEventsAdaptiveGroups/);return Response.json(valid([sample(start),sample(start+1)]));
  };
- assert.deepEqual(await pollWaf(env,start,end),[{action:'block',host:'core-os.opus-system.jp',count:2}]);
- globalThis.fetch=async()=>Response.json(valid([{...group,dimensions:{...group.dimensions,action:'skip'}}]));assert.deepEqual(await pollWaf(env,start,end),[]);
+ assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:2}],complete:true});
+ globalThis.fetch=async()=>Response.json(valid([sample(start,{action:'skip'})]));assert.deepEqual(await pollWaf(env,start,end),{groups:[],complete:true});
+ globalThis.fetch=async()=>Response.json(valid(Array.from({length:1000},(_,i)=>sample(start+i))));assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:1000}],complete:false});
 });
 
 
@@ -71,6 +72,6 @@ test('private WAF diagnostics distinguish missing credentials, HTTP status and f
  }
  globalThis.fetch=async()=>Response.json({errors:'synthetic-secret-token'});assert.deepEqual((await failure()).diagnostic,{code:'invalid_response',httpStatus:200});
  globalThis.fetch=async()=>Response.json({data:{viewer:{zones:[]}}});assert.deepEqual((await failure()).diagnostic,{code:'zone_missing',httpStatus:200});
- globalThis.fetch=async()=>Response.json(valid(Array.from({length:100},()=>group)));const truncated=await failure();assert.deepEqual(truncated.diagnostic,{code:'result_truncated',httpStatus:200});assert.equal(truncated.message,'analytics_gap');
+ globalThis.fetch=async()=>Response.json(valid([sample(end)]));assert.deepEqual((await failure()).diagnostic,{code:'row_invalid',httpStatus:200});
  assert.deepEqual(analyticsDiagnostic(new Error('synthetic-secret-token')),{code:'unexpected_error',httpStatus:null});
 });

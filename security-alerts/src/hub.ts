@@ -11,7 +11,7 @@ interface BucketRow { key:string; start:number; count:number; last_alert:number 
 interface QueueRow { id:string; alert:string; attempts:number; next:number; lease_until:number; lease_token:string|null; created:number; priority:Priority }
 const empty = (now:number):Control => ({enabled:false,generation:0,lastAlarm:null,active:null,seenCount:0,criticalSeenCount:0,lockedSeenCount:0,bucketCount:0,pending:0,saturationUntil:0,quota:{regular:{pending:0,day:0},critical:{pending:0,day:0},locked:{pending:0,day:0},pipeline:{pending:0,day:0}},
   sent:0,dead:0,deadAcknowledged:0,deadAcknowledgedAt:null,rejected:0,saturated:false,day:Math.floor(now/DAY),queuedToday:0,suppressed:0,
-  analytics:{cursor:null,lastSuccess:null,nextTry:0,status:'unknown',code:'not_started',sampled:true,diagnostic:null}});
+  analytics:{cursor:null,lastSuccess:null,nextTry:0,status:'unknown',code:'not_started',sampled:true,diagnostic:null,gapCount:0,lastGap:null}});
 export class SecurityHub extends DurableObject<Env> {
   constructor(ctx:DurableObjectState,env:Env) {
     super(ctx,env);
@@ -136,20 +136,26 @@ export class SecurityHub extends DurableObject<Env> {
     const query=this.ctx.storage.transactionSync(()=>{
       const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token||c.analytics.nextTry>now)return null;
       let start=c.analytics.cursor??end-MINUTE;
-      if(start<end-15*MINUTE){this.degraded(c,'analytics_gap',now);start=end-15*MINUTE;c.analytics.cursor=start;}
+      if(start<end-15*MINUTE){this.degraded(c,'analytics_gap',now);c.analytics.gapCount=Math.min(1_000_000_000,(c.analytics.gapCount??0)+1);c.analytics.lastGap={start,end:end-15*MINUTE,at:now,reason:'backfill_limit'};start=end-15*MINUTE;c.analytics.cursor=start;}
       this.save(c);if(start>=end)return null;return {start,end:Math.min(end,start+FIVE)};
     });
     if(!query)return;
     try {
-      const groups=await pollWaf(this.env,query.start,query.end);
+      const read=await pollWaf(this.env,query.start,query.end);
       this.ctx.storage.transactionSync(()=>{
         const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token)return;
-        for(const group of groups){
+        for(const group of read.groups){
           const key=`waf:${group.host}:${group.action}`;
           this.bump(c,key,group.count,1,query.end,{source:'waf',kind:'waf_activity',severity:'warning',occurredAt:Date.now(),host:group.host,action:group.action,detailCode:'sampled_waf',...(group.ruleId?{ruleId:group.ruleId}:{})},true,query.start);
         }
         c.analytics.cursor=query.end;c.analytics.lastSuccess=Date.now();c.analytics.nextTry=0;c.analytics.diagnostic=null;
-        c.analytics.status=query.end>=end?'ok':'unknown';c.analytics.code=query.end>=end?null:'analytics_gap';this.save(c);
+        if(!read.complete){
+          this.degraded(c,'analytics_gap',Date.now());
+          c.analytics.gapCount=Math.min(1_000_000_000,(c.analytics.gapCount??0)+1);
+          c.analytics.lastGap={start:query.start,end:query.end,at:Date.now(),reason:'sample_limit'};
+          c.analytics.diagnostic={code:'result_truncated',httpStatus:200,at:Date.now()};
+        }else{c.analytics.status=query.end>=end?'ok':'unknown';c.analytics.code=query.end>=end?null:'analytics_gap';}
+        this.save(c);
       });
     } catch(error) {
       this.ctx.storage.transactionSync(()=>{

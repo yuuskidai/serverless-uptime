@@ -28,6 +28,7 @@ export interface Env {
   VERSION_METADATA?: WorkerVersionMetadata;
 }
 export interface WafGroup { action: Alert['action']; host: typeof HOSTS[number]; count: number; ruleId?: string }
+export interface WafRead {groups:WafGroup[];complete:boolean}
 export type AnalyticsDiagnosticCode = 'credential_missing' | 'http_unauthorized' | 'http_forbidden' | 'http_rate_limited'
   | 'http_server_error' | 'http_unexpected_status' | 'request_timeout' | 'network_error'
   | 'graphql_unknown_type' | 'graphql_unknown_field' | 'graphql_invalid_variable' | 'graphql_query_invalid'
@@ -42,5 +43,6 @@ export interface Control {
   day: number; queuedToday: number; suppressed: number;
   analytics: { cursor: number | null; lastSuccess: number | null; nextTry: number;
     diagnostic?: {code:AnalyticsDiagnosticCode;httpStatus:number|null;at:number} | null;
+    gapCount?:number;lastGap?:{start:number;end:number;at:number;reason:'sample_limit'|'backfill_limit'} | null;
     status: 'unknown' | 'ok'; code: 'not_started' | 'analytics_unavailable' | 'analytics_gap' | null; sampled: true };
 }
