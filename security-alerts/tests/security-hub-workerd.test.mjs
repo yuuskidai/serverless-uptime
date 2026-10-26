@@ -123,15 +123,17 @@ test('security hub keeps trust, aggregation, durable delivery and runtime alarms
   await t.test('bounded WAF catch-up closes backlog and alerts use the actual sampled query interval',async()=>{
     await reset();const end=Math.floor((Date.now()-90000)/60000)*60000;
     analyticsReply={data:{viewer:{zones:[{firewallEventsAdaptiveGroups:[{count:3,dimensions:{action:'block',clientRequestHTTPHost:'core-os.opus-system.jp'}}]}]}}};
-    await stub.testControl({enabled:true,analytics:{cursor:end-10*60000,lastSuccess:null,nextTry:0,status:'unknown',code:'analytics_gap',sampled:true}});
+    await stub.testControl({enabled:true,analytics:{cursor:end-10*60000,lastSuccess:null,nextTry:0,status:'unknown',code:'analytics_gap',sampled:true,diagnostic:{code:'graphql_forbidden',httpStatus:200,at:Date.now()}}});
     await stub.testAlarm();let rows=await stub.testRows();assert.equal(queries.length,1);assert.equal(rows.control.analytics.cursor,end-5*60000);assert.equal(rows.control.analytics.status,'unknown');
     const alert=sent.find(x=>x.kind==='waf_activity');assert.ok(alert);assert.equal(alert.windowStart,end-10*60000);assert.equal(alert.windowEnd,end-5*60000);assert.equal(alert.detailCode,'sampled_waf');
-    await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(rows.control.analytics.cursor,end);assert.equal(rows.control.analytics.status,'ok');
+    await stub.testAlarm();rows=await stub.testRows();assert.equal(queries.length,2);assert.equal(rows.control.analytics.cursor,end);assert.equal(rows.control.analytics.status,'ok');assert.equal(rows.control.analytics.diagnostic,null);
     assert.deepEqual(queries[0].variables.hosts,['core-os.opus-system.jp','partner-portal.opus-system.jp']);assert.doesNotMatch(queries[0].query,/clientIP|clientRequestPath|clientRequestQuery/);
   });
   await t.test('missing Analytics permission remains unknown, queues operational warning and avoids fabricated zero',async()=>{
     await reset();await stub.testControl({enabled:true});await stub.testAlarm();const rows=await stub.testRows();
     assert.equal(rows.control.analytics.status,'unknown');assert.equal(rows.control.analytics.code,'analytics_unavailable');assert.equal(rows.control.analytics.lastSuccess,null);
+    assert.deepEqual(rows.control.analytics.diagnostic.code,'graphql_unauthorized');assert.equal(rows.control.analytics.diagnostic.httpStatus,200);assert.ok(Number.isSafeInteger(rows.control.analytics.diagnostic.at));
+    assert.doesNotMatch(await (await call('/healthz')).text(),/diagnostic|graphql_|not authorized/);
     assert.ok(rows.control.analytics.nextTry>Date.now());assert.ok(sent.some(x=>x.kind==='pipeline_degraded'&&x.detailCode==='analytics_unavailable'));
   });
   await t.test('a real runtime alarm dispatches the persisted queue and schedules its successor',async()=>{

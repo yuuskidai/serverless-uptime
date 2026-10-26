@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { HOSTS, MINUTE } from './types';
 import type { Alert, AlertKind, App, Control, DeliveryResult, Env } from './types';
 import { appEvent } from './validation';
-import { pollWaf } from './analytics';
+import { analyticsDiagnostic, pollWaf } from './analytics';
 const MAX_SEEN=1792, MAX_CRITICAL_SEEN=128, MAX_LOCKED_SEEN=128, MAX_BUCKETS=256, MAX_QUEUE=128, MAX_DAY=200;
 type Priority='regular'|'critical'|'locked'|'pipeline';
 const LIMITS={regular:{pending:96,day:160},critical:{pending:16,day:20},locked:{pending:8,day:10},pipeline:{pending:8,day:10}};
@@ -11,7 +11,7 @@ interface BucketRow { key:string; start:number; count:number; last_alert:number 
 interface QueueRow { id:string; alert:string; attempts:number; next:number; lease_until:number; lease_token:string|null; created:number; priority:Priority }
 const empty = (now:number):Control => ({enabled:false,generation:0,lastAlarm:null,active:null,seenCount:0,criticalSeenCount:0,lockedSeenCount:0,bucketCount:0,pending:0,saturationUntil:0,quota:{regular:{pending:0,day:0},critical:{pending:0,day:0},locked:{pending:0,day:0},pipeline:{pending:0,day:0}},
   sent:0,dead:0,deadAcknowledged:0,deadAcknowledgedAt:null,rejected:0,saturated:false,day:Math.floor(now/DAY),queuedToday:0,suppressed:0,
-  analytics:{cursor:null,lastSuccess:null,nextTry:0,status:'unknown',code:'not_started',sampled:true}});
+  analytics:{cursor:null,lastSuccess:null,nextTry:0,status:'unknown',code:'not_started',sampled:true,diagnostic:null}});
 export class SecurityHub extends DurableObject<Env> {
   constructor(ctx:DurableObjectState,env:Env) {
     super(ctx,env);
@@ -148,14 +148,14 @@ export class SecurityHub extends DurableObject<Env> {
           const key=`waf:${group.host}:${group.action}`;
           this.bump(c,key,group.count,1,query.end,{source:'waf',kind:'waf_activity',severity:'warning',occurredAt:Date.now(),host:group.host,action:group.action,detailCode:'sampled_waf',...(group.ruleId?{ruleId:group.ruleId}:{})},true,query.start);
         }
-        c.analytics.cursor=query.end;c.analytics.lastSuccess=Date.now();c.analytics.nextTry=0;
+        c.analytics.cursor=query.end;c.analytics.lastSuccess=Date.now();c.analytics.nextTry=0;c.analytics.diagnostic=null;
         c.analytics.status=query.end>=end?'ok':'unknown';c.analytics.code=query.end>=end?null:'analytics_gap';this.save(c);
       });
     } catch(error) {
       this.ctx.storage.transactionSync(()=>{
         const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token)return;
         const code=error instanceof Error&&error.message==='analytics_gap'?'analytics_gap':'analytics_unavailable';
-        this.degraded(c,code,Date.now());c.analytics.nextTry=Date.now()+5*MINUTE;this.save(c);
+        this.degraded(c,code,Date.now());c.analytics.diagnostic={...analyticsDiagnostic(error),at:Date.now()};c.analytics.nextTry=Date.now()+5*MINUTE;this.save(c);
       });
     }
   }
