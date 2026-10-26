@@ -205,6 +205,7 @@ test('slot calculation uses the scheduled timestamp and rejects unsafe values', 
 test('daily cleanup does not probe; delayed minute invocation retains its original scheduled slot', async () => {
   const calls = [], pending = [];
   const { default: worker } = loadTs('index', {
+    './security-notifications-entrypoint': {},
     './api': {}, './edge-cache': {}, './incident-page': {}, './rca': {}, './rss-feed': {},
     './status-page': {}, './slack-bot': {},
     './monitor': { cleanupOldChecks: async () => calls.push('cleanup') },

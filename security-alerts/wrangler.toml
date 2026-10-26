@@ -1,0 +1,31 @@
+name = "helth-security"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "SECURITY_HUB"
+class_name = "SecurityHub"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SecurityHub"]
+
+[[services]]
+binding = "SLACK_NOTIFIER"
+service = "helth"
+entrypoint = "SecurityNotifications"
+
+[version_metadata]
+binding = "VERSION_METADATA"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+
+# Secrets: ADMIN_SECRET, CF_ANALYTICS_TOKEN.
+# Fixed zone/hosts; no Cron, business D1 or Slack credentials.

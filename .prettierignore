@@ -1,9 +1,10 @@
 # language files
 src/lang/*.json
 
-# fork-added entries: kuma-lite and health-witness are independent sub-projects
+# fork-added entries: kuma-lite, health-witness and security-alerts are independent sub-projects
 # with their own conventions. README.upstream.md is a verbatim mirror of the
 # upstream README that should not be reformatted.
 kuma-lite/
 health-witness/
+security-alerts/
 README.upstream.md

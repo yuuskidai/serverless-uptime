@@ -9,16 +9,18 @@ on:
     branches: [master, 1.23.X, 3.0.0]
     # Skip the upstream uptime-kuma test suite (backend + e2e + ARMv7
     # + linter) when a push or PR only touches the kuma-lite/ or
-    # health-witness/ sub-projects. Their checks run in kuma-lite-test.yml;
+    # health-witness/ or security-alerts/ sub-projects. Their checks run in kuma-lite-test.yml;
     # this matrix exercises upstream code and includes network-dependent
     # tests. Mixed pushes that touch upstream files still run this matrix.
     paths-ignore:
       - "kuma-lite/**"
       - "health-witness/**"
+      - "security-alerts/**"
   pull_request:
     paths-ignore:
       - "kuma-lite/**"
       - "health-witness/**"
+      - "security-alerts/**"
 permissions: {}
 
 jobs:

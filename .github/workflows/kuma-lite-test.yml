@@ -6,12 +6,14 @@ on:
     paths:
       - "kuma-lite/**"
       - "health-witness/**"
+      - "security-alerts/**"
       - ".github/workflows/kuma-lite-test.yml"
       - ".github/workflows/external-health.yml"
   pull_request:
     paths:
       - "kuma-lite/**"
       - "health-witness/**"
+      - "security-alerts/**"
       - ".github/workflows/kuma-lite-test.yml"
       - ".github/workflows/external-health.yml"
 
@@ -41,3 +43,9 @@ jobs:
       - name: Test Cloudflare witness
         run: npm test
         working-directory: health-witness
+      - name: Typecheck security notifications
+        run: npm run typecheck
+        working-directory: security-alerts
+      - name: Test security notifications
+        run: npm test
+        working-directory: security-alerts

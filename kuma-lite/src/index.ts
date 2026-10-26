@@ -20,6 +20,7 @@ import { buildSlackBot } from './slack-bot';
 import type { Env } from './types';
 
 export type { Env };
+export { SecurityNotifications } from './security-notifications-entrypoint';
 
 const SCHEDULED_OFFSET_MS = 5_000;
 

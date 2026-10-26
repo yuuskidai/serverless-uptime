@@ -1,0 +1,13 @@
+{
+  "name": "helth-security",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@11.21.1",
+  "engines": { "node": ">=24.22.0 <25" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "node scripts/tool.mjs typecheck",
+    "deploy": "node scripts/tool.mjs deploy",
+    "dry-run": "node scripts/tool.mjs deploy --dry-run"
+  }
+}
