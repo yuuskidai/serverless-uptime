@@ -45,7 +45,7 @@ Bindings:
 
 - `SECURITY_HUB`: local `SecurityHub` SQLite DO namespace.
 - `SLACK_NOTIFIER`: service `helth`, entrypoint `SecurityNotifications`; no Slack credential is copied here.
-- `CF_ANALYTICS_TOKEN`: secret, limited to Analytics Read for the fixed zone where possible.
+- `CF_ANALYTICS_TOKEN`: secret, limited to Analytics Read for the fixed zone. Do not reuse a Workers/D1 management token.
 - `ADMIN_SECRET`: random 32-byte hex or base64url secret; never sent to applications or Slack.
 
 Only `GET /healthz` is public, and it reports Worker liveness only. Exact authenticated admin endpoints are `POST /admin/start`, `POST /admin/stop`, `POST /admin/acknowledge` (all bodyless) and `GET /admin/status`. Requests with query parameters or unknown paths are rejected. Public reads never start/restart alarms. Administrative requests are not logged as invocation records.
@@ -53,3 +53,5 @@ Only `GET /healthz` is public, and it reports Worker liveness only. Exact authen
 Status is private and includes freshness, WAF coverage state, bounded queue/receipt counters, current capacity, recent safe dead letters and cumulative delivery losses. Acknowledging dead letters requires fresh healthy WAF monitoring, no pending deliveries and no active execution/lease. It preserves receipts and cumulative counters and records an explicit acknowledgement time; it is not an automatic recovery or a re-send.
 
 Use the shared pinned toolchain: install `../kuma-lite` with `npm ci --ignore-scripts`, then `npm run typecheck`, `npm test`, and `npm run dry-run`. The helper preserves inherited proxy, authentication and guard environment and selects top-level Wrangler configuration with `--env ''`. Do not reset the existing DO namespace or migration ledger during redeployment.
+
+Cloudflare Workers Builds deploys `master` changes under `security-alerts/**` or `kuma-lite/**` from `/security-alerts`. The build uses Node 24.22.1, the package's pinned npm version, an explicit locked install of `../kuma-lite`, and type checking before deployment. `ADMIN_SECRET` and the WAF read token are runtime secrets and must not be copied to build variables. Redeployment preserves the existing singleton, generation and alarm rather than starting a new monitor.
