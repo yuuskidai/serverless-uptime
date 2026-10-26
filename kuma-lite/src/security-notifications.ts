@@ -72,7 +72,8 @@ export function validSecurityAlert(value: unknown, now = Date.now()): value is S
 const TITLES: Record<SecurityAlert['kind'], string> = {
   auth_failure_burst: '認証失敗の集中を検知',
   account_locked: '認証失敗によりアカウントをロック',
-  auth_rate_limited_burst: '認証試行の制限超過を検知',
+  // Fail-closed limiters also reject storage faults; report the observed denial without inferring quota exhaustion.
+  auth_rate_limited_burst: '認証試行の拒否が集中',
   authorization_denied_burst: '権限違反の繰り返しを検知',
   admin_privilege_changed: '管理者権限の変更を記録',
   totp_disabled: '二段階認証の無効化を記録',
