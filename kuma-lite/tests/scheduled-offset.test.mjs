@@ -28,7 +28,7 @@ test('invalid or future raw timing falls back to the former bounded five-second 
   assert.equal(scheduledOffsetWaitMs(now+100,now+500,now),5000);
 });
 
-test('a 72-second delayed invocation skips added waiting and passes the original time to the runner',async()=>{
+test('a 72-second delayed invocation passes the original time and an already-reached probe floor to the runner',async()=>{
   const scheduled=Date.now()-71911, calls=[], pending=[];
   const {default:worker}=loadTs('index',{...mocks,
     './schema-gate':{ensureSchema:async()=>({ok:true}),logSchemaProblem(){}},
@@ -43,8 +43,31 @@ test('a 72-second delayed invocation skips added waiting and passes the original
   await Promise.all(pending);
   assert.equal(calls.length,1);
   assert.equal(calls[0].time,scheduled);
-  assert.equal(calls[0].timing.offsetWaitMs,0);
-  assert.ok(calls[0].timing.offsetMs<100);
+  assert.ok(calls[0].timing.probeNotBeforeMs>=calls[0].timing.receivedAt);
+  assert.ok(calls[0].timing.probeNotBeforeMs<=Date.now());
+  assert.equal(calls[0].timing.offsetWaitMs,undefined);
+  assert.equal(calls[0].timing.offsetMs,undefined);
+});
+
+test('an on-time invocation reaches the claim runner before the original probe floor, without a run-wide offset stage',async()=>{
+  const calls=[], stages=[], pending=[];
+  const {default:worker}=loadTs('index',{...mocks,
+    './schema-gate':{ensureSchema:async()=>({ok:true}),logSchemaProblem(){}},
+    './scheduled-runs':{
+      beginScheduledRun:async(_env,_cron,scheduledTime,receivedAt)=>({runId:'on-time-run',scheduledTime,receivedAt}),
+      advanceScheduledRun:async(_env,_run,stage)=>stages.push(stage),finishScheduledRun:async()=>{},
+    },
+    './monitor-runner':{runChecks:async(_env,time,timing)=>calls.push({time,timing,calledAt:Date.now()})},
+    './notification-outbox':{drainNotificationOutbox:async()=>{}},
+  });
+  const scheduled=Date.now();
+  await worker.scheduled({cron:'* * * * *',scheduledTime:scheduled},{},{waitUntil:p=>pending.push(p)});
+  await Promise.all(pending);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].time,scheduled);
+  assert.equal(calls[0].timing.probeNotBeforeMs,scheduled+5000);
+  assert.ok(calls[0].calledAt<calls[0].timing.probeNotBeforeMs);
+  assert.deepEqual(stages,['checks']);
 });
 
 for(const reason of ['schema_timeout','schema_unavailable','schema_missing']) {

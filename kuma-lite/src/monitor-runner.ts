@@ -19,8 +19,8 @@ export interface RunTiming {
   receivedAt: number;
   runId?: string;
   schemaMs?: number;
-  offsetMs?: number;
-  offsetWaitMs?: number;
+  /** Absolute probe floor supplied by the scheduled handler, consumed after claim. */
+  probeNotBeforeMs?: number;
 }
 
 export async function runChecks(env: Env, scheduledTime: number, timing: RunTiming = { receivedAt: Date.now() }): Promise<void> {
@@ -57,10 +57,10 @@ export async function runChecks(env: Env, scheduledTime: number, timing: RunTimi
 
 async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, scheduledTime: number,
   timing: RunTiming, selectMs: number): Promise<void> {
-  const phases = { lease_ms: 0, state_ms: 0, probe_ms: 0, commit_ms: 0 };
+  const phases = { offset_ms: 0, offset_wait_ms: 0, lease_ms: 0, state_ms: 0, probe_ms: 0, commit_ms: 0 };
   let stage = Date.now();
-  const beforeClaim = { schema_ms: timing.schemaMs ?? 0, offset_ms: timing.offsetMs ?? 0,
-    offset_wait_ms: timing.offsetWaitMs ?? 0, select_ms: selectMs,
+  const beforeClaim = { schema_ms: timing.schemaMs ?? 0, offset_ms: 0,
+    offset_wait_ms: 0, select_ms: selectMs,
     delivery_lag_ms: Math.max(0, timing.receivedAt - scheduledTime),
     received_to_claim_ms: Math.max(0, stage - timing.receivedAt) };
   const { lease, attempt } = await claimMonitorSlotDecision(env, monitor.id, slotMs, monitor.config_revision ?? 1,
@@ -77,10 +77,17 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     await drainSafely(env, monitor.id);
     return;
   }
-  let phase: AttemptPhase = 'state';
+  let phase: AttemptPhase = 'offset';
   let probeStartedAt: number | null = null;
   let failure: AttemptFailure | undefined;
   try {
+    stage = Date.now();
+    phases.offset_wait_ms = Math.max(0, (timing.probeNotBeforeMs ?? 0) - stage);
+    if (phases.offset_wait_ms > 0) {
+      await new Promise((resolve) => setTimeout(resolve, phases.offset_wait_ms));
+    }
+    phases.offset_ms = Math.max(0, Date.now() - stage);
+    phase = 'state';
     stage = Date.now();
     const previous = await readMonitorState(env, monitor.id);
     phases.state_ms = Math.max(0, Date.now() - stage);
@@ -106,7 +113,8 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     // A rejected await still consumed time. Keep that duration in the durable
     // release audit, including a deadline that expired without a response.
     const elapsed = Math.max(0, Date.now() - stage);
-    if (phase === 'state') phases.state_ms = elapsed;
+    if (phase === 'offset') phases.offset_ms = elapsed;
+    else if (phase === 'state') phases.state_ms = elapsed;
     else if (phase === 'probe') phases.probe_ms = elapsed;
     else if (phase === 'commit') phases.commit_ms = elapsed;
     // Capture diagnostics locally. Unlock comes before any separate audit I/O.

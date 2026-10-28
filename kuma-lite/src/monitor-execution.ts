@@ -286,7 +286,7 @@ export async function commitMonitorResult(
   return writes[0].meta.changes === 1 && writes[1].meta.changes === 1;
 }
 
-export type AttemptPhase = 'claim' | 'state' | 'probe' | 'commit' | 'release';
+export type AttemptPhase = 'claim' | 'offset' | 'state' | 'probe' | 'commit' | 'release';
 export type AttemptTimings = Partial<Record<'schema_ms' | 'offset_ms' | 'offset_wait_ms' | 'select_ms' |
   'lease_ms' | 'state_ms' | 'probe_ms' | 'commit_ms' | 'delivery_lag_ms' | 'received_to_claim_ms' |
   'received_to_probe_ms', number>>;

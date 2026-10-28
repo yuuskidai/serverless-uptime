@@ -71,16 +71,11 @@ export default {
               reason === 'schema_missing' ? phase : reason, timings);
             return;
           }
-          phase = 'offset';
-          await advanceScheduledRun(env, run, 'offset', timings);
-          // Wait only for the remaining original offset. A late event still
-          // owns its original slot and must not incur an extra five seconds.
+          // Claim each monitor before waiting so a late older invocation cannot
+          // take its lease while an earlier-received newer slot waits here.
+          // The original schedule still sets the probe floor; late events add no wait.
           const offsetStarted = Date.now();
-          timings.offset_wait_ms = scheduledOffsetWaitMs(event.scheduledTime, offsetStarted, receivedAt);
-          if (timings.offset_wait_ms > 0) {
-            await new Promise((resolve) => setTimeout(resolve, timings.offset_wait_ms));
-          }
-          timings.offset_ms = Math.max(0, Date.now() - offsetStarted);
+          const probeNotBeforeMs = offsetStarted + scheduledOffsetWaitMs(event.scheduledTime, offsetStarted, receivedAt);
           phase = 'checks';
           await advanceScheduledRun(env, run, 'checks', timings);
           const backlog = drainNotificationOutbox(env).catch(() => {
@@ -88,7 +83,7 @@ export default {
           });
           try {
             await runChecks(env, event.scheduledTime, { receivedAt, runId: run.runId,
-              schemaMs: timings.schema_ms, offsetMs: timings.offset_ms, offsetWaitMs: timings.offset_wait_ms });
+              schemaMs: timings.schema_ms, probeNotBeforeMs });
           } finally { await backlog; }
           await finishScheduledRun(env, run, 'completed', null, timings);
         } catch (error) {
