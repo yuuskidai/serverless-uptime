@@ -10,7 +10,7 @@ import { loadTs } from './helpers.mjs';
 test('retired receiver rejects deliveries without accessing D1, OIDC or the request body', async () => {
   const unexpected = () => { throw new Error('retired receiver touched a dependency'); };
   const { default: worker } = loadTs('index', {
-    './security-notifications-entrypoint': {}, './api': {}, './edge-cache': {}, './incident-page': {},
+    './security-notifications-entrypoint': {}, './security-integration': {}, './api': {}, './edge-cache': {}, './incident-page': {},
     './rca': {}, './rss-feed': {}, './status-page': {}, './slack-bot': {}, './monitor': {},
     './monitor-runner': {}, './notification-outbox': {}, './scheduled-runs': {},
     './monitor-readiness': {}, './schema-gate': { ensureSchema: unexpected },

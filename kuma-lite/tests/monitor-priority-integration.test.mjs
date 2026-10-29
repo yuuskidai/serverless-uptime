@@ -122,7 +122,7 @@ function harness() {
       }
       const unused = Object.fromEntries(['api', 'edge-cache', 'incident-page', 'rca', 'rss-feed',
         'status-page', 'slack-bot', 'monitor-readiness', 'external-observations',
-        'security-notifications-entrypoint'].map(id => [`./${id}`, {}]));
+        'security-notifications-entrypoint', 'security-integration'].map(id => [`./${id}`, {}]));
       const overrides = {
         ...unused,
         './schema-gate': {

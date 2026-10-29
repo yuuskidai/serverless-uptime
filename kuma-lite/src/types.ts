@@ -1,4 +1,5 @@
 import type { RcaJob } from './rca';
+import type { SecurityHub as SecurityHubState } from '../../security-alerts/src/hub';
 
 export interface Env {
   DB: D1Database;
@@ -6,6 +7,10 @@ export interface Env {
   API_TOKEN: string;
   RETENTION_DAYS: string;
   HIDDEN_MONITOR_IDS?: string;
+  /** Existing SQLite SecurityHub namespace is transferred without creating a new instance. */
+  SECURITY_HUB?: DurableObjectNamespace<SecurityHubState>;
+  CF_ANALYTICS_TOKEN?: string;
+  VERSION_METADATA?: WorkerVersionMetadata;
 
   // Trusted GitHub Actions identity for the supplemental external witness.
   EXTERNAL_PROBE_AUDIENCE?: string;

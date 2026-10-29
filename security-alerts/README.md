@@ -1,5 +1,13 @@
 # Cloudflare security notifications
 
+Security collection is consolidated into `helth` on 2026-10-29. This directory
+contains the shared SecurityHub implementation and regression fixtures; it is no
+longer a separate deployable Worker. The existing SQLite namespace is transferred,
+not recreated. See [the consolidation procedure](../kuma-lite/ops/20261029-security-consolidation.md).
+The deployment configuration is removed and the helper rejects deploy/dev commands
+so later changes cannot recreate `helth-security`. The sections below describe the
+former standalone deployment and retained event/delivery policies.
+
 `helth-security` runs within the existing Cloudflare account. It does not upgrade the `opus-system.jp` Free zone or purchase an option. Worker/SQLite Durable Object usage consumes existing account quotas and may have separate usage charges.
 
 The standard HTTP DDoS alert is a separate Cloudflare notification policy connected directly to the existing Slack destination. This Worker deliberately has no public DDoS webhook or public event-ingestion endpoint.

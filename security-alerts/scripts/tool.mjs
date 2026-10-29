@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 const require = createRequire(new URL('../../kuma-lite/package.json', import.meta.url));
 const [command, ...args] = process.argv.slice(2);
 const typecheck = command === 'typecheck';
-if (!['typecheck', 'dev', 'deploy'].includes(command)) throw new Error('Unknown tool command');
+if (!typecheck) throw new Error('Security collection is consolidated into helth; deploy kuma-lite instead.');
 const binary = typecheck ? require.resolve('typescript/bin/tsc')
   : join(dirname(require.resolve('wrangler/package.json')), 'bin/wrangler.js');
 // Select the single top-level Wrangler configuration explicitly while preserving

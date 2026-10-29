@@ -16,10 +16,12 @@ import {
 } from './schema-gate';
 import { renderStatusPage } from './status-page';
 import { buildSlackBot } from './slack-bot';
+import { handleSecurityAdminRequest } from './security-integration';
 import type { Env } from './types';
 
 export type { Env };
 export { SecurityNotifications } from './security-notifications-entrypoint';
+export { SecurityHub, CoreSecurityEvents, PortalSecurityEvents } from './security-integration';
 
 const SCHEDULED_OFFSET_MS = 5_000;
 
@@ -109,6 +111,8 @@ export default {
       return new Response('ok', { status: 200 });
     }
     if (url.pathname === '/readyz') return monitoringReadiness(env);
+    // Security state is SQLite DO-owned; do not make administration depend on monitor D1/schema availability.
+    if (url.pathname === '/api/security' || url.pathname.startsWith('/api/security/')) return handleSecurityAdminRequest(req, env);
     // Supplemental probes are retired; reject late deliveries before reading a body or D1.
     // The authenticated GET below remains available for retained observation history.
     if (url.pathname === '/api/external-observations' && req.method !== 'GET') {

@@ -34,6 +34,12 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const examplePath = path.join(root, 'wrangler.toml.example');
 const outPath = path.join(root, 'wrangler.toml');
 
+// This configuration transfers the existing production security namespace.
+// A new Preview must never attempt that transfer against production state.
+if (process.env.WORKERS_CI === '1' && process.env.WORKERS_CI_BRANCH !== 'master') {
+  throw new Error('The security namespace transfer configuration is production-only; Preview builds are disabled.');
+}
+
 const dbId = process.env.D1_DATABASE_ID;
 if (!dbId) {
   console.error('build-wrangler-toml: D1_DATABASE_ID env var is required.');

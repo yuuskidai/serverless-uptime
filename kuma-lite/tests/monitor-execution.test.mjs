@@ -206,6 +206,7 @@ test('daily cleanup does not probe; delayed minute invocation retains its origin
   const calls = [], pending = [];
   const { default: worker } = loadTs('index', {
     './security-notifications-entrypoint': {},
+    './security-integration': {},
     './api': {}, './edge-cache': {}, './incident-page': {}, './rca': {}, './rss-feed': {},
     './status-page': {}, './slack-bot': {},
     './monitor': { cleanupOldChecks: async () => calls.push('cleanup') },

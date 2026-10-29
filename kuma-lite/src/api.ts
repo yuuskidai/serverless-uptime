@@ -38,7 +38,7 @@ export async function handleApiRequest(req: Request, env: Env): Promise<Response
   }
 }
 
-function authorize(req: Request, env: Env): boolean {
+export function authorize(req: Request, env: Env): boolean {
   if (!env.API_TOKEN) return false;
   const header = req.headers.get('Authorization') ?? '';
   const match = header.match(/^Bearer\s+(.+)$/i);

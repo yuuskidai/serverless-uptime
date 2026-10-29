@@ -1,3 +1,5 @@
+import type { SecurityHub } from './hub';
+
 export const ZONE_ID = '6a83ef6dd7723ac97485c613c9a5ca34';
 export const HOSTS = ['core-os.opus-system.jp', 'partner-portal.opus-system.jp'] as const;
 export const SINGLETON = 'fixed-security-hub-v1';
@@ -22,7 +24,7 @@ export interface Alert {
 }
 export interface DeliveryResult { ok: boolean; retryAfterMs?: number; code?: string }
 export interface Env {
-  SECURITY_HUB: DurableObjectNamespace;
+  SECURITY_HUB: DurableObjectNamespace<SecurityHub>;
   SLACK_NOTIFIER?: { sendSecurityAlert(alert: Alert): Promise<DeliveryResult> };
   CF_ANALYTICS_TOKEN?: string; ADMIN_SECRET?: string;
   VERSION_METADATA?: WorkerVersionMetadata;

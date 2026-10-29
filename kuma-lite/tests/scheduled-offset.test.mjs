@@ -4,6 +4,7 @@ import { loadTs } from './helpers.mjs';
 
 const mocks={
   './security-notifications-entrypoint':{},
+  './security-integration':{},
   './api':{},'./edge-cache':{},'./incident-page':{},'./rca':{},'./rss-feed':{},
   './status-page':{},'./slack-bot':{},'./monitor':{},'./monitor-runner':{},
   './notification-outbox':{},'./scheduled-runs':{},'./schema-gate':{},

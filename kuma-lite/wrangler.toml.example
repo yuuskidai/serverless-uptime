@@ -1,4 +1,4 @@
-name = "kuma-lite"
+name = "helth"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
@@ -151,3 +151,19 @@ database_id = "<your-d1-database-id>"
 # Supplemental Cloudflare/GitHub monitoring was retired on 2026-10-29.
 # No CLOUDFLARE_WITNESS service binding or EXTERNAL_PROBE identity is needed.
 # Historical observation tables remain available through the authenticated GET API.
+
+# Consolidate security collection into this Worker without creating or resetting its storage.
+# Production only: do not use this transfer configuration to create Worker Previews.
+[version_metadata]
+binding = "VERSION_METADATA"
+
+[[durable_objects.bindings]]
+name = "SECURITY_HUB"
+class_name = "SecurityHub"
+
+[[migrations]]
+tag = "security-hub-transfer-20261029"
+transferred_classes = [{ from = "SecurityHub", from_script = "helth-security", to = "SecurityHub" }]
+
+# Persistent secret: CF_ANALYTICS_TOKEN, scoped to Analytics Read on the existing zone.
+# Security administration uses the existing API_TOKEN at /api/security/*.
