@@ -1,6 +1,7 @@
 import type { CheckResult, Env, Monitor } from './types';
 import type { OrderedMonitorState, StateTransition } from './state-transition';
 import { outboxInsertStatement } from './notification-outbox';
+import { isBindingDiagnosticMode, type BindingDiagnosticTimings } from './binding-diagnostic';
 
 // Two 30s probes plus persistence/notification time. No isolate-local lock:
 // every ownership check is serialized by D1 and uses D1's clock.
@@ -286,10 +287,10 @@ export async function commitMonitorResult(
   return writes[0].meta.changes === 1 && writes[1].meta.changes === 1;
 }
 
-export type AttemptPhase = 'claim' | 'offset' | 'state' | 'probe' | 'commit' | 'release';
+export type AttemptPhase = 'claim' | 'offset' | 'dispatch' | 'state' | 'probe' | 'commit' | 'release';
 export type AttemptTimings = Partial<Record<'schema_ms' | 'offset_ms' | 'offset_wait_ms' | 'select_ms' |
   'lease_ms' | 'state_ms' | 'probe_ms' | 'commit_ms' | 'delivery_lag_ms' | 'received_to_claim_ms' |
-  'received_to_probe_ms', number>>;
+  'received_to_probe_ms', number>> & Partial<BindingDiagnosticTimings>;
 export interface AttemptFailure {
   phase: AttemptPhase;
   reason: 'operation_failed' | 'local_precondition';
@@ -313,12 +314,14 @@ async function boundedAttemptAudit(operation: Promise<unknown>, lease: MonitorLe
 }
 
 function timingsJson(timings: AttemptTimings): string {
-  const safe: Record<string, number> = {};
+  const safe: Record<string, number | string | boolean> = {};
   for (const key of ['schema_ms','offset_ms','offset_wait_ms','select_ms','lease_ms','state_ms','probe_ms',
-    'commit_ms','delivery_lag_ms','received_to_claim_ms','received_to_probe_ms'] as const) {
+    'commit_ms','delivery_lag_ms','received_to_claim_ms','received_to_probe_ms','dispatch_wait_ms'] as const) {
     const value = timings[key];
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) safe[key] = Math.min(value, Number.MAX_SAFE_INTEGER);
   }
+  if (isBindingDiagnosticMode(timings.diagnostic_mode)) safe.diagnostic_mode = timings.diagnostic_mode;
+  if (typeof timings.diagnostic_contaminated === 'boolean') safe.diagnostic_contaminated = timings.diagnostic_contaminated;
   return JSON.stringify(safe);
 }
 

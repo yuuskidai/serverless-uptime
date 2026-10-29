@@ -12,6 +12,7 @@ import {
 import { drainNotificationOutbox } from './notification-outbox';
 import { deriveTransition } from './state-transition';
 import type { Env, Monitor } from './types';
+import { bindingResponseCompleted, createBindingDiagnostic, type BindingDiagnostic } from './binding-diagnostic';
 
 const BATCH_SIZE = 40;
 
@@ -38,11 +39,12 @@ export async function runChecks(env: Env, scheduledTime: number, timing: RunTimi
     return Math.floor(slotMs / 60_000) % interval === 0;
   }).sort((left, right) => Number(left.monitor_role !== 'availability' && left.monitor_role != null) -
     Number(right.monitor_role !== 'availability' && right.monitor_role != null));
+  const diagnostic = createBindingDiagnostic(env, due, scheduledTime, timing.receivedAt);
   for (let i = 0; i < due.length; i += BATCH_SIZE) {
     const batch = due.slice(i, i + BATCH_SIZE);
     // A failed diagnostic cannot cancel a public check already in progress.
     const settled = await Promise.allSettled(batch.map((monitor) => checkAndRecord(env, monitor, slotMs,
-      scheduledTime, timing, selectMs)));
+      scheduledTime, timing, selectMs, diagnostic).finally(() => diagnostic?.finish(monitor.id))));
     let publicError: unknown;
     settled.forEach((item, index) => {
       if (item.status !== 'rejected') return;
@@ -56,7 +58,7 @@ export async function runChecks(env: Env, scheduledTime: number, timing: RunTimi
 }
 
 async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, scheduledTime: number,
-  timing: RunTiming, selectMs: number): Promise<void> {
+  timing: RunTiming, selectMs: number, diagnostic?: BindingDiagnostic): Promise<void> {
   const phases = { offset_ms: 0, offset_wait_ms: 0, lease_ms: 0, state_ms: 0, probe_ms: 0, commit_ms: 0 };
   let stage = Date.now();
   const beforeClaim = { schema_ms: timing.schemaMs ?? 0, offset_ms: 0,
@@ -64,9 +66,11 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     delivery_lag_ms: Math.max(0, timing.receivedAt - scheduledTime),
     received_to_claim_ms: Math.max(0, stage - timing.receivedAt) };
   const { lease, attempt } = await claimMonitorSlotDecision(env, monitor.id, slotMs, monitor.config_revision ?? 1,
-    { scheduledTime, receivedAt: timing.receivedAt, runId: timing.runId, timings: beforeClaim });
+    { scheduledTime, receivedAt: timing.receivedAt, runId: timing.runId,
+      timings: { ...beforeClaim, ...diagnostic?.timings(monitor.id) } });
   phases.lease_ms = Math.max(0, Date.now() - stage);
   if (!lease) {
+    diagnostic?.finish(monitor.id);
     console.log({ event: 'monitor_execution_skipped', monitor_id: monitor.id,
       config_revision: monitor.config_revision ?? 1, monitor_role: monitor.monitor_role ?? 'availability',
       scheduled_time: scheduledTime, scheduled_slot: slotMs, received_at: timing.receivedAt,
@@ -87,6 +91,13 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
       await new Promise((resolve) => setTimeout(resolve, phases.offset_wait_ms));
     }
     phases.offset_ms = Math.max(0, Date.now() - stage);
+    // Claim before waiting so a late old slot cannot steal the queued target.
+    // The probe's own clock/deadline starts after the run-local dispatch wait.
+    if (diagnostic) {
+      phase = 'dispatch';
+      stage = Date.now();
+      await diagnostic.wait(monitor.id);
+    }
     phase = 'state';
     stage = Date.now();
     const previous = await readMonitorState(env, monitor.id);
@@ -96,7 +107,9 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     probeStartedAt = ts;
     stage = ts;
     phase = 'probe';
+    diagnostic?.start(monitor.id);
     const result = await performCheck(env, monitor);
+    diagnostic?.finish(monitor.id, bindingResponseCompleted(result.probe_trace_json));
     phases.probe_ms = Math.max(0, Date.now() - stage);
     const inMaintenance = Boolean(result.maintenance && ts >= result.maintenance.from_ms && ts < result.maintenance.to_ms);
     const transition = deriveTransition(monitor, result, previous, ts, slotMs, inMaintenance);
@@ -110,6 +123,7 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
       ...beforeClaim, received_to_probe_ms: Math.max(0, ts - timing.receivedAt), ...phases, committed,
       attempt_id: lease.attemptId ?? lease.token });
   } catch (error) {
+    if (phase === 'probe') diagnostic?.finish(monitor.id, false);
     // A rejected await still consumed time. Keep that duration in the durable
     // release audit, including a deadline that expired without a response.
     const elapsed = Math.max(0, Date.now() - stage);
@@ -126,10 +140,11 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
       ...beforeClaim, ...phases, attempt_id: lease.attemptId ?? lease.token });
     throw error;
   } finally {
+    diagnostic?.finish(monitor.id);
     // Keep claimed_slot as a durable deduplication watermark after release.
     try {
       await releaseMonitorSlot(env, lease,
-        { ...beforeClaim, ...phases,
+        { ...beforeClaim, ...phases, ...diagnostic?.timings(monitor.id),
           received_to_probe_ms: probeStartedAt === null ? undefined : Math.max(0, probeStartedAt - timing.receivedAt) },
         failure ?? lease.auditFailure);
     } catch {

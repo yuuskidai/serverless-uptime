@@ -209,6 +209,59 @@ start a new HTTP latency incident. Existing values and target timeouts are not a
 
 ## Correlation and phases
 
+### Disabled binding-concurrency diagnostic
+
+`src/binding-diagnostic.ts` contains an opt-in experiment for the existing four
+health targets. `BINDING_DIAGNOSTIC_FROM` and `BINDING_DIAGNOSTIC_UNTIL` are both
+`null` by default. Enabling it requires a reviewed source change to two absolute
+ISO timestamps with explicit time zones and a duration no greater than 20 minutes.
+It adds no probes, Cron triggers, migrations, routes, or notification destinations.
+
+The experiment only accepts the unchanged four-target configuration: IDs 5/6
+remain legacy-to-service-binding availability monitors at revision 1; IDs 9/10
+remain public-fetch strict shadows at revision 3. The one-minute interval,
+1000 ms Database ceiling, 10 second attempt deadline, two-observation threshold,
+and existing fallback behavior are checked or preserved. An unexpected target,
+route, condition, or missing binding leaves the existing parallel runner in use.
+
+Relative to the start minute, each four-slot cycle is parallel control,
+Portal-first binding probes, parallel control, then Core-first binding probes.
+Each binding still claims its own lease before its dispatch wait. Only `performCheck` uses
+the run-local ordered tickets; commit, release-audit, and notification
+acknowledgements cannot hold the next ticket. Public shadows remain concurrent.
+The queued target's actual probe start and its attempt deadline occur after the
+dispatch wait. There is no isolate-global mutex or additional ownership lease.
+
+Waiting ends at the earliest of the absolute expiry, handler receipt plus
+25 seconds, or raw scheduled time plus 35 seconds. A late or expired waiter
+resumes the original parallel behavior rather than manufacturing a missing or
+successful observation. The clock is checked again at probe entry, so a delayed
+timer cannot extend the restriction. In-flight probes are not aborted at expiry;
+the next JavaScript continuation removes the restriction. This is not a guarantee
+of execution at an exact wall-clock instant or of completing a slot within a minute.
+
+Only three allowlisted fields are added to `monitor_attempts.timings_json`:
+`diagnostic_mode`, `dispatch_wait_ms`, and `diagnostic_contaminated`. The mode is
+the intended regime, even if a deadline required parallel bypass. Compare only
+complete same-slot cohorts for which every relevant attempt has the expected
+mode and no contamination. A false contamination flag only means no run-local
+lane violation was observed; it does not exclude other invocations, public-fetch
+callees, or unrelated application traffic sharing execution resources.
+An incomplete/failed probe trace also marks contamination because caller
+cancellation does not prove callee termination. A completed HTTP 503 remains
+eligible evidence; the diagnostic does not exclude failures merely for being 503.
+
+In particular, a binding-only negative result does not reject the broader
+concurrent-CPU hypothesis. Public fetches may also contribute interference;
+their placement and thread relationship are not established by this experiment.
+The local readiness model in the runner tests is not production causal evidence.
+
+After expiry, new runs use the original parallel behavior automatically. Restore
+both constants to `null` in a new descendant commit and verify the deployed
+version and natural observations; do not redeploy an older artifact or rerun old
+CI. Shared `kuma-lite/**` build watches may also rebuild the witness: verify its
+version, accepted slots and generation without restarting its Durable Object.
+
 Each attempt, including a fallback, sends a unique UUID in `X-Monitor-Request-ID`.
 The application echoes a validated ASCII `[A-Za-z0-9._:-]{1,64}` ID or generates its own.
 The ID is diagnostic data and conveys no authentication or authorization.
