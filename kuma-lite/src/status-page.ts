@@ -1113,7 +1113,10 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
   const nextSlot = interval === null ? null : nextDueSlot(scheduledAnchor, interval);
   const latestStart = view.latestTs !== null && Number.isSafeInteger(view.latestTs)
     ? formatJstDateTime(view.latestTs) : '未取得';
-  const cadenceText = interval === null ? '検査間隔は未確認' : `検査は${interval / MINUTE_MS}分ごと`;
+  const cadenceText = interval === null ? '間隔未確認' : `${interval / MINUTE_MS}分ごと`;
+  const dbThreshold = view.monitor.db_latency_threshold_ms;
+  const thresholdText = typeof dbThreshold === 'number' && Number.isSafeInteger(dbThreshold) && dbThreshold > 0
+    ? ` · DB警告${dbThreshold}ms` : '';
   const nextSlotText = nextSlot === null ? '検査予定枠は未確認'
     : `検査予定枠 ${formatJstDateTime(nextSlot)}${nextSlot <= now ? '（結果未確認）' : ''}`;
 
@@ -1172,7 +1175,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       </div>
 
       ${reasonLine}
-      ${renderExternalWitness(view.external, view.monitor.db_latency_threshold_ms)}
+      ${renderExternalWitness(view.external)}
 
       <div class="mt-5">
         <div class="bar-row" role="img"
@@ -1198,16 +1201,15 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${latencyText}</div>
         </div>
       </div>
-      <p class="mt-3 text-[10px] leading-relaxed text-slate-400" data-probe-interval-minutes="${interval === null ? '' : interval / MINUTE_MS}"${nextSlot === null ? '' : ` data-next-due-slot="${nextSlot}"`}>
-        最終検査開始 ${escapeHtml(latestStart)} · ${escapeHtml(cadenceText)}<br>
-        ${escapeHtml(nextSlotText)} · 遅配あり。画面更新とは別の予定です。
+      <p class="mt-3 text-[10px] leading-relaxed text-slate-400" title="${escapeAttr(nextSlotText)}" data-probe-interval-minutes="${interval === null ? '' : interval / MINUTE_MS}"${nextSlot === null ? '' : ` data-next-due-slot="${nextSlot}"`}>
+        最終検査 ${escapeHtml(latestStart)} · ${escapeHtml(cadenceText + thresholdText)}
       </p>
     </article>
   `;
 }
 
 /** A separate observation, never a replacement for the primary monitor state. */
-function renderExternalWitness(witness: ExternalWitness | null, primaryDbThreshold?: number | null): string {
+function renderExternalWitness(witness: ExternalWitness | null): string {
   const cloudflare = witness?.source === 'cloudflare_alarm';
   const heading = cloudflare ? '別Worker確認（Cloudflare）' : '外部確認';
   const label = witness?.status === 'ok' ? '正常' : witness?.status === 'degraded' ? '遅延・一部不調'
@@ -1219,15 +1221,10 @@ function renderExternalWitness(witness: ExternalWitness | null, primaryDbThresho
   const url = cloudflare ? (witness?.statusUrl === CLOUDFLARE_WITNESS_STATUS_URL ? CLOUDFLARE_WITNESS_STATUS_URL : null)
     : safeExternalRunUrl(witness?.runUrl ?? null);
   const provenance = url ? ` · <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="underline">確認記録</a>` : '';
-  const cadence = cloudflare ? '約1分ごとの補助確認。同じCloudflare上で動作し、150秒以上古い場合は未確認です。'
-    : '約5分ごとの補助確認。更新が古い場合は未確認です。';
   const threshold = typeof witness?.dbThresholdMs === 'number' && Number.isSafeInteger(witness.dbThresholdMs)
     && witness.dbThresholdMs > 0 ? witness.dbThresholdMs : null;
-  const differentPrimary = typeof primaryDbThreshold === 'number' && Number.isSafeInteger(primaryDbThreshold)
-    && primaryDbThreshold > 0 && primaryDbThreshold !== threshold;
-  const policy = threshold === null ? '' : `DB警告${threshold}ms基準。${differentPrimary
-    ? `主系${primaryDbThreshold}msとは別基準の補助確認です。` : '主系の判定・稼働率とは独立した補助確認です。'}`;
-  return `<p class="mt-2 text-xs text-slate-400 leading-snug">${heading}: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">${escapeHtml(policy)}${cadence}</span></p>`;
+  const policy = threshold === null ? '' : ` · DB警告${threshold}ms`;
+  return `<p class="mt-2 text-xs text-slate-400 leading-snug">${heading}: ${label}${escapeHtml(time + elapsed + policy)}${provenance}</p>`;
 }
 
 function safeExternalRunUrl(value: string | null): string | null {
@@ -1396,11 +1393,11 @@ function renderClientScript(): string {
     const provenance = el.dataset.provenance;
     const sampleTs = Number(el.dataset.sampleTs);
     const evidence = provenance === 'held'
-      ? '予定された非検査分 · 前回の実測結果を継続表示' + (Number.isFinite(sampleTs) ? '（検査開始 ' + formatTime(sampleTs) + '）' : '')
-      : provenance === 'pending' ? '予定の検査を確認中。表示上の待機猶予であり、正常の確認ではありません。'
-      : provenance === 'observed_late' ? '実測 ' + Number(el.dataset.observedCount || 0) + ' 件（遅い検査開始を含む）。遅い開始の結果は予定欠測の補完や継続表示に使いません。' + (Number.isFinite(sampleTs) ? ' 検査開始 ' + formatTime(sampleTs) : '')
+      ? '継続表示' + (Number.isFinite(sampleTs) ? '（前回 ' + formatTime(sampleTs) + '）' : '')
+      : provenance === 'pending' ? '検査結果待ち'
+      : provenance === 'observed_late' ? '遅延開始の実測 ' + Number(el.dataset.observedCount || 0) + ' 件' + (Number.isFinite(sampleTs) ? '（検査開始 ' + formatTime(sampleTs) + '）' : '')
       : provenance === 'observed' ? '実測 ' + Number(el.dataset.observedCount || 0) + ' 件' + (Number.isFinite(sampleTs) ? '（検査開始 ' + formatTime(sampleTs) + '）' : '')
-      : '実測なし。検査予定の欠測を正常として補完しません。';
+      : '未取得（未確認）';
     const isIncident = state === 'down' || state === 'partial';
     tipCard.innerHTML = [
       '<div class="text-slate-200 font-medium tabular-nums">' +

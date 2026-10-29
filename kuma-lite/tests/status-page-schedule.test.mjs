@@ -52,7 +52,7 @@ test('two-minute non-due feet hold only real binary samples without inflating up
   assert.equal(bar(html, BASE + 8 * M).state, 'pending');
   assert.match(html, /50\.00%/);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) n FROM checks').get().n, 2);
-  assert.match(html, /予定された非検査分/);
+  assert.match(html, /継続表示/);
   assert.match(html, /稼働率（実測）/);
 });
 
@@ -133,11 +133,11 @@ test('card shows actual probe start and the outstanding nominal slot without adv
   const f = fixture(t, BASE + 8 * M + 10000); sample(f, 6);
   const before = f.sqlite.prepare('SELECT * FROM monitor_state WHERE monitor_id=1').get();
   const html = await page(f);
-  assert.match(html, /最終検査開始/);
-  assert.match(html, /検査は2分ごと/);
+  assert.match(html, /最終検査/);
+  assert.match(html, /2分ごと/);
   assert.match(html, new RegExp('data-next-due-slot="' + (BASE + 8 * M) + '"'));
   assert.match(html, /（結果未確認）/);
-  assert.match(html, /画面更新とは別の予定/);
+  assert.doesNotMatch(html, /画面更新とは別の予定/);
   assert.deepEqual(f.sqlite.prepare('SELECT * FROM monitor_state WHERE monitor_id=1').get(), before);
   assert.equal(f.sqlite.prepare('SELECT COUNT(*) n FROM checks').get().n, 1);
 });

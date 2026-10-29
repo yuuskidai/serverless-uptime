@@ -167,7 +167,7 @@ test('external confirmation remains supplemental when the primary monitor is dow
   const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
   assert.match(html, /> 停止中/);
   assert.match(html, /外部確認: 正常/);
-  assert.match(html, /約5分ごとの補助確認/);
+  assert.doesNotMatch(html, /約5分ごとの補助確認/);
   assert.match(html, /https:\/\/github\.com\/example\/monitor\/actions\/runs\/123\/attempts\/2/);
   assert.doesNotMatch(html, /private\.example/);
   const { renderStatusBlocks: slack } = loadTs('slack-bot', {
@@ -210,8 +210,8 @@ test('Cloudflare alarm confirmation identifies the shared provider and never sup
     }]]) };
     const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
     const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
-    assert.match(html, /別Worker確認（Cloudflare）: 正常/); assert.match(html, /同じCloudflare上で動作/);
-    assert.match(html, /DB警告1000ms基準/); assert.match(html, /主系1500msとは別基準/);
+    assert.match(html, /別Worker確認（Cloudflare）: 正常/);
+    assert.match(html, /DB警告1000ms/); assert.match(html, /DB警告1500ms/);
     assert.match(html, /0\.00%/);
     assert.match(html, /> 停止中/); assert.doesNotMatch(html, /github\.com|private\.invalid|secret=private/);
     assert.equal(html.includes('>確認記録<'), url === statusUrl);
