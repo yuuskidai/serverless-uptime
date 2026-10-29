@@ -16,7 +16,9 @@ interface Clock {
   setTimeout(callback: () => void, ms: number): ReturnType<typeof setTimeout>;
   clearTimeout(timer: ReturnType<typeof setTimeout>): void;
 }
-const clock: Clock = { now: () => Date.now(), setTimeout: (callback, ms) => setTimeout(callback, ms), clearTimeout };
+// Legacy Workers timers reject a Clock object as their receiver. Keep native
+// global calls inside wrappers so cleanup cannot drop the queued observation.
+const clock: Clock = { now: () => Date.now(), setTimeout: (callback, ms) => setTimeout(callback, ms), clearTimeout: timer => clearTimeout(timer) };
 
 export function isBindingDiagnosticMode(value: unknown): value is BindingDiagnosticMode {
   return value === 'parallel_control' || value === 'portal_first' || value === 'core_first';
@@ -53,6 +55,7 @@ function matchesTarget(env: Env, monitor: Monitor, id: number): boolean {
 /** Dispatch only within this run: never a cross-request lock or ownership lease. */
 export interface BindingDiagnostic {
   wait(monitorId: number): Promise<void>;
+  bypass(): void;
   start(monitorId: number): void;
   finish(monitorId: number, responseCompleted?: boolean): void;
   timings(monitorId: number): BindingDiagnosticTimings;
@@ -74,16 +77,24 @@ export function createBindingDiagnostic(env: Env, monitors: Monitor[], scheduled
   const cycle = (Math.floor(scheduledTime / 60_000) - Math.floor(from / 60_000)) % 4;
   const mode: BindingDiagnosticMode = cycle === 1 ? 'portal_first' : cycle === 3 ? 'core_first' : 'parallel_control';
   const first = mode === 'portal_first' ? 5 : 6, second = first === 5 ? 6 : 5;
-  let firstFinished = false, contaminated = false;
+  let firstFinished = false, contaminated = false, bypassed = false;
   let releaseFirst!: () => void;
   const firstDone = new Promise<void>(resolve => { releaseFirst = resolve; });
   const waits = new Map<number, number>(), active = new Set<number>();
   const deadline = Math.min(until, receivedAt + 25_000, scheduledTime + 35_000);
   const expired = () => time.now() < from || time.now() >= until;
+  const bypass = () => {
+    contaminated = true;
+    bypassed = true;
+    firstFinished = true;
+    releaseFirst();
+  };
   return {
+    bypass,
     async wait(id) {
       if (id !== 5 && id !== 6) return;
       const began = time.now();
+      if (bypassed) { waits.set(id, 0); return; }
       if (expired()) { contaminated = true; return; }
       if (mode !== 'parallel_control' && id === second && !firstFinished) {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -94,7 +105,16 @@ export function createBindingDiagnostic(env: Env, monitors: Monitor[], scheduled
           // Delayed timers cannot extend the restriction. Resume the original
           // parallel behavior instead of dropping a scheduled observation.
           if (!firstFinished || time.now() >= deadline) contaminated = true;
-        } finally { if (timer !== undefined) time.clearTimeout(timer); }
+        } catch {
+          // Diagnostic timer failures must not become a missing health check.
+          // Drop only this run's restriction; preserve the real probe result.
+          bypass();
+        } finally {
+          if (timer !== undefined) {
+            try { time.clearTimeout(timer); }
+            catch { bypass(); }
+          }
+        }
       }
       waits.set(id, Math.max(0, time.now() - began));
     },

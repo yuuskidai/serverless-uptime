@@ -239,6 +239,10 @@ successful observation. The clock is checked again at probe entry, so a delayed
 timer cannot extend the restriction. In-flight probes are not aborted at expiry;
 the next JavaScript continuation removes the restriction. This is not a guarantee
 of execution at an exact wall-clock instant or of completing a slot within a minute.
+Diagnostic timer setup, cleanup, or wait failures also bypass the run-local lane
+and mark contamination. They cannot replace or suppress the real health probe.
+This boundary catches diagnostic work only: state reads, probe failures, and
+commit failures retain the runner's existing error and ownership handling.
 
 Only three allowlisted fields are added to `monitor_attempts.timings_json`:
 `diagnostic_mode`, `dispatch_wait_ms`, and `diagnostic_contaminated`. The mode is

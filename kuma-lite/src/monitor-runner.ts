@@ -96,7 +96,8 @@ async function checkAndRecord(env: Env, monitor: Monitor, slotMs: number, schedu
     if (diagnostic) {
       phase = 'dispatch';
       stage = Date.now();
-      await diagnostic.wait(monitor.id);
+      try { await diagnostic.wait(monitor.id); }
+      catch { diagnostic.bypass(); }
     }
     phase = 'state';
     stage = Date.now();
