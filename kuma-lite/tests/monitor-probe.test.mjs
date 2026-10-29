@@ -1,10 +1,12 @@
 import test, { afterEach, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { performCheck } from '../src/monitor.ts';
+import { loadTs } from './helpers.mjs';
 
 const base={id:1,name:'Synthetic',url:'https://synthetic.invalid/healthz?private=not-logged',description:null,fallback_url:null,service_binding:null,method:'GET',expected_status:200,keyword:null,timeout_ms:1000,interval_minutes:1,enabled:1,retry_threshold:2,latency_threshold_ms:1000,db_latency_threshold_ms:1000,http_latency_threshold_ms:null,created_at:0};
 let events;
-beforeEach(()=>{events=[];mock.method(console,'info',event=>events.push(event));});
+// Load after each test installs its clock/timer mocks, as the former native import did.
+const performCheck = (...args) => loadTs('monitor', { console: { error() {}, warn() {}, log() {}, info(event) { events.push(event); } } }).performCheck(...args);
+beforeEach(()=>{events=[];});
 afterEach(()=>mock.restoreAll());
 const payload=(status='degraded',extra={})=>({status,reason:status==='degraded'?'応答が 800ms を超過 (900ms)':null,components:[{name:'Database',status,latency_ms:900,...(status==='degraded'?{reason:'応答が 800ms を超過 (900ms)'}:{})}],...extra});
 function reply(value,{rtt=0,echo=true}={}){
@@ -23,6 +25,19 @@ test('HTTP RTT never substitutes for database latency and the deprecated field n
   assert.equal(trace.request_id_matched,true);assert.match(trace.request_id,/^[a-f0-9-]{36}$/);
   assert.equal(trace.transport,'public_fetch');
   assert.equal(JSON.stringify(events).includes('private=not-logged'),false);
+});
+test('stored probe trace snapshots its bounded interval before an in-flight settings object changes',async()=>{
+  const monitor={...base,interval_minutes:2};
+  mock.method(globalThis,'fetch',async()=>{monitor.interval_minutes=5;return Response.json(payload('ok'));});
+  const result=await performCheck({},monitor);
+  assert.equal(JSON.parse(result.probe_trace_json)[0].interval_minutes,2);
+  assert.equal(result.status,'up');
+});
+test('invalid interval configuration is recorded as unknown without changing probe health',async()=>{
+  reply(payload('ok'));
+  const result=await performCheck({}, {...base,interval_minutes:61});
+  assert.equal(JSON.parse(result.probe_trace_json)[0].interval_minutes,null);
+  assert.equal(result.status,'up');
 });
 test('explicit DB null disables the migrated override even while old latency field is populated',async()=>{
   reply(payload());const result=await performCheck({}, {...base,db_latency_threshold_ms:null});
@@ -58,11 +73,12 @@ test('non-DB degradation and unknown overall degradation remain degraded',async(
 test('fallback uses a distinct attempt ID and remains degraded, with honest binding transport',async()=>{
   const ids=[];let calls=0;
   const binding={fetch:async(_url,init)=>{ids.push(init.headers['X-Monitor-Request-ID']);if(++calls===1)throw Error('synthetic outage');return new Response('Site alive',{headers:{'X-Monitor-Request-ID':ids.at(-1)}});}};
-  const result=await performCheck({CORE_OS:binding},{...base,service_binding:'CORE_OS',fallback_url:'https://synthetic.invalid/'});
+  const result=await performCheck({CORE_OS:binding},{...base,interval_minutes:2,service_binding:'CORE_OS',fallback_url:'https://synthetic.invalid/'});
   assert.equal(result.status,'up');assert.equal(result.healthz_status,'degraded');assert.equal(result.used_fallback,true);
   const traces=JSON.parse(result.probe_trace_json);assert.equal(traces.length,2);assert.notEqual(ids[0],ids[1]);
   assert.equal(traces[0].failure_phase,'headers');assert.equal(traces[1].request_id_matched,true);
   assert.equal(traces.every(x=>x.transport==='service_binding'),true);
+  assert.equal(traces.every(x=>x.interval_minutes===2),true);
 });
 test('invalid or mismatched echoed IDs are diagnostic only and never change health',async()=>{
   mock.method(globalThis,'fetch',async()=>Response.json(payload('ok'),{headers:{'X-Monitor-Request-ID':'bad header with spaces'}}));

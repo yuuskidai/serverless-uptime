@@ -461,6 +461,10 @@ RSS リーダーは `<head>` の `<link rel="alternate" type="application/rss+xm
 | `availability_since_ms` | number / null | サーバー管理 | 公開HTTPS監視へ切り替えた時刻。過去の内部監視を公開HTTPSの実績として集計しない。APIからの指定不可 |
 
 経路変更は進行中の障害や有効な実行leaseがある場合に409を返します。設定変更・欠測を跨ぐ観測は連続失敗として数えません。
+新しい検査は `probe_trace_json` の各traceに実行時の `interval_minutes`（整数1〜60、設定不正時はnull）を保存します。
+履歴の連続判定はこのsnapshotを優先し、無効・不一致のsnapshotは間隔不明として扱います。
+snapshotのない旧記録は、2026-10-29の頻度変更直前の表示解釈を保持するため、ID5/6のrevision1以下とID9/10のrevision3以下を1分で固定します。これは各旧revision本来の設定がすべて1分だったという主張ではありません。
+この4本の新しいrevisionは明示revisionが現在設定と一致するときだけ現在の間隔へfallbackし、それ以外は間隔不明です。対象外monitorのsnapshotなし旧履歴は、それぞれのboundedな現在間隔を使う従来の表示解釈を保持します。これは原設定の真値や全monitor一律1分を意味しません。未検査時間を成功記録として追加しません。
 監視自身の `/healthz` はプロセスの死活確認、`/readyz` は公開監視データの鮮度確認です。
 公開チェックが欠測・古い場合は `/readyz` が503を返し、公開画面も現在の状態を「未確認」と表示します。
 設定・段階切替・ロールバックの詳細は [監視契約](docs/health-monitoring-contract.md) を参照してください。

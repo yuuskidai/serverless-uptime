@@ -1,6 +1,7 @@
 import type { CheckRow, Env, Monitor } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
+import { resolveCheckIntervalMs } from './check-schedule';
 
 const TIMEZONE = 'Asia/Tokyo';
 /** How far back to look when synthesising the incident timeline. */
@@ -60,9 +61,9 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
     type FeedRow = Pick<
       CheckRow,
       'monitor_id' | 'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
-    > & { scheduled_slot: number | null; config_revision: number | null };
+    > & { scheduled_slot: number | null; config_revision: number | null; probe_trace_json: string | null };
     const checksResult = await db.prepare(
-      `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance, scheduled_slot, config_revision
+      `SELECT monitor_id, ts, status, status_code, error, healthz_reason, in_maintenance, scheduled_slot, config_revision, probe_trace_json
          FROM checks
         WHERE ts >= ? AND monitor_id IN (${placeholders}) AND ${availabilityHistorySql()}
         ORDER BY monitor_id ASC, ts ASC`,
@@ -119,7 +120,7 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
 type IncidentCheck = Pick<
   CheckRow,
   'ts' | 'status' | 'status_code' | 'error' | 'healthz_reason' | 'in_maintenance'
-> & { scheduled_slot: number | null; config_revision: number | null };
+> & { scheduled_slot: number | null; config_revision: number | null; probe_trace_json?: string | null };
 
 /**
  * Walk per-monitor checks chronologically and emit one incident per
@@ -140,14 +141,18 @@ function deriveIncidents(monitor: Monitor, checks: IncidentCheck[]): Incident[] 
   let latestReason: string | null = null;
   let previousSlot: number | null = null;
   let previousRevision: number | null = null;
+  let previousInterval: number | null = null;
   let streakStartedAt: number | null = null;
 
   for (const c of checks) {
     const slot = c.scheduled_slot ?? Math.floor(c.ts / 60_000) * 60_000;
     const revision = c.config_revision ?? 1;
-    if (previousSlot !== null && (slot - previousSlot !== Math.max(1, monitor.interval_minutes ?? 1) * 60_000 || revision !== previousRevision)) consecFails = 0;
+    // A changed current interval must not join or split failures from an older schedule.
+    const intervalMs = resolveCheckIntervalMs(monitor, c);
+    if (previousSlot !== null && (intervalMs === null || intervalMs !== previousInterval || slot - previousSlot !== intervalMs || revision !== previousRevision)) consecFails = 0;
     previousSlot = slot;
     previousRevision = revision;
+    previousInterval = intervalMs;
     // Maintenance windows aren't incidents and shouldn't fire RSS items
     // (per spec §2 — "DOWN 通知抑止" extends to the public feed).
     if (c.in_maintenance) {

@@ -340,6 +340,43 @@ App logs use `event: "health_probe"` and the same `request_id`. Their private ph
 may be joined only to that exact ID and mapped Worker. The public health response does not expose it.
 A service binding is not an independent regional/public-HTTP vantage point.
 
+## Operator-approved cadence change, 2026-10-29
+
+The approved policy for availability IDs 5/6 and shadow IDs 9/10 is a two-minute
+interval and a 1500 ms Database warning threshold. Attempt timeout remains
+10 seconds, retry threshold remains two actual observations, and routes, roles,
+fallbacks and availability history boundaries stay unchanged. The separate
+witness keeps its existing one-minute/1000 ms policy. The earlier diagnostic's
+one-minute/revision guards above describe that completed experiment, not this
+new policy; the diagnostic remains inactive.
+
+Deploy the history-aware code before changing settings. The reviewed statements
+in `ops/20261029-monitor-cadence-apply.sql` and its restore counterpart are
+manual operations for **kuma-lite-db only**, not migrations or build steps.
+They update all four configurations or none, require expected revisions and idle
+probe/notification ownership, and never change check rows, incidents or leases.
+Apply advances revisions 1 to 2 and 3 to 4; restore advances them again rather
+than putting old revisions back. Both DB threshold fields stay synchronized.
+
+The 60-minute timeline holds a previous real result only over a planned non-due
+minute. These displayed minutes add no checks, latency measurements or retry
+counts. Missing due observations remain distinct, with a 120-second display
+grace for a currently unobserved due slot. A probe start later than that grace
+is displayed once at its actual start minute, without filling its old due slot.
+This uses probe-start timestamps; it does not reconstruct response/commit times.
+Badges retain their existing freshness rule of three intervals (six minutes at
+two-minute cadence). Cards show actual probe start separately from nominal
+inspection slots and the page refresh clock. Uptime remains the real-observation
+success fraction; held minutes do not turn archived count summaries into a
+time-weighted availability claim.
+
+New checks snapshot the execution-time interval in their existing trace JSON.
+The shared historical resolver preserves the pre-change interpretation of the
+four targets' old revisions for daily bars, cleanup summaries and RSS. Restore
+settings with the history-aware code retained. A reduced scheduled request count
+or a historical downsampling result does not establish improved latency or
+resolution of application-generated 503s.
+
 ## State and notification meaning
 
 `DOWN -> DEGRADED` means **response restored, degradation continues**. It is a yellow partial

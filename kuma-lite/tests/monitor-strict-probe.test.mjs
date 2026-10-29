@@ -1,6 +1,7 @@
 import test, { afterEach, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { performCheck } from '../src/monitor.ts';
+import { loadTs } from './helpers.mjs';
+const { performCheck } = loadTs('monitor');
 
 const base = {
   id: 1, name: 'Synthetic readiness', url: 'https://synthetic.invalid/healthz',

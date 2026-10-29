@@ -100,3 +100,21 @@ for (const { name, rows, expected, interval = 1 } of streakCases) test(`daily do
     assert.equal(summary.down_streak, expected);
   } finally { context.close(); }
 });
+
+test('daily summary preserves the pre-cutover schedule and uses new interval snapshots', async () => {
+  mock.method(Date, 'now', () => CUTOVER_DAY + 10 * DAY);
+  const context = sqliteEnv();
+  context.env.RETENTION_DAYS = '7';
+  try {
+    context.sqlite.prepare("INSERT INTO monitors(id,name,url,created_at,config_revision,interval_minutes) VALUES (5,'Synthetic','https://example.invalid',0,2,2)").run();
+    const insert = context.sqlite.prepare("INSERT INTO checks(monitor_id,status,ts,scheduled_slot,config_revision,probe_trace_json) VALUES (5,'down',?,?,?,?)");
+    for (const [offset,revision,trace] of [[0,1,null],[60000,1,null],[120000,1,null],
+      [240000,2,'[{"interval_minutes":2}]'],[360000,2,'[{"interval_minutes":2}]']]) {
+      insert.run(CUTOVER_DAY+offset,CUTOVER_DAY+offset,revision,trace);
+    }
+    await cleanupOldChecks(context.env);
+    const summary=context.sqlite.prepare('SELECT down_streak,downs FROM daily_summary WHERE monitor_id=5 AND day_ms=?').get(CUTOVER_DAY);
+    assert.equal(summary.down_streak,3);
+    assert.equal(summary.downs,5);
+  } finally { context.close(); }
+});

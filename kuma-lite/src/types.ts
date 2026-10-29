@@ -189,6 +189,8 @@ export interface CheckResult {
 
 /** A probe measures one transport path; a service binding is not an independent regional probe. */
 export interface ProbeTrace {
+  /** Execution-time interval 1..60; null is invalid configuration, absent on older records. */
+  interval_minutes?: number | null;
   attempt: 'primary' | 'fallback';
   transport: 'service_binding' | 'public_fetch';
   request_id: string;

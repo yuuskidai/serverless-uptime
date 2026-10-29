@@ -2,6 +2,7 @@ import type {
   CheckResult, ComponentHealth, Env, HealthzPayload, HealthzStatus,
   MaintenanceWindow, Monitor, ProbeTrace,
 } from './types';
+import { historicalIntervalSql, validIntervalMinutes } from './check-schedule';
 
 type UntracedResult = Omit<CheckResult, 'probe_trace_json'>;
 type ProbeFetcher = Pick<Fetcher, 'fetch'>;
@@ -20,8 +21,11 @@ export async function performCheck(env: Env, monitor: Monitor): Promise<CheckRes
     console.info({ event: 'monitor_probe', monitor_id: monitor.id, ...result.trace });
     return result;
   };
+  const interval = validIntervalMinutes(monitor.interval_minutes);
   const finish = (result: UntracedResult): CheckResult => ({
-    ...applyHttpThreshold(result, monitor), probe_trace_json: JSON.stringify(traces),
+    // Current settings cannot describe old checks after a revision; persist this probe's bounded schedule.
+    ...applyHttpThreshold(result, monitor), probe_trace_json: JSON.stringify(traces.map(trace =>
+      ({ ...trace, interval_minutes: interval }))),
   });
   const primary = await run('primary', monitor.url);
   if (primary.parsedHealthz) return finish(resultFromHealthz(monitor, primary));
@@ -399,7 +403,7 @@ export async function cleanupOldChecks(env: Env): Promise<void> {
               CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
               COALESCE(scheduled_slot, (ts / 60000) * 60000) AS slot_ms,
               COALESCE(config_revision, 1) AS revision,
-              MAX(1, COALESCE((SELECT interval_minutes FROM monitors WHERE id = checks.monitor_id), 1)) * 60000 AS interval_ms,
+              ${historicalIntervalSql()} AS interval_ms,
               ts
          FROM checks
         WHERE ts < ?
@@ -408,14 +412,15 @@ export async function cleanupOldChecks(env: Env): Promise<void> {
        SELECT *,
               LAG(is_down) OVER observation_order AS previous_down,
               LAG(slot_ms) OVER observation_order AS previous_slot,
-              LAG(revision) OVER observation_order AS previous_revision
+              LAG(revision) OVER observation_order AS previous_revision,
+              LAG(interval_ms) OVER observation_order AS previous_interval
          FROM days
        WINDOW observation_order AS (PARTITION BY monitor_id, day_ms ORDER BY ts, id)
      ),
      islands AS (
        SELECT monitor_id, day_ms, is_down,
               SUM(CASE WHEN is_down = 1 AND previous_down = 1 AND revision = previous_revision
-                            AND slot_ms - previous_slot = interval_ms THEN 0 ELSE 1 END)
+                            AND interval_ms = previous_interval AND slot_ms - previous_slot = interval_ms THEN 0 ELSE 1 END)
                 OVER (PARTITION BY monitor_id, day_ms ORDER BY ts, id) AS island_id
          FROM ordered
      ),

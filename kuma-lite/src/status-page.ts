@@ -9,12 +9,18 @@ import { classify, KIND_HEADLINE } from './kinds';
 import { publicFacingUrl } from './url-display';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql, availabilitySince } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
+import { historicalIntervalSql, isDueSlot, nextDueSlot, resolveCheckIntervalMs } from './check-schedule';
 import { getExternalSummaries, CLOUDFLARE_WITNESS_STATUS_URL, type ExternalWitness } from './external-observations';
 
 const TIMEZONE = 'Asia/Tokyo';
-// Buffer between the cron tick (every minute at :00) and our reload, so the
-// new check has time to fetch + write into D1 before we pull fresh data.
+// Screen-refresh cadence, not a promise that every monitor is checked each
+// minute or that its current due result has already been committed.
 const REFRESH_BUFFER_MS = 5 * 1000;
+const MINUTE_MS = 60_000;
+// Display grace, not a scheduling guarantee: current probes normally start near
+// :57, then need their timeout/fallback and commit allowance. Only an unobserved
+// due bucket can be pending; this must never extend an older healthy sample.
+const PENDING_SLOT_GRACE_MS = 120_000;
 
 type Scale = '60m' | '12h' | '24h' | '7d' | '30d';
 
@@ -71,7 +77,7 @@ function computeNextRefreshMs(now: number): number {
  * declared maintenance window, so calendar bars communicate "expected
  * downtime" instead of "incident".
  */
-type BucketState = 'up' | 'down' | 'partial' | 'maintenance' | 'none';
+type BucketState = 'up' | 'down' | 'partial' | 'maintenance' | 'none' | 'pending';
 
 /**
  * Effective state shown on the per-monitor badge and the global header.
@@ -120,6 +126,19 @@ interface BucketView {
    * categorised wording instead.
    */
   sampleLabel: string | null;
+  provenance: 'observed' | 'observed_late' | 'held' | 'missing' | 'pending';
+  sampleTs: number | null;
+  observedCount: number;
+}
+
+interface ScheduleRow {
+  monitor_id: number;
+  ts: number;
+  scheduled_slot: number | null;
+  config_revision: number | null;
+  probe_trace_json: string | null;
+  status: 'up' | 'down';
+  in_maintenance: number;
 }
 
 interface MaintenanceView {
@@ -137,6 +156,7 @@ interface MonitorView {
   uptime: number | null;
   latestLatency: number | null;
   latestTs: number | null;
+  latestSlot: number | null;
   buckets: BucketView[];
   /** Latest healthz_reason captured from the most recent check. */
   latestReason: string | null;
@@ -156,13 +176,13 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const bucketMs = Math.floor(windowMs / bucketCount);
   // For the 30-day scale we anchor the window to UTC midnight so the
   // 30 daily buckets line up exactly with `daily_summary.day_ms`
-  // entries (one row per past day, plus a raw scan for today). Other
-  // scales keep the rolling-from-now anchor that the bar visualisation
-  // was originally designed around.
+  // entries. The 60m view uses minute feet (including the current partial
+  // minute), so due/non-due slots cannot move when the page is reloaded.
   const useDailySummary = scale === '30d';
   const todayMidnight = Math.floor(now / 86_400_000) * 86_400_000;
   const sinceWindow = useDailySummary
     ? todayMidnight - (bucketCount - 1) * 86_400_000
+    : scale === '60m' ? Math.floor(now / MINUTE_MS) * MINUTE_MS - (bucketCount - 1) * MINUTE_MS
     : now - windowMs;
 
   const hidden = parseHidden(env.HIDDEN_MONITOR_IDS);
@@ -208,14 +228,14 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     ts: number;
   };
 
-  // Fan out the four monitor-id-dependent reads in parallel. They are
+  // Fan out the independent monitor-id-dependent reads in parallel. They are
   // independent of each other and previously ran sequentially, stacking
   // four D1 round-trips on the hot path. Running them concurrently
   // collapses that to a single round-trip's worth of wall time.
   // The error-sample query is gated by scale (see SAMPLE_ERROR_MAX_SCALE_MS
   // for why); when we skip it we resolve to null in place.
   const dbStartedAt = Date.now();
-  const [statesResult, latestResult, aggregateResult, errResult, externalWitnesses] = await Promise.all([
+  const [statesResult, latestResult, aggregateResult, errResult, externalWitnesses, scheduleResult] = await Promise.all([
     db.prepare(`SELECT * FROM monitor_state WHERE monitor_id IN (${placeholders})`)
       .bind(...ids)
       .all<MonitorState>(),
@@ -233,7 +253,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       .all<LatestRow>(),
     useDailySummary
       ? loadDailySummaryAggregate(db, ids, placeholders, sinceWindow, todayMidnight, bucketCount)
-      : db
+      : scale === '60m' ? Promise.resolve({ results: [] as BucketRow[] }) : db
           .prepare(
             `SELECT monitor_id,
                     CAST((ts - ?) / ? AS INTEGER) AS bucket_idx,
@@ -259,6 +279,14 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
           .all<ErrRow>()
       : Promise.resolve(null),
     getExternalSummaries(env, now),
+    scale === '60m' ? db.prepare(
+      `SELECT monitor_id, ts, scheduled_slot, config_revision, probe_trace_json, status, in_maintenance
+         FROM checks WHERE monitor_id IN (${placeholders}) AND ${availabilityHistorySql()}
+           AND (COALESCE(scheduled_slot, CAST(ts / 60000 AS INTEGER) * 60000) >= ? OR ts >= ?)
+           AND COALESCE(scheduled_slot, CAST(ts / 60000 AS INTEGER) * 60000) <= ? AND ts <= ?
+         ORDER BY monitor_id, COALESCE(scheduled_slot, CAST(ts / 60000 AS INTEGER) * 60000), ts, id`,
+    ).bind(...ids, sinceWindow - 60 * MINUTE_MS, sinceWindow, Math.floor(now / MINUTE_MS) * MINUTE_MS, now).all<ScheduleRow>()
+      : Promise.resolve({ results: [] as ScheduleRow[] }),
   ]);
 
   const stateById = new Map<number, MonitorState>();
@@ -287,7 +315,10 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   }
 
   const bucketsByMonitor = new Map<number, Map<number, BucketRow>>();
-  for (const row of aggregateResult.results ?? []) {
+  const aggregateRows = scale === '60m'
+    ? minuteObservationAggregates(scheduleResult.results ?? [], sinceWindow)
+    : aggregateResult.results ?? [];
+  for (const row of aggregateRows) {
     let m = bucketsByMonitor.get(row.monitor_id);
     if (!m) {
       m = new Map();
@@ -332,6 +363,9 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       bucketCount,
       now,
     );
+    if (scale === '60m') applyMinuteSchedule(buckets, monitor,
+      (scheduleResult.results ?? []).filter(row => row.monitor_id === monitor.id), now);
+    else markPendingBucket(buckets, monitor, now);
     let totalChecks = 0;
     let totalUps = 0;
     for (const b of buckets) {
@@ -349,6 +383,8 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
       uptime: totalChecks > 0 ? (totalUps / totalChecks) * 100 : null,
       latestLatency: freshness === 'fresh' ? latest?.latency_ms ?? null : null,
       latestTs: latest?.ts ?? null,
+      latestSlot: latest && (latest.config_revision ?? 1) === (monitor.config_revision ?? 1)
+        ? latest.scheduled_slot ?? Math.floor(latest.ts / MINUTE_MS) * MINUTE_MS : null,
       buckets,
       latestReason: freshness !== 'fresh' ? '監視情報が古いか、まだ取得されていません。現在の稼働状態は未確認です。' : latest?.healthz_reason ?? null,
       latestComponents: freshness === 'fresh' ? parseComponents(latest?.healthz_components ?? null) : [],
@@ -430,19 +466,22 @@ async function loadDailySummaryAggregate(
                   CASE WHEN status = 'down' AND in_maintenance = 0 THEN 1 ELSE 0 END AS is_down,
                   COALESCE(scheduled_slot, CAST(ts / 60000 AS INTEGER) * 60000) AS slot,
                   COALESCE(config_revision, 1) AS revision,
-                  COALESCE((SELECT interval_minutes FROM monitors WHERE id = checks.monitor_id), 1) * 60000 AS interval_ms,
+                  ${historicalIntervalSql('checks')} AS interval_ms,
                   ts, id
              FROM checks
             WHERE ${scope} AND ${availabilityHistorySql()}
          ),
          sequence AS (
            SELECT *, LAG(slot) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_slot,
-                     LAG(revision) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_revision
+                     LAG(revision) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_revision,
+                     LAG(interval_ms) OVER (PARTITION BY monitor_id ORDER BY ts, id) AS previous_interval_ms
              FROM today
          ),
          islands AS (
            SELECT monitor_id, is_down,
-                  SUM(CASE WHEN is_down = 0 OR previous_slot IS NULL OR slot - previous_slot != interval_ms
+                  SUM(CASE WHEN is_down = 0 OR previous_slot IS NULL OR interval_ms IS NULL
+                                   OR previous_interval_ms IS NULL OR interval_ms != previous_interval_ms
+                                   OR slot - previous_slot != interval_ms
                                   OR revision != previous_revision THEN 1 ELSE 0 END)
                     OVER (PARTITION BY monitor_id ORDER BY ts, id) AS island_id
              FROM sequence
@@ -601,9 +640,104 @@ function buildBuckets(
       upCount: row?.ups ?? 0,
       downCount: row?.downs ?? 0,
       sampleLabel: sampleLabels.get(`${monitorId}:${i}`) ?? null,
+      provenance: row && row.total > 0 ? 'observed' : 'missing',
+      sampleTs: null,
+      observedCount: row?.total ?? 0,
     });
   }
   return out;
+}
+
+function observationSlot(row: ScheduleRow): number {
+  return row.scheduled_slot ?? Math.floor(row.ts / MINUTE_MS) * MINUTE_MS;
+}
+
+function lateProbeStart(row: ScheduleRow): boolean {
+  // checks.ts is probe start, not response/commit completion. It can identify
+  // late starts only; no elapsed arithmetic invents an unavailable finish time.
+  return row.ts - observationSlot(row) >= PENDING_SLOT_GRACE_MS;
+}
+
+function observationDisplaySlot(row: ScheduleRow): number {
+  return lateProbeStart(row) ? Math.floor(row.ts / MINUTE_MS) * MINUTE_MS : observationSlot(row);
+}
+
+/** Real observations only: held minutes never enter these counts or uptime. */
+function minuteObservationAggregates(rows: ScheduleRow[], since: number): BucketRow[] {
+  const groups = new Map<string, BucketRow>();
+  for (const row of rows) {
+    const index = Math.floor((observationDisplaySlot(row) - since) / MINUTE_MS);
+    if (index < 0 || index >= 60) continue;
+    const key = `${row.monitor_id}:${index}`;
+    const bucket = groups.get(key) ?? { monitor_id: row.monitor_id, bucket_idx: index,
+      total: 0, ups: 0, downs: 0, maints: 0 };
+    bucket.total++;
+    if (row.in_maintenance) bucket.maints++;
+    else if (row.status === 'up') bucket.ups++;
+    else if (row.status === 'down') bucket.downs++;
+    groups.set(key, bucket);
+  }
+  return [...groups.values()];
+}
+
+function displayIntervalMs(monitor: Monitor): number | null {
+  const minutes = monitor.interval_minutes;
+  return Number.isSafeInteger(minutes) && minutes >= 1 && minutes <= 60 ? minutes * MINUTE_MS : null;
+}
+
+/** Do not turn an in-progress due slot into a missing observation early. */
+function markPendingBucket(buckets: BucketView[], monitor: Monitor, now: number): void {
+  const interval = displayIntervalMs(monitor);
+  if (interval === null) return;
+  for (const bucket of buckets) {
+    if (bucket.state !== 'none' || bucket.toMs <= bucket.fromMs) continue;
+    const due = nextDueSlot(Math.ceil(bucket.fromMs / MINUTE_MS) * MINUTE_MS, interval);
+    if (due < bucket.toMs && due <= now && now - due < PENDING_SLOT_GRACE_MS) {
+      bucket.state = 'pending'; bucket.provenance = 'pending';
+    }
+  }
+}
+
+function applyMinuteSchedule(buckets: BucketView[], monitor: Monitor, input: ScheduleRow[], now: number): void {
+  const rows = input.filter(row => !lateProbeStart(row))
+    .sort((a, b) => observationSlot(a) - observationSlot(b) || a.ts - b.ts);
+  const displayed = new Map<number, ScheduleRow[]>();
+  for (const row of input) {
+    const slot = observationDisplaySlot(row), group = displayed.get(slot) ?? [];
+    group.push(row); displayed.set(slot, group);
+  }
+  const bySlot = new Map<number, ScheduleRow[]>();
+  for (const row of rows) {
+    const slot = observationSlot(row), group = bySlot.get(slot) ?? [];
+    group.push(row); bySlot.set(slot, group);
+  }
+  for (const bucket of buckets) {
+    const slot = bucket.fromMs;
+    const observed = displayed.get(slot);
+    if (observed?.length) {
+      bucket.sampleTs = Math.max(...observed.map(row => row.ts));
+      if (observed.some(lateProbeStart)) bucket.provenance = 'observed_late';
+      continue;
+    }
+    const anchor = rows.filter(row => observationSlot(row) < slot).at(-1);
+    if (!anchor || bySlot.get(observationSlot(anchor))?.length !== 1) continue;
+    const interval = resolveCheckIntervalMs(monitor, anchor);
+    if (interval === null || !isDueSlot(observationSlot(anchor), interval)) continue;
+    const next = rows.find(row => observationSlot(row) > observationSlot(anchor));
+    const revision = anchor.config_revision ?? 1;
+    // A revision boundary's exact time is unavailable. Never borrow a late old
+    // revision into the new configuration; historical same-revision pairs can
+    // still establish their own planned interval without using today's interval.
+    const sameSeries = next
+      ? (next.config_revision ?? 1) === revision && resolveCheckIntervalMs(monitor, next) === interval
+      : revision === (monitor.config_revision ?? 1);
+    const nextDue = nextDueSlot(observationSlot(anchor) + MINUTE_MS, interval);
+    if (sameSeries && slot < nextDue && !isDueSlot(slot, interval)) {
+      bucket.state = anchor.in_maintenance ? 'maintenance' : anchor.status;
+      bucket.provenance = 'held'; bucket.sampleTs = anchor.ts;
+    }
+  }
+  markPendingBucket(buckets, monitor, now);
 }
 
 function parseHidden(input: string | undefined): Set<number> {
@@ -724,6 +858,8 @@ function renderShell(title: string, body: string, now: number, scale: Scale): st
     .bar-partial     { background: linear-gradient(180deg, #fbbf24 0%, #d97706 100%); }
     .bar-maintenance { background: linear-gradient(180deg, #60a5fa 0%, #2563eb 100%); }
     .bar-none        { background: rgba(100, 116, 139, 0.18); }
+    .bar-pending     { background: repeating-linear-gradient(135deg, #475569, #475569 3px, #64748b 3px, #64748b 6px); }
+    .bar[data-provenance="held"] { opacity: .65; border-top: 1px dashed rgba(255,255,255,.65); }
     select.scale-select {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid rgba(148, 163, 184, 0.18);
@@ -971,6 +1107,15 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
   const uptimeText = view.uptime === null ? '—' : `${view.uptime.toFixed(2)}%`;
   const latencyText =
     view.latestLatency === null ? '—' : `${view.latestLatency} ミリ秒`;
+  const interval = displayIntervalMs(view.monitor);
+  const scheduledAnchor = view.latestSlot !== null && Number.isSafeInteger(view.latestSlot)
+    && view.latestSlot % MINUTE_MS === 0 ? view.latestSlot + MINUTE_MS : Math.floor(now / MINUTE_MS) * MINUTE_MS;
+  const nextSlot = interval === null ? null : nextDueSlot(scheduledAnchor, interval);
+  const latestStart = view.latestTs !== null && Number.isSafeInteger(view.latestTs)
+    ? formatJstDateTime(view.latestTs) : '未取得';
+  const cadenceText = interval === null ? '検査間隔は未確認' : `検査は${interval / MINUTE_MS}分ごと`;
+  const nextSlotText = nextSlot === null ? '検査予定枠は未確認'
+    : `検査予定枠 ${formatJstDateTime(nextSlot)}${nextSlot <= now ? '（結果未確認）' : ''}`;
 
   const monitorId = view.monitor.id;
   const bars = view.buckets
@@ -978,7 +1123,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       const isClickable = b.state === 'down' || b.state === 'partial';
       const tag = isClickable ? 'a' : 'span';
       const href = isClickable
-        ? ` href="/incident?monitor_id=${monitorId}&from=${b.fromMs}&to=${b.toMs}"`
+        ? ` href="/incident?monitor_id=${monitorId}&from=${b.provenance === 'held' && b.sampleTs !== null ? Math.min(b.sampleTs, b.fromMs) : b.fromMs}&to=${b.sampleTs === null ? b.toMs : Math.max(b.toMs, b.sampleTs + 1)}"`
         : '';
       const role = isClickable
         ? ' role="button" tabindex="0"'
@@ -989,7 +1134,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       const cls = `bar bar-${b.state}${isClickable ? ' is-clickable' : ''}`;
       return `<${tag}${href} class="${cls}"${role}
         data-from="${b.fromMs}" data-to="${b.toMs}"
-        data-state="${b.state}"${sampleAttr}></${tag}>`;
+        data-state="${b.state}" data-provenance="${b.provenance}" data-observed-count="${b.observedCount}"${b.sampleTs === null ? '' : ` data-sample-ts="${b.sampleTs}"`}${sampleAttr}></${tag}>`;
     })
     .join('');
 
@@ -1045,7 +1190,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 
       <div class="mt-4 grid grid-cols-2 gap-3 text-xs">
         <div>
-          <div class="text-slate-500 uppercase tracking-wider text-[10px]">稼働率 · ${escapeHtml(config.short)}</div>
+          <div class="text-slate-500 uppercase tracking-wider text-[10px]" title="実測チェックの成功割合。継続表示の分数は含みません。">稼働率（実測） · ${escapeHtml(config.short)}</div>
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${uptimeText}</div>
         </div>
         <div>
@@ -1053,6 +1198,10 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
           <div class="text-slate-100 font-medium mt-1 tabular-nums">${latencyText}</div>
         </div>
       </div>
+      <p class="mt-3 text-[10px] leading-relaxed text-slate-400" data-probe-interval-minutes="${interval === null ? '' : interval / MINUTE_MS}"${nextSlot === null ? '' : ` data-next-due-slot="${nextSlot}"`}>
+        最終検査開始 ${escapeHtml(latestStart)} · ${escapeHtml(cadenceText)}<br>
+        ${escapeHtml(nextSlotText)} · 遅配あり。画面更新とは別の予定です。
+      </p>
     </article>
   `;
 }
@@ -1207,6 +1356,7 @@ function renderClientScript(): string {
     partial: '一部停止',
     maintenance: 'メンテナンス',
     none: 'データなし',
+    pending: '確認中',
   };
   const STATE_COLOR = {
     up: 'text-green-300',
@@ -1214,6 +1364,7 @@ function renderClientScript(): string {
     partial: 'text-amber-300',
     maintenance: 'text-blue-300',
     none: 'text-slate-400',
+    pending: 'text-slate-300',
   };
   function formatBucketRange(fromTs, toTs) {
     const span = toTs - fromTs;
@@ -1236,11 +1387,20 @@ function renderClientScript(): string {
     const fromTs = Number(el.dataset.from);
     const toTs = Number(el.dataset.to);
     const label = el.dataset.label; // pre-classified human-readable headline
+    const provenance = el.dataset.provenance;
+    const sampleTs = Number(el.dataset.sampleTs);
+    const evidence = provenance === 'held'
+      ? '予定された非検査分 · 前回の実測結果を継続表示' + (Number.isFinite(sampleTs) ? '（検査開始 ' + formatTime(sampleTs) + '）' : '')
+      : provenance === 'pending' ? '予定の検査を確認中。表示上の待機猶予であり、正常の確認ではありません。'
+      : provenance === 'observed_late' ? '実測 ' + Number(el.dataset.observedCount || 0) + ' 件（遅い検査開始を含む）。遅い開始の結果は予定欠測の補完や継続表示に使いません。' + (Number.isFinite(sampleTs) ? ' 検査開始 ' + formatTime(sampleTs) : '')
+      : provenance === 'observed' ? '実測 ' + Number(el.dataset.observedCount || 0) + ' 件' + (Number.isFinite(sampleTs) ? '（検査開始 ' + formatTime(sampleTs) + '）' : '')
+      : '実測なし。検査予定の欠測を正常として補完しません。';
     const isIncident = state === 'down' || state === 'partial';
     tipCard.innerHTML = [
       '<div class="text-slate-200 font-medium tabular-nums">' +
         formatBucketRange(fromTs, toTs) +
       '</div>',
+      '<div class="mt-2 text-[10px] text-slate-400">' + escapeText(evidence) + '</div>',
       '<div class="mt-1 ' + (STATE_COLOR[state] || '') + ' font-medium uppercase tracking-wider text-[10px]">' +
         (STATE_LABEL[state] || state) +
       '</div>',

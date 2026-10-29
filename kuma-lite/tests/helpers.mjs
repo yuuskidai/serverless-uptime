@@ -18,7 +18,7 @@ export function loadTs(file, overrides = {}) {
     module, exports: module.exports, crypto: webcrypto, Date, Error, Response, Request, URL, performance,
     AbortController, TextEncoder, TextDecoder, Uint8Array, atob, btoa,
     fetch: (...args) => globalThis.fetch(...args),
-    console: { error() {}, warn() {}, log() {}, info() {} },
+    console: overrides.console ?? { error() {}, warn() {}, log() {}, info() {} },
     setTimeout, clearTimeout,
     require(id) {
       if (Object.hasOwn(overrides, id)) return overrides[id];
