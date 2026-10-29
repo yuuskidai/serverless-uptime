@@ -263,12 +263,21 @@ positive result cannot attribute the cause to CPU alone. Whether D1 operations
 contribute to a particular connection pool is not established by this experiment.
 The local readiness model in the runner tests is not production causal evidence.
 
-The reviewed activation window is 2026-10-29 09:53 through 10:13 JST
-(`2026-10-29T00:53:00.000Z` through `2026-10-29T01:13:00.000Z`).
-It is inactive before and after that absolute window. A final slot can finish
-after expiry or bypass serialization; retain its observation and contamination
-flag, and exclude it from a fully-contained causal cohort rather than extending
-the diagnostic window.
+The first planned window, 2026-10-29 09:53 through 10:13 JST, was stopped
+early after the diagnostic itself caused six missing successor observations
+with `error_phase=dispatch`. The native legacy-timer receiver error was reproduced
+locally. Emergency OFF commit `ca3912ecc66a1de8052483c94e8b81b1c10b60eb`
+restored natural parallel monitoring. Those six observations remain missing and
+UNKNOWN; the interrupted experiment is invalid for improvement claims. No
+historical observation, lease, incident, or notification state is repaired or replayed.
+
+A separate retry is scheduled for 2026-10-29 10:32 through 10:52 JST
+(`2026-10-29T01:32:00.000Z` through `2026-10-29T01:52:00.000Z`), using the
+reviewed timer-wrapper/fail-open fix. Analyze this retry separately from the
+interrupted window. It is inactive before and after that absolute window.
+A final slot can finish after expiry or bypass serialization; retain its
+observation and contamination flag, and exclude it from a fully-contained
+causal cohort rather than extending the diagnostic window.
 
 After expiry, new runs use the original parallel behavior automatically. Restore
 both constants to `null` in a new descendant commit and verify the deployed
