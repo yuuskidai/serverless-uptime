@@ -21,6 +21,7 @@ async function bundle(cycle, fault = 'none') {
       contents: `import { runChecks } from './src/monitor-runner.ts';
         import { createBindingDiagnostic } from './src/binding-diagnostic.ts';
         console.log = console.info = console.warn = console.error = () => {};
+        globalThis.__diagnosticNativeClearCalls = 0;
         export default { async fetch(request, env) {
           const action = new URL(request.url).pathname;
           try {
@@ -32,8 +33,9 @@ async function bundle(cycle, fault = 'none') {
               finally { clearTimeout(timer); }
             }
             if (action === '/run') {
+              globalThis.__diagnosticWaitBarrier = new Promise(resolve => { globalThis.__releaseDiagnosticWaitBarrier = resolve; });
               await runChecks(env, now, { receivedAt: now, runId: 'synthetic-native-run' });
-              return Response.json({ ok: true });
+              return Response.json({ ok: true, nativeClearCalls: globalThis.__diagnosticNativeClearCalls });
             }
             const monitors = (await env.DB.prepare('SELECT * FROM monitors ORDER BY id').all()).results;
             const start = Date.now(), from = Math.floor(start / 60000) * 60000 - 60000;
@@ -41,16 +43,19 @@ async function bundle(cycle, fault = 'none') {
             const lane = createBindingDiagnostic(env, monitors, start, start,
               { from: new Date(from).toISOString(), until: new Date(until).toISOString() });
             lane.start(5);
-            const waiting = lane.wait(6);
+            const events = [];
+            const waiting = lane.wait(6).then(() => { events.push('second_released'); });
             if (action === '/resume') {
               await new Promise(resolve => setTimeout(resolve, 30));
+              events.push('first_finished');
               lane.finish(5);
             }
             await waiting;
             lane.start(6);
             const timings = lane.timings(6);
             lane.finish(5); lane.finish(6);
-            return Response.json({ ok: true, timings });
+            return Response.json({ ok: true, timings, events,
+              afterDeadline: Date.now() >= until, nativeClearCalls: globalThis.__diagnosticNativeClearCalls });
           } catch (error) {
             return Response.json({ ok: false, error: error instanceof Error ? error.message : 'unknown' });
           }
@@ -69,19 +74,32 @@ async function bundle(cycle, fault = 'none') {
               { from: new Date(from).toISOString(), until: new Date(from + 1200000).toISOString() });
           }`,
       }));
-      if (fault === 'cleanup' || fault === 'setup') builder.onLoad({ filter: /binding-diagnostic\.ts$/ }, () => ({
-        loader: 'ts', contents: fault === 'cleanup'
-          ? readFileSync(helperPath, 'utf8').replace('clearTimeout: timer => clearTimeout(timer)', 'clearTimeout')
-          : readFileSync(helperPath, 'utf8').replace('setTimeout: (callback, ms) => setTimeout(callback, ms)', "setTimeout: () => { throw Error('synthetic diagnostic timer rejected'); }"),
-      }));
+      builder.onLoad({ filter: /binding-diagnostic\.ts$/ }, () => {
+        let contents = readFileSync(helperPath, 'utf8');
+        // Resolve the first target's pre-state barrier in the actual queue
+        // branch. Its continuation runs after this synchronous timer setup,
+        // so native cleanup is exercised regardless of claim/CI scheduling.
+        contents = contents.replace('timer = time.setTimeout(resolve, Math.max(0, deadline - time.now()));',
+          'globalThis.__releaseDiagnosticWaitBarrier?.(); timer = time.setTimeout(resolve, Math.max(0, deadline - time.now()));');
+        contents = contents.replace('try { time.clearTimeout(timer); }',
+          'try { globalThis.__diagnosticNativeClearCalls++; time.clearTimeout(timer); }');
+        if (fault === 'cleanup') contents = contents.replace('clearTimeout: timer => clearTimeout(timer)', 'clearTimeout');
+        if (fault === 'setup') contents = contents.replace('setTimeout: (callback, ms) => setTimeout(callback, ms)',
+          "setTimeout: () => { throw Error('synthetic diagnostic timer rejected'); }");
+        return { loader: 'ts', contents };
+      });
       if (fault === 'wait') builder.onLoad({ filter: /monitor-runner\.ts$/ }, args => ({
         loader: 'ts', contents: readFileSync(args.path, 'utf8').replace('await diagnostic.wait(monitor.id);', "await Promise.reject(Error('synthetic diagnostic wait rejected'));"),
       }));
       if (fault === 'probe') builder.onLoad({ filter: /monitor\.ts$/ }, args => ({
         loader: 'ts', contents: readFileSync(args.path, 'utf8').replace("  const { fetcher, transport } = resolveFetcher(env, monitor);", "  if (monitor.id === 5) throw Error('synthetic original probe failure');\n  const { fetcher, transport } = resolveFetcher(env, monitor);"),
       }));
-      if (fault === 'state') builder.onLoad({ filter: /monitor-execution\.ts$/ }, args => ({
-        loader: 'ts', contents: readFileSync(args.path, 'utf8').replace('export async function readMonitorState(env: Env, monitorId: number): Promise<OrderedMonitorState | null> {', "export async function readMonitorState(env: Env, monitorId: number): Promise<OrderedMonitorState | null> {\n  if (monitorId === 5) throw Error('synthetic original state failure');"),
+      if (['none', 'cleanup', 'setup', 'state'].includes(fault)) builder.onLoad({ filter: /monitor-execution\.ts$/ }, args => ({
+        loader: 'ts', contents: readFileSync(args.path, 'utf8').replace(
+          'export async function readMonitorState(env: Env, monitorId: number): Promise<OrderedMonitorState | null> {',
+          'export async function readMonitorState(env: Env, monitorId: number): Promise<OrderedMonitorState | null> {\n'
+            + (fault === 'state' ? "  if (monitorId === 5) throw Error('synthetic original state failure');"
+              : `  if (monitorId === ${cycle === 3 ? 6 : 5}) await globalThis.__diagnosticWaitBarrier;`)),
       }));
     } }],
   })).outputFiles[0].text;
@@ -138,23 +156,26 @@ async function fixture(t, cycle = 1, fault = 'none') {
     call: async action => (await worker.fetch('http://local-test.invalid/' + action)).json() };
 }
 
-test('legacy native timers resume the queued target and expiry bypass without receiver errors', async t => {
+test('legacy native timers resume the queued target and expiry bypass without receiver errors', { timeout: 30000 }, async t => {
   const f = await fixture(t);
   const resume = await f.call('resume');
   assert.equal(resume.ok, true, resume.error);
   assert.equal(resume.timings.diagnostic_mode, 'portal_first');
-  assert.ok(resume.timings.dispatch_wait_ms >= 20);
+  assert.deepEqual(resume.events, ['first_finished', 'second_released']);
+  assert.ok(resume.nativeClearCalls >= 1, 'resume must exercise the native cleanup branch');
   assert.equal(resume.timings.diagnostic_contaminated, false);
   const bypass = await f.call('bypass');
   assert.equal(bypass.ok, true, bypass.error);
-  assert.ok(bypass.timings.dispatch_wait_ms >= 30);
+  assert.equal(bypass.afterDeadline, true);
+  assert.ok(bypass.nativeClearCalls >= 2, 'expiry must also exercise native cleanup');
   assert.equal(bypass.timings.diagnostic_contaminated, true);
   assert.deepEqual(f.counts(), { publicCalls: 0, forbiddenOutbound: 0 });
 });
 
-for (const cycle of [1, 3]) test(`native active runner commits all four targets and releases all owners in cycle${cycle}`, async t => {
+for (const cycle of [1, 3]) test(`native active runner commits all four targets and releases all owners in cycle${cycle}`, { timeout: 30000 }, async t => {
   const f = await fixture(t, cycle);
   const response = await f.call('run'); assert.equal(response.ok, true, response.error);
+  assert.ok(response.nativeClearCalls >= 1, 'the queued target must exercise native cleanup');
   const checks = (await f.db.prepare('SELECT monitor_id,ts,scheduled_slot,config_revision,probe_transport,status,healthz_status FROM checks ORDER BY monitor_id').all()).results;
   const attempts = (await f.db.prepare('SELECT monitor_id,decision,error_phase,release_outcome,timings_json FROM monitor_attempts ORDER BY monitor_id').all()).results;
   assert.deepEqual(checks.map(value => value.monitor_id), [5, 6, 9, 10]);
@@ -167,8 +188,7 @@ for (const cycle of [1, 3]) test(`native active runner commits all four targets 
   const timings = new Map(attempts.map(value => [value.monitor_id, JSON.parse(value.timings_json)]));
   const mode = cycle === 1 ? 'portal_first' : 'core_first';
   assert.ok([...timings.values()].every(value => value.diagnostic_mode === mode && value.diagnostic_contaminated === false));
-  assert.equal(timings.get(first).dispatch_wait_ms, 0);
-  assert.ok(timings.get(second).dispatch_wait_ms >= 100);
+  assert.ok([...timings.values()].every(value => Number.isFinite(value.dispatch_wait_ms) && value.dispatch_wait_ms >= 0));
   assert.ok(timings.get(second).received_to_probe_ms >= timings.get(second).dispatch_wait_ms);
   const firstCheck = checks.find(value => value.monitor_id === first), secondCheck = checks.find(value => value.monitor_id === second);
   // Check the saved start clocks, not the relative duration of two independent
@@ -186,10 +206,11 @@ for (const cycle of [1, 3]) test(`native active runner commits all four targets 
   }
 });
 
-test('old native receiver behavior is exercised without leaking diagnostic errors into probes', async t => {
+test('old native receiver behavior is exercised without leaking diagnostic errors into probes', { timeout: 30000 }, async t => {
   const f = await fixture(t, 1, 'cleanup');
   const brand = await f.call('native-brand-check'); assert.match(brand.nativeError, /Illegal invocation/);
   const response = await f.call('run'); assert.equal(response.ok, true, response.error);
+  assert.ok(response.nativeClearCalls >= 1, 'the old-receiver fault must reach native cleanup');
   assert.equal((await f.db.prepare('SELECT count(*) n FROM checks').first()).n, 4);
   assert.equal((await f.db.prepare("SELECT count(*) n FROM monitor_attempts WHERE decision='error'").first()).n, 0);
   const main = (await f.db.prepare('SELECT timings_json FROM monitor_attempts WHERE monitor_id IN(5,6)').all()).results;
