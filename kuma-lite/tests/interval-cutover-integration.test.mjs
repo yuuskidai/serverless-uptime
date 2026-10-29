@@ -8,7 +8,7 @@ const {deriveTransition}=loadTs('state-transition');
 const {monitorFreshness}=loadTs('monitor-readiness');
 const {resolveCheckIntervalMs,historicalIntervalSql}=loadTs('check-schedule');
 const {renderRssFeed}=loadTs('rss-feed');
-const {renderStatusPage}=loadTs('status-page',{'./external-observations':{getExternalSummaries:async()=>new Map(),CLOUDFLARE_WITNESS_STATUS_URL:'https://witness.example.invalid/status'}});
+const {renderStatusPage}=loadTs('status-page');
 const MINUTE=60000,SLOT=Math.floor(Date.now()/120000)*120000;
 
 function readSafeState(f){return f.sqlite.prepare('SELECT current_status,consecutive_failures,consecutive_degraded,consecutive_successes,last_check_slot,config_revision FROM monitor_state WHERE monitor_id=1').get();}

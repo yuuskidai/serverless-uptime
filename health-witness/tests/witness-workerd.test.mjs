@@ -15,10 +15,9 @@ const bundle = buildSync({ stdin: {
     import { ProbeScheduler } from './src/scheduler.ts';
     export default handler;
     const acceptedAudits = [];
-    const originalInfo = console.info.bind(console);
+    // Keep ownership-bearing fixture events inside the Worker; never send them to test stdout.
     console.info = (...args) => {
       if (args[0]?.event === 'witness_slot_result') acceptedAudits.push(args[0]);
-      originalInfo(...args);
     };
     // Test-only RPC surface: never part of the deployed entry point or its bundle.
     export class TestScheduler extends ProbeScheduler {

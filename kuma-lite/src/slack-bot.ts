@@ -4,7 +4,6 @@ import { createSlackAdapter, SlackWorkersAdapter } from './chat-adapters/slack';
 import type { Env, Monitor } from './types';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
-import { getExternalSummaries } from './external-observations';
 
 export interface SlackBot {
   chat: Chat<{ slack: SlackWorkersAdapter }>;
@@ -74,7 +73,7 @@ export async function renderStatusBlocks(
   const latest = (column: string) => `(SELECT c.${column} FROM checks c WHERE c.monitor_id = m.id
     AND ${availabilityHistorySql('c')} ORDER BY c.ts DESC LIMIT 1)`;
   const now = Date.now();
-  const [rows, externalWitnesses] = await Promise.all([env.DB.prepare(
+  const rows = await env.DB.prepare(
     `SELECT m.*, s.current_status,
             ${latest('ts')} AS latest_ts,
             ${latest('scheduled_slot')} AS latest_slot,
@@ -83,7 +82,7 @@ export async function renderStatusBlocks(
        LEFT JOIN monitor_state s ON s.monitor_id = m.id
       WHERE m.enabled = 1 AND ${AVAILABILITY_ROLE_SQL.replace('COALESCE(monitor_role', 'COALESCE(m.monitor_role')}
       ORDER BY m.id`,
-  ).all<MonitorWithState>(), getExternalSummaries(env, now)]);
+  ).all<MonitorWithState>();
   const monitors = rows.results ?? [];
   if (monitors.length === 0) return {
     text: 'No monitors are configured.',
@@ -106,18 +105,8 @@ export async function renderStatusBlocks(
   for (const {monitor, state} of views) {
     const label = state === 'unknown' ? ':white_circle: 監視情報が古いか、まだ取得されていません'
       : state === 'down' ? ':red_circle: DOWN' : state === 'degraded' ? ':large_yellow_circle: DEGRADED' : ':large_green_circle: UP';
-    const external = externalWitnesses.get(monitor.id);
-    const externalHeading = external?.source === 'cloudflare_alarm' ? '別Worker確認（Cloudflare）' : '外部確認';
-    const externalCadence = external?.source === 'cloudflare_alarm' ? '約1分、同じCloudflare上の補助確認' : '約5分ごとの補助確認';
-    const ownThreshold = typeof external?.dbThresholdMs === 'number' && Number.isSafeInteger(external.dbThresholdMs)
-      && external.dbThresholdMs > 0 ? external.dbThresholdMs : null;
-    const externalPolicy = ownThreshold === null ? '' : `、DB警告${ownThreshold}ms基準（主系判定とは独立）`;
-    const externalLabel = external?.status === 'ok' ? '正常' : external?.status === 'degraded' ? '遅延・一部不調'
-      : external?.status === 'down' ? '応答確認できず' : '未確認';
-    const externalTime = external?.observedAt != null
-      ? ` · <!date^${Math.floor(external.observedAt/1000)}^{date_short_pretty} {time}|${new Date(external.observedAt).toISOString()}>` : '';
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text:
-      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>\n${externalHeading}: ${externalLabel}${externalTime}（${externalCadence}${externalPolicy}）` } });
+      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` } });
   }
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
     `:clock1: as of <!date^${Math.floor(now/1000)}^{date_short_pretty} {time}|${new Date(now).toISOString()}>` }] });

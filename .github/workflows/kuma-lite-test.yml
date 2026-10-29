@@ -8,14 +8,12 @@ on:
       - "health-witness/**"
       - "security-alerts/**"
       - ".github/workflows/kuma-lite-test.yml"
-      - ".github/workflows/external-health.yml"
   pull_request:
     paths:
       - "kuma-lite/**"
       - "health-witness/**"
       - "security-alerts/**"
       - ".github/workflows/kuma-lite-test.yml"
-      - ".github/workflows/external-health.yml"
 
 permissions:
   contents: read

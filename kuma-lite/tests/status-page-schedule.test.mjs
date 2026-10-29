@@ -2,12 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadTs, sqliteEnv } from './helpers.mjs';
 
-const { renderStatusPage } = loadTs('status-page', {
-  './external-observations': {
-    getExternalSummaries: async () => new Map(),
-    CLOUDFLARE_WITNESS_STATUS_URL: 'https://witness.example.invalid/status',
-  },
-});
+const { renderStatusPage } = loadTs('status-page');
 const M = 60000;
 const BASE = Date.UTC(2026, 9, 29, 4, 0);
 

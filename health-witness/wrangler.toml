@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 workers_dev = true
 
+[vars]
+RETIRED = "true"
+
 # Deliberately independent of the monitor's Cron, D1, service bindings and tokens.
 [[durable_objects.bindings]]
 name = "SCHEDULER"

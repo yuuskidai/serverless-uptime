@@ -2,6 +2,7 @@ import type { Env, Version } from './types';
 export { ProbeScheduler } from './scheduler';
 
 export const SINGLETON = 'fixed-public-health-v1';
+export function isRetired(env: Env): boolean { return env.RETIRED === 'true'; }
 export function version(env: Env): Version {
   const clean = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9._:+-]{1,128}$/.test(value) ? value : null;
   return { id: clean(env.VERSION_METADATA?.id), tag: clean(env.VERSION_METADATA?.tag), timestamp: clean(env.VERSION_METADATA?.timestamp) };
@@ -47,11 +48,14 @@ export default {
     const url = new URL(request.url);
     if (url.search) return json({ error: 'not_found' }, 404);
     if (request.method === 'GET' && url.pathname === '/healthz') {
-      return json({ status: 'ok', scope: 'worker_liveness', service: 'helth-witness', version: version(env) });
+      return json({ status: 'ok', scope: 'worker_liveness', service: 'helth-witness', version: version(env),
+        ...(isRetired(env) ? { retired: true } : {}) });
     }
     const isStatus = request.method === 'GET' && ['/status', '/latest'].includes(url.pathname);
     const isAdmin = request.method === 'POST' && ['/admin/start', '/admin/stop'].includes(url.pathname);
     if (!isStatus && !isAdmin) return json({ error: 'not_found' }, 404);
+    // Retirement must never restart probing or invoke the old generation-changing stop control.
+    if (isAdmin && isRetired(env)) return json({ error: 'witness_retired' }, 410);
     if (isAdmin && !await authorised(request, env)) return json({ error: 'unauthorised' }, 401);
     // These controls accept no body, target, interval, URL, object name or other parameters.
     if (isAdmin && !await emptyBody(request)) return json({ error: 'body_not_allowed' }, 400);

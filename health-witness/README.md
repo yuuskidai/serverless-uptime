@@ -1,5 +1,18 @@
 # Independent Cloudflare health witness
 
+Retired on 2026-10-29. The committed `RETIRED="true"` deployment consumes existing
+alarm deliveries without running probes, disables further alarms, and returns only
+safe retirement metadata from `/status` and `/latest`. Those GET requests do not
+perform cleanup. Both administrative controls return 410; do not restart or redeploy
+the normal probe mode. Disconnect Workers Builds after verifying this retirement
+deployment so later monitor changes cannot recreate the Worker.
+
+Retirement preserves generation, history, the claimed-slot watermark and any active
+ownership record. An active record can remain after an older in-flight result is
+fenced out; `active_present` does not prove a request is still running or drained.
+Worker/namespace deletion is a separate data-destructive step, not performed by this
+flag. The sections below document the former operating mode.
+
 `helth-witness` checks the fixed public `/healthz` endpoints for Partner Portal
 and Core OS once per minute using a single SQLite Durable Object alarm. It has
 no Cron trigger, business D1 database, service bindings, notification credentials,

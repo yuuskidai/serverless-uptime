@@ -156,72 +156,35 @@ test('cutover-day bars retain the same streak rules after the day has passed', a
   }
 });
 
-test('external confirmation remains supplemental when the primary monitor is down', async t => {
-  const f = fixture(t), now = Date.now();
-  f.sqlite.prepare("UPDATE monitor_state SET current_status='down' WHERE monitor_id=1").run();
-  check(f, { status: 'down' });
-  const witness = { status: 'ok', observedAt: now - 1000, ageMs: 1000, totalMs: 208,
-    runId: '123', runAttempt: '2', runUrl: 'https://github.com/example/monitor/actions/runs/123/attempts/2' };
-  const helper = { getExternalSummaries: async () => new Map([[1, witness], [2, { ...witness, runUrl: 'https://private.example/secret' }]]) };
-  const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
-  const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
-  assert.match(html, /> 停止中/);
-  assert.match(html, /外部確認: 正常/);
-  assert.doesNotMatch(html, /約5分ごとの補助確認/);
-  assert.match(html, /https:\/\/github\.com\/example\/monitor\/actions\/runs\/123\/attempts\/2/);
-  assert.doesNotMatch(html, /private\.example/);
-  const { renderStatusBlocks: slack } = loadTs('slack-bot', {
-    chat: { Chat: class {} }, '@chat-adapter/state-memory': { createMemoryState: () => ({}) },
-    './chat-adapters/slack': { createSlackAdapter: () => ({}) }, './external-observations': helper,
-  });
-  const message = await slack(f.env);
-  assert.match(message.text, /DOWN/);
-  assert.match(JSON.stringify(message.blocks), /外部確認: 正常/);
-});
-
-test('stale external confirmation is unknown and arbitrary provenance links cannot reach public HTML', async t => {
-  const f = fixture(t); check(f);
-  for (const runUrl of [
-    'javascript:alert(1)', 'https://github.com.evil.invalid/a/b/actions/runs/1',
-    'https://user:password@github.com/a/b/actions/runs/1', 'https://github.com:444/a/b/actions/runs/1',
-    'https://github.com/a/b/actions/runs/1?private=token', 'https://github.com/a/b/actions/runs/1#fragment',
-  ]) {
-    const { renderStatusPage: render } = loadTs('status-page', { './external-observations': {
-      getExternalSummaries: async () => new Map([[1, { status: 'unknown', observedAt: Date.now() - 1000000,
-        totalMs: null, ageMs: 1000000, runId: '1', runAttempt: '1', runUrl }]]),
-    } });
+test('status page and Slack do not fetch or read retired supplemental sources and retain primary states', async t => {
+  for (const state of ['up', 'degraded', 'down']) await t.test(state, async t => {
+    const f = fixture(t);
+    f.sqlite.prepare('UPDATE monitor_state SET current_status=? WHERE monitor_id=1').run(state);
+    f.sqlite.prepare('UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=1').run();
+    check(f, { status: state === 'down' ? 'down' : 'up' });
+    const beforeState = f.sqlite.prepare('SELECT * FROM monitor_state WHERE monitor_id=1').get();
+    f.env.CLOUDFLARE_WITNESS_URL = 'https://retired.example.invalid';
+    f.env.CLOUDFLARE_WITNESS = { fetch() { assert.fail('retired binding must not be read'); } };
+    t.mock.method(globalThis, 'fetch', () => { assert.fail('status render must not make external requests'); });
+    const prepare = f.env.DB.prepare;
+    f.env.DB.prepare = query => {
+      assert.doesNotMatch(query, /external_observations|external_probe_runs/);
+      return prepare(query);
+    };
+    const retired = { getExternalSummaries() { assert.fail('retired supplement must not be loaded'); } };
+    const { renderStatusPage: render } = loadTs('status-page', { './external-observations': retired });
     const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
-    assert.match(html, /外部確認: 未確認/);
-    assert.doesNotMatch(html, />確認記録<|javascript:|password@github|private=token/);
-    assert.match(html, /すべて正常に稼働中/);
-  }
-});
-
-test('Cloudflare alarm confirmation identifies the shared provider and never supplies a GitHub provenance link', async t => {
-  const f = fixture(t); check(f, { status: 'down' });
-  f.sqlite.prepare("UPDATE monitor_state SET current_status='down' WHERE monitor_id=1").run();
-  f.sqlite.prepare('UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=1').run();
-  const statusUrl = 'https://helth-witness.opus-system.workers.dev/status';
-  for (const url of [statusUrl, statusUrl + '?secret=private', 'https://private.invalid/status']) {
-    const helper = { CLOUDFLARE_WITNESS_STATUS_URL: statusUrl, getExternalSummaries: async () => new Map([[1, {
-      source: 'cloudflare_alarm', status: 'ok', observedAt: Date.now() - 1000, totalMs: 100, ageMs: 1000,
-      dbThresholdMs: 1000,
-      runUrl: 'https://github.com/example/monitor/actions/runs/123', statusUrl: url,
-    }]]) };
-    const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
-    const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
-    assert.match(html, /別Worker確認（Cloudflare）: 正常/);
-    assert.match(html, /DB警告1000ms/); assert.match(html, /DB警告1500ms/);
-    assert.match(html, /0\.00%/);
-    assert.match(html, /> 停止中/); assert.doesNotMatch(html, /github\.com|private\.invalid|secret=private/);
-    assert.equal(html.includes('>確認記録<'), url === statusUrl);
     const { renderStatusBlocks: slack } = loadTs('slack-bot', {
       chat: { Chat: class {} }, '@chat-adapter/state-memory': { createMemoryState: () => ({}) },
-      './chat-adapters/slack': { createSlackAdapter: () => ({}) }, './external-observations': helper,
+      './chat-adapters/slack': { createSlackAdapter: () => ({}) }, './external-observations': retired,
     });
-    const blocks = await slack(f.env); assert.match(blocks.text, /DOWN/);
-    assert.match(JSON.stringify(blocks), /別Worker確認（Cloudflare）: 正常/);
-    assert.match(JSON.stringify(blocks), /DB警告1000ms基準/);
-    assert.doesNotMatch(JSON.stringify(blocks), /github\.com|private\.invalid/);
-  }
+    const message = await slack(f.env);
+    assert.doesNotMatch(html + JSON.stringify(message.blocks), /外部確認|別Worker確認|確認記録|helth-witness|github\.com/);
+    assert.match(message.text, state === 'down' ? /DOWN/ : state === 'degraded' ? /DEGRADED/ : /operational/);
+    assert.match(html, state === 'down' ? /> 停止中/ : state === 'degraded' ? /> 一部不調/ : /すべて正常に稼働中/);
+    assert.match(html, /DB警告1500ms/);
+    assert.match(html, state === 'down' ? /0\.00%/ : /100\.00%/);
+    assert.deepEqual(f.sqlite.prepare('SELECT * FROM monitor_state WHERE monitor_id=1').get(), beforeState);
+    assert.equal(f.sqlite.prepare('SELECT COUNT(*) n FROM checks').get().n, 1);
+  });
 });

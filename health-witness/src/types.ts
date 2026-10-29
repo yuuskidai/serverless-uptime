@@ -1,5 +1,7 @@
 export interface Env {
   SCHEDULER: DurableObjectNamespace;
+  /** Committed retirement mode; omitted only by normal-mode regression fixtures. */
+  RETIRED?: string;
   ADMIN_SECRET?: string;
   VERSION_METADATA?: WorkerVersionMetadata;
 }

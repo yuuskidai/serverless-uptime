@@ -59,6 +59,7 @@ content = content.replaceAll('<your-d1-database-id>', dbId);
 
 const servicesEnv = (process.env.WRANGLER_SERVICES ?? '').trim();
 if (servicesEnv) {
+  // Old persistent build variables must not recreate a reference to the retired Worker.
   const blocks = servicesEnv.split(',').map((pair) => {
     const trimmed = pair.trim();
     const eq = trimmed.indexOf('=');
@@ -69,11 +70,14 @@ if (servicesEnv) {
     }
     const binding = trimmed.slice(0, eq).trim();
     const service = trimmed.slice(eq + 1).trim();
-    return (
-      `[[services]]\nbinding = "${binding}"\nservice = "${service}"\n\n` +
-      `[[previews.services]]\nbinding = "${binding}"\nservice = "${service}"`
-    );
-  });
+    return { binding, service };
+  }).filter(({ binding, service }) => binding !== 'CLOUDFLARE_WITNESS' && service !== 'helth-witness')
+    .map(({ binding, service }) => {
+      return (
+        `[[services]]\nbinding = "${binding}"\nservice = "${service}"\n\n` +
+        `[[previews.services]]\nbinding = "${binding}"\nservice = "${service}"`
+      );
+    });
   content = content.trimEnd() + '\n\n' + blocks.join('\n\n') + '\n';
 }
 

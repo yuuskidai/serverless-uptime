@@ -6,7 +6,6 @@ import { cleanupOldChecks } from './monitor';
 import { runChecks } from './monitor-runner';
 import { monitoringReadiness } from './monitor-readiness';
 import { drainNotificationOutbox } from './notification-outbox';
-import { handleExternalObservation } from './external-observations';
 import { beginScheduledRun, advanceScheduledRun, finishScheduledRun } from './scheduled-runs';
 import { renderRssFeed } from './rss-feed';
 import {
@@ -110,6 +109,12 @@ export default {
       return new Response('ok', { status: 200 });
     }
     if (url.pathname === '/readyz') return monitoringReadiness(env);
+    // Supplemental probes are retired; reject late deliveries before reading a body or D1.
+    // The authenticated GET below remains available for retained observation history.
+    if (url.pathname === '/api/external-observations' && req.method !== 'GET') {
+      return Response.json({ error: 'external_monitoring_retired' }, { status: 410,
+        headers: { 'Cache-Control': 'no-store' } });
+    }
 
     // Every other path eventually queries D1. Run the schema gate
     // once per isolate; on miss, return a friendly 503 with a
@@ -120,10 +125,6 @@ export default {
       logSchemaProblem(schema, `fetch ${url.pathname}`);
       if (url.pathname.startsWith('/api/')) return apiSchemaErrorResponse();
       return publicSchemaErrorResponse();
-    }
-
-    if (url.pathname === '/api/external-observations' && req.method === 'POST') {
-      return handleExternalObservation(req, env);
     }
 
     if (url.pathname.startsWith('/api/')) {

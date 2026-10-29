@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { checkTargets, TARGETS } from './probe';
-import { json, version } from './index';
+import { isRetired, json, version } from './index';
 import type { Active, Control, Env, SlotRecord, Status, TargetObservation } from './types';
 
 export const INTERVAL_MS = 60_000;
@@ -25,6 +25,7 @@ export class ProbeScheduler extends DurableObject<Env> {
     const path = new URL(request.url).pathname;
     if (request.method === 'GET' && ['/status', '/latest'].includes(path)) return this.status(path === '/latest');
     if (request.method !== 'POST' || !['/admin/start', '/admin/stop'].includes(path)) return json({ error: 'not_found' }, 404);
+    if (isRetired(this.env)) return json({ error: 'witness_retired' }, 410);
     const start = path === '/admin/start';
     const result = await this.ctx.storage.transaction(async tx => {
       const control = await tx.get<Control>(CONTROL_KEY) ?? initial();
@@ -48,6 +49,16 @@ export class ProbeScheduler extends DurableObject<Env> {
   }
 
   async alarm(info?: AlarmInvocationInfo): Promise<void> {
+    if (isRetired(this.env)) {
+      // A retired deployment consumes existing alarm deliveries without new probes or ownership/history resets.
+      // Retries may still arrive; every delivery follows this same no-probe branch.
+      await this.ctx.storage.transaction(async tx => {
+        const control = await tx.get<Control>(CONTROL_KEY);
+        if (control) await tx.put(CONTROL_KEY, { ...control, enabled: false, next_slot: null });
+        await tx.deleteAlarm();
+      });
+      return;
+    }
     const receivedAt = Date.now();
     const active = await this.ctx.storage.transaction(async tx => {
       const control = await tx.get<Control>(CONTROL_KEY) ?? initial();
@@ -127,6 +138,22 @@ export class ProbeScheduler extends DurableObject<Env> {
   }
 
   private async status(compact = false): Promise<Response> {
+    // Public retirement verification is read-only and must never expose raw history or ownership identifiers.
+    if (isRetired(this.env)) {
+      const snapshot = await this.ctx.storage.transaction(async tx => ({
+        control: await tx.get<Control>(CONTROL_KEY) ?? initial(),
+        history: await tx.get<SlotRecord[]>(HISTORY_KEY) ?? [],
+        alarm: await tx.getAlarm(),
+      }));
+      const last = [...snapshot.history].reverse().find(row => row.phase === 'completed' || row.phase === 'internal_error');
+      return json({ version: 1, source: 'cloudflare_alarm', retired: true,
+        enabled: snapshot.control.enabled, next_alarm: snapshot.control.next_slot,
+        alarm_at: snapshot.alarm, alarm_present: snapshot.alarm !== null,
+        active_present: snapshot.control.active !== null, generation: snapshot.control.generation,
+        history_count: snapshot.history.length, last_claimed_slot: snapshot.control.last_claimed_slot,
+        last_observation: last ? { slot: last.slot, observed_at: last.probe_started_at, finished_at: last.probe_finished_at } : null,
+        readiness: { status: 'retired' }, witness_version: version(this.env) });
+    }
     const { control, history } = await this.ctx.storage.transaction(async tx => ({
       control: await tx.get<Control>(CONTROL_KEY) ?? initial(),
       history: await tx.get<SlotRecord[]>(HISTORY_KEY) ?? [],

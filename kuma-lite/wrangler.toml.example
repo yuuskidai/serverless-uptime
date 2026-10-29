@@ -148,13 +148,6 @@ database_id = "<your-d1-database-id>"
 # RCA bindings are not mirrored into `previews`: Previews never run
 # crons, so they never raise alerts to analyse.
 
-# Optional trusted identity for GitHub-hosted external monitoring. Configure
-# these as persistent Worker secrets (the values are identity/configuration,
-# not shared probe credentials) so Workers Builds preserves them on deploy.
-#   EXTERNAL_PROBE_AUDIENCE       — exact HTTPS receiver URL ending in /api/external-observations
-#   EXTERNAL_PROBE_REPOSITORY     — owner/repository
-#   EXTERNAL_PROBE_REPOSITORY_ID  — stable numeric GitHub repository id
-#   EXTERNAL_PROBE_OWNER_ID       — stable numeric GitHub owner id
-#   EXTERNAL_PROBE_WORKFLOW_REF   — owner/repository/.github/workflows/external-health.yml@refs/heads/master
-# The receiver verifies short-lived GitHub OIDC signatures and these claims;
-# the management API token is never distributed to external runners.
+# Supplemental Cloudflare/GitHub monitoring was retired on 2026-10-29.
+# No CLOUDFLARE_WITNESS service binding or EXTERNAL_PROBE identity is needed.
+# Historical observation tables remain available through the authenticated GET API.

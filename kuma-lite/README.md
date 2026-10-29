@@ -606,6 +606,12 @@ SELECT m.name, ms.consecutive_failures,
   リアルタイム更新はなし）
 - マルチテナント認証は持たず、API は単一の共有 Bearer トークンで保護
 
+## 補助監視の廃止（2026-10-29）
+
+この環境ではCloudflare witnessとGitHub外部監視を廃止し、同じ監視Worker内の主系とshadowを維持する。
+外部の受信・表示・Service Bindingを停止し、主系の設定と既存D1履歴は保持する。
+停止検証、専用Worker削除と復元の注意点は[廃止手順](ops/20261029-retire-supplemental-monitoring.md)を参照する。
+
 ## ライセンス
 
 MIT License。本リポジトリ全体は上流の Uptime Kuma と同じ MIT で配布されます。
