@@ -200,15 +200,19 @@ test('stale external confirmation is unknown and arbitrary provenance links cann
 test('Cloudflare alarm confirmation identifies the shared provider and never supplies a GitHub provenance link', async t => {
   const f = fixture(t); check(f, { status: 'down' });
   f.sqlite.prepare("UPDATE monitor_state SET current_status='down' WHERE monitor_id=1").run();
+  f.sqlite.prepare('UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=1').run();
   const statusUrl = 'https://helth-witness.opus-system.workers.dev/status';
   for (const url of [statusUrl, statusUrl + '?secret=private', 'https://private.invalid/status']) {
     const helper = { CLOUDFLARE_WITNESS_STATUS_URL: statusUrl, getExternalSummaries: async () => new Map([[1, {
       source: 'cloudflare_alarm', status: 'ok', observedAt: Date.now() - 1000, totalMs: 100, ageMs: 1000,
+      dbThresholdMs: 1000,
       runUrl: 'https://github.com/example/monitor/actions/runs/123', statusUrl: url,
     }]]) };
     const { renderStatusPage: render } = loadTs('status-page', { './external-observations': helper });
     const html = await (await render(f.env, new URL('https://status.example.invalid/'))).text();
     assert.match(html, /別Worker確認（Cloudflare）: 正常/); assert.match(html, /同じCloudflare上で動作/);
+    assert.match(html, /DB警告1000ms基準/); assert.match(html, /主系1500msとは別基準/);
+    assert.match(html, /0\.00%/);
     assert.match(html, /> 停止中/); assert.doesNotMatch(html, /github\.com|private\.invalid|secret=private/);
     assert.equal(html.includes('>確認記録<'), url === statusUrl);
     const { renderStatusBlocks: slack } = loadTs('slack-bot', {
@@ -217,6 +221,7 @@ test('Cloudflare alarm confirmation identifies the shared provider and never sup
     });
     const blocks = await slack(f.env); assert.match(blocks.text, /DOWN/);
     assert.match(JSON.stringify(blocks), /別Worker確認（Cloudflare）: 正常/);
+    assert.match(JSON.stringify(blocks), /DB警告1000ms基準/);
     assert.doesNotMatch(JSON.stringify(blocks), /github\.com|private\.invalid/);
   }
 });

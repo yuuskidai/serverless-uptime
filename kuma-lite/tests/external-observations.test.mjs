@@ -55,6 +55,31 @@ test('verified external observations are supplemental and readable without advan
   } finally { f.close(); }
 });
 
+test('fixed external1000 policy remains independent when primary1500 revision2 is current', async () => {
+  const f = fixture(); try {
+    f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500,interval_minutes=2,config_revision=2 WHERE id IN (5,6)');
+    const value=body();
+    value.observations[0].status='degraded'; value.observations[0].database_ms=1200;
+    assert.equal((await handleExternalObservation(request(value),f.env,options)).status,200);
+    const saved=f.sqlite.prepare('SELECT monitor_config_revision,db_threshold_ms,database_ms,status FROM external_observations WHERE monitor_id=5').get();
+    assert.equal(saved.monitor_config_revision,2); assert.equal(saved.db_threshold_ms,1000);
+    assert.equal(saved.database_ms,1200); assert.equal(saved.status,'degraded');
+    const witness=(await readExternalWitnesses(f.env,now)).get(5);
+    assert.equal(witness.status,'degraded'); assert.equal(witness.dbThresholdMs,1000);
+    for(const table of ['checks','monitor_state','monitor_execution']) assert.equal(f.sqlite.prepare(`SELECT count(*) n FROM ${table}`).get().n,0);
+  } finally { f.close(); }
+});
+
+test('an external report cannot adopt the primary1500 policy', async () => {
+  const f=fixture(); try {
+    f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500,config_revision=2 WHERE id IN (5,6)');
+    const value=body(); value.observations[0].db_threshold_ms=1500;
+    assert.equal((await handleExternalObservation(request(value),f.env,options)).status,400);
+    assert.equal(f.sqlite.prepare('SELECT count(*) n FROM external_probe_runs').get().n,0);
+    assert.equal(f.sqlite.prepare('SELECT count(*) n FROM external_observations').get().n,0);
+  } finally { f.close(); }
+});
+
 test('same workflow payload is idempotent and conflicting replay cannot overwrite evidence', async () => {
   const f = fixture(); try {
     const value = body();
@@ -111,7 +136,7 @@ test('target configuration changes fail closed and revision changes invalidate o
     assert.equal((await handleExternalObservation(request(value), f.env, options)).status, 200);
     f.sqlite.exec('UPDATE monitors SET config_revision=2 WHERE id=5');
     assert.equal((await readExternalWitnesses(f.env, now)).get(5).status, 'unknown');
-    f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=5');
+    f.sqlite.exec("UPDATE monitors SET url='https://changed.invalid/healthz' WHERE id=5");
     assert.equal((await handleExternalObservation(request(body()), f.env, options)).status, 409);
   } finally { f.close(); }
 });
@@ -126,6 +151,26 @@ test('a configuration race rejects the entire run without exposing one partially
     assert.equal(f.sqlite.prepare('SELECT count(*) n FROM external_observations').get().n, 0);
     const witnesses = await readExternalWitnesses(f.env, now);
     assert.equal(witnesses.get(5).status, 'unknown'); assert.equal(witnesses.get(6).status, 'unknown');
+  } finally { f.close(); }
+});
+
+test('a primary threshold race is fenced independently of the external policy', async () => {
+  const f=fixture(); try {
+    f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500,config_revision=2 WHERE id IN (5,6)');
+    f.hooks.beforeBatchStatement=index=>{if(index===0)f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=2000 WHERE id=6');};
+    assert.equal((await handleExternalObservation(request(body()),f.env,options)).status,409);
+    assert.equal(f.sqlite.prepare('SELECT count(*) n FROM external_probe_runs').get().n,0);
+    assert.equal(f.sqlite.prepare('SELECT count(*) n FROM external_observations').get().n,0);
+  } finally { f.close(); }
+});
+
+test('a stored wrong-policy observation cannot be displayed as current external confirmation', async () => {
+  const f=fixture(); try {
+    assert.equal((await handleExternalObservation(request(body()),f.env,options)).status,200);
+    f.sqlite.exec('UPDATE external_observations SET db_threshold_ms=1500 WHERE monitor_id=5');
+    const witnesses=await readExternalWitnesses(f.env,now);
+    assert.equal(witnesses.get(5).status,'unknown'); assert.equal(witnesses.get(5).dbThresholdMs,null);
+    assert.equal(witnesses.get(6).status,'ok'); assert.equal(witnesses.get(6).dbThresholdMs,1000);
   } finally { f.close(); }
 });
 

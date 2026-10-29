@@ -58,6 +58,8 @@ export interface ExternalWitness {
   runAttempt: string | null;
   runUrl: string | null;
   statusUrl: string | null;
+  /** This supplement's validated policy, independent of the primary monitor. */
+  dbThresholdMs?: number | null;
 }
 type HandlerOptions = { now?: number; verifyToken?: typeof verifyGithubOidc; bodyTimeoutMs?: number };
 
@@ -85,8 +87,10 @@ export async function handleExternalObservation(req: Request, env: Env, options:
     const monitors = new Map((targets.results ?? []).map(monitor => [monitor.id, monitor]));
     for (const observation of report.observations) {
       const monitor = monitors.get(observation.monitor_id);
-      if (!monitor || monitor.enabled !== 1 || monitor.monitor_role !== 'availability' || monitor.url !== observation.url ||
-          monitor.db_latency_threshold_ms !== observation.db_threshold_ms) return response(409, 'target_configuration_changed');
+      // The signed external report uses its fixed policy; changing the primary ceiling must not reject it.
+      // Preserve target identity and fence the captured primary settings again in the atomic write.
+      if (!monitor || monitor.enabled !== 1 || monitor.monitor_role !== 'availability' || monitor.url !== observation.url)
+        return response(409, 'target_configuration_changed');
     }
     const canonical = {
       ...report,
@@ -96,14 +100,14 @@ export async function handleExternalObservation(req: Request, env: Env, options:
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonical)));
     const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
     const targetGuards = canonical.observations.flatMap(observation => [observation.monitor_id,
-      observation.monitor_config_revision, observation.url, observation.db_threshold_ms]);
+      observation.monitor_config_revision, observation.url, monitors.get(observation.monitor_id)!.db_latency_threshold_ms]);
     const statements = [env.DB.prepare(
       `INSERT OR IGNORE INTO external_probe_runs
        (run_id,run_attempt,payload_hash,commit_sha,recorded_at,observed_at,readiness_status,readiness_http_status,readiness_total_ms)
        SELECT ?,?,?,?,CAST(strftime('%s','now') AS INTEGER)*1000,?,?,?,?
         WHERE (SELECT COUNT(*) FROM monitors m WHERE m.enabled=1 AND m.monitor_role='availability' AND (
-          (m.id=? AND m.config_revision=? AND m.url=? AND m.db_latency_threshold_ms=?) OR
-          (m.id=? AND m.config_revision=? AND m.url=? AND m.db_latency_threshold_ms=?)))=2`,
+          (m.id=? AND m.config_revision=? AND m.url=? AND m.db_latency_threshold_ms IS ?) OR
+          (m.id=? AND m.config_revision=? AND m.url=? AND m.db_latency_threshold_ms IS ?)))=2`,
     ).bind(report.run_id, report.run_attempt, hash, report.commit_sha, report.readiness.observed_at,
       report.readiness.status, report.readiness.http_status, report.readiness.total_ms, ...targetGuards)];
     for (const observation of canonical.observations) statements.push(env.DB.prepare(
@@ -112,12 +116,12 @@ export async function handleExternalObservation(req: Request, env: Env, options:
         database_ms,db_threshold_ms,error,request_id)
        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? FROM monitors m
        WHERE m.id=? AND m.config_revision=? AND m.enabled=1 AND m.monitor_role='availability'
-         AND m.url=? AND m.db_latency_threshold_ms=?
+         AND m.url=? AND m.db_latency_threshold_ms IS ?
          AND EXISTS(SELECT 1 FROM external_probe_runs WHERE run_id=? AND run_attempt=? AND payload_hash=?)`,
     ).bind(report.run_id, report.run_attempt, observation.monitor_id, observation.monitor_config_revision,
       observation.observed_at, observation.finished_at, observation.total_ms, observation.status, observation.http_status,
       observation.database_ms, observation.db_threshold_ms, observation.error, observation.request_id,
-      observation.monitor_id, observation.monitor_config_revision, observation.url, observation.db_threshold_ms,
+      observation.monitor_id, observation.monitor_config_revision, observation.url, monitors.get(observation.monitor_id)!.db_latency_threshold_ms,
       report.run_id, report.run_attempt, hash));
     const writes = await env.DB.batch(statements);
     const stored = await env.DB.prepare('SELECT payload_hash FROM external_probe_runs WHERE run_id=? AND run_attempt=?')
@@ -140,25 +144,28 @@ export async function readExternalWitnesses(env: Env, now = Date.now()): Promise
   const config = configuration(env);
   if (!config) return out;
   const rows = await env.DB.prepare(
-    `SELECT m.id,o.status,o.observed_at,o.finished_at,o.total_ms,o.run_id,o.run_attempt
+    `SELECT m.id,m.url,o.status,o.observed_at,o.finished_at,o.total_ms,o.run_id,o.run_attempt,o.db_threshold_ms
        FROM monitors m LEFT JOIN external_observations o ON (o.run_id,o.run_attempt,o.monitor_id)=
         (SELECT run_id,run_attempt,monitor_id FROM external_observations
           WHERE monitor_id=m.id AND monitor_config_revision=m.config_revision
           ORDER BY finished_at DESC,run_id DESC LIMIT 1)
        WHERE m.enabled=1 AND m.monitor_role='availability' AND m.id IN (?,?)`,
   ).bind(...targetsConfig.targets.map(target => target.monitor_id)).all<{
-    id: number; status: 'ok' | 'degraded' | 'down' | null; observed_at: number | null; finished_at: number | null;
+    id: number; url: string; db_threshold_ms: number | null;
+    status: 'ok' | 'degraded' | 'down' | null; observed_at: number | null; finished_at: number | null;
     total_ms: number | null; run_id: string | null; run_attempt: string | null;
   }>();
   for (const row of rows.results ?? []) {
+    const target = targetsConfig.targets.find(target => target.monitor_id === row.id);
+    const policyMatches = target !== undefined && row.url === target.url && row.db_threshold_ms === target.db_threshold_ms;
     const age = row.finished_at == null ? null : now - row.finished_at;
-    const fresh = age !== null && age >= -FUTURE_TOLERANCE && age < WITNESS_MAX_AGE;
+    const fresh = policyMatches && age !== null && age >= -FUTURE_TOLERANCE && age < WITNESS_MAX_AGE;
     const validRun = row.run_id !== null && /^[1-9]\d{0,19}$/.test(row.run_id) && row.run_attempt !== null && /^[1-9]\d{0,5}$/.test(row.run_attempt);
     out.set(row.id, { source: 'github_actions', status: fresh && row.status ? row.status : 'unknown', observedAt: row.observed_at,
       totalMs: fresh ? row.total_ms : null, ageMs: age === null ? null : Math.max(0, age),
       runId: row.run_id, runAttempt: row.run_attempt,
       runUrl: validRun ? `https://github.com/${config.repository}/actions/runs/${row.run_id}/attempts/${row.run_attempt}` : null,
-      statusUrl: null });
+      statusUrl: null, dbThresholdMs: policyMatches ? target!.db_threshold_ms : null });
   }
   return out;
 }
@@ -171,6 +178,7 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
   const out = new Map<number, ExternalWitness>(targetsConfig.targets.map(target => [target.monitor_id, {
     source: 'cloudflare_alarm', status: 'unknown', observedAt: null, totalMs: null, ageMs: null,
     runId: null, runAttempt: null, runUrl: null, statusUrl: CLOUDFLARE_WITNESS_STATUS_URL,
+    dbThresholdMs: target.db_threshold_ms,
   }]));
   // Compare the entire configured value before fetching: no userinfo, alternate
   // ports, paths, queries, fragments, redirects, or arbitrary destinations.
@@ -189,7 +197,7 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
   const operation = async () => {
     requireDeadline();
     const monitorsPromise = env.DB.prepare(
-      'SELECT id,url,enabled,monitor_role,db_latency_threshold_ms FROM monitors WHERE id IN (?,?)',
+      'SELECT id,url,enabled,monitor_role FROM monitors WHERE id IN (?,?)',
     ).bind(...targetsConfig.targets.map(target => target.monitor_id)).all<Monitor>().catch(() => ({ results: [] as Monitor[] }));
     const res = await fetcher(`${CLOUDFLARE_WITNESS_ORIGIN}/latest`, {
       method: 'GET', redirect: 'manual', cache: 'no-store', signal: controller.signal,
@@ -249,7 +257,7 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
       const monitor = monitors.find(monitor => monitor.id === target.monitor_id);
       if (!monitor || monitor.enabled !== 1 || monitor.monitor_role !== 'availability' ||
           monitor.url !== target.url || input.url !== monitor.url ||
-          monitor.db_latency_threshold_ms !== target.db_threshold_ms || input.db_threshold_ms !== monitor.db_latency_threshold_ms ||
+          input.db_threshold_ms !== target.db_threshold_ms ||
           !cloudflareInterval(input, now) || !finite(input.total_ms, 0, 30_000) || !statusCode(input.http_status) ||
           (input.observed_at as number) < (payload.observed_at as number) || (input.finished_at as number) > (payload.finished_at as number) ||
           typeof input.status !== 'string' || !['ok', 'degraded', 'down'].includes(input.status) ||
@@ -258,7 +266,8 @@ export async function getExternalSummaries(env: Env, now = Date.now(), options: 
           (input.status === 'ok' && (input.database_ms as number) >= target.db_threshold_ms)) continue;
       summaries.push([target.monitor_id, { source: 'cloudflare_alarm', status: input.status as ExternalWitness['status'],
         observedAt: input.observed_at as number, totalMs: input.total_ms, ageMs: Math.max(0, now - (input.observed_at as number)),
-        runId: null, runAttempt: null, runUrl: null, statusUrl: CLOUDFLARE_WITNESS_STATUS_URL }]);
+        runId: null, runAttempt: null, runUrl: null, statusUrl: CLOUDFLARE_WITNESS_STATUS_URL,
+        dbThresholdMs: target.db_threshold_ms }]);
     }
     requireDeadline();
     for (const [id, summary] of summaries) out.set(id, summary);

@@ -40,6 +40,7 @@ test('Cloudflare summary only fetches the fixed latest endpoint and leaves every
   assert.equal(out.get(5).status, 'ok'); assert.equal(out.get(6).status, 'ok');
   assert.equal(out.get(5).source, 'cloudflare_alarm'); assert.equal(out.get(5).runUrl, null);
   assert.equal(out.get(5).statusUrl, origin + '/status'); assert.equal(out.get(5).ageMs, 2000);
+  assert.equal(out.get(5).dbThresholdMs, 1000);
   const after = JSON.stringify(f.sqlite.prepare('SELECT name FROM sqlite_master WHERE type=\'table\'').all()
     .map(({ name }) => [name, f.sqlite.prepare(`SELECT count(*) AS n FROM "${name}"`).get().n]));
   assert.equal(before, after);
@@ -103,12 +104,32 @@ for (const [name, mutate] of [
   const out = await call(f, value); assert.equal(out.get(5).status, 'unknown');
 });
 
-test('current monitor URL, threshold and availability role must still match the fixed probe', async t => {
+test('current monitor URL, enabled flag and availability role must still match the fixed probe', async t => {
   for (const sql of ["UPDATE monitors SET url='https://changed.invalid' WHERE id=5",
-    'UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=5',
     "UPDATE monitors SET monitor_role='diagnostic' WHERE id=5", 'UPDATE monitors SET enabled=0 WHERE id=5']) {
     const f = fixture(t); f.sqlite.exec(sql); assert.equal((await call(f)).get(5).status, 'unknown');
   }
+});
+
+test('a fixed1000 supplement stays valid and exposes its own policy when the primary threshold is1500', async t => {
+  const f = fixture(t);
+  f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500,config_revision=2 WHERE id IN(5,6)');
+  const before = JSON.stringify(f.sqlite.prepare('SELECT * FROM monitors ORDER BY id').all());
+  const out = await call(f);
+  assert.equal(out.get(5).status, 'ok'); assert.equal(out.get(6).status, 'ok');
+  assert.equal(out.get(5).dbThresholdMs, 1000); assert.equal(out.get(6).dbThresholdMs, 1000);
+  const value = payload(); Object.assign(value.results[0], { status: 'degraded', database_ms: 1200 });
+  assert.equal((await call(f, value)).get(5).status, 'degraded');
+  assert.equal(JSON.stringify(f.sqlite.prepare('SELECT * FROM monitors ORDER BY id').all()), before);
+});
+
+test('a reported1500 threshold is invalid even when it equals the current primary threshold', async t => {
+  const f = fixture(t), value = payload();
+  f.sqlite.exec('UPDATE monitors SET db_latency_threshold_ms=1500 WHERE id=5');
+  value.results[0].db_threshold_ms = 1500;
+  const out = await call(f, value);
+  assert.equal(out.get(5).status, 'unknown');
+  assert.equal(out.get(5).dbThresholdMs, 1000);
 });
 
 test('a fresh down observation stays down and degraded stays degraded', async t => {

@@ -179,8 +179,12 @@ The consumer only fetches the exact allowlisted origin's `/latest`, with a
 two-second absolute deadline including headers and body, no redirects, no-store,
 and an 8 KiB body limit. Cached responses cannot establish health. It checks enabled/current-generation readiness, local
 timestamps (less than 150 seconds old and no more than 30 seconds in the future),
-the two fixed target identities, and their URLs/DB thresholds against current
-availability monitors. Stopped, restarted without a new observation, stale, or
+the two fixed target identities and URLs against enabled current availability monitors.
+The reported DB threshold must match the supplement's fixed1000ms target policy;
+it need not equal the primary monitor's separately configured warning threshold.
+Cards and Slack expose this own DB policy, and cards identify a differing primary
+threshold explicitly. The supplement neither normalizes nor replaces primary state,
+uptime or notification decisions. Stopped, restarted without a new observation, stale, or
 configuration-mismatched results remain unknown. The only Cloudflare provenance
 link is the fixed `/status`; GitHub run links are never fabricated for alarm runs.
 

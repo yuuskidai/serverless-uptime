@@ -109,12 +109,15 @@ export async function renderStatusBlocks(
     const external = externalWitnesses.get(monitor.id);
     const externalHeading = external?.source === 'cloudflare_alarm' ? '別Worker確認（Cloudflare）' : '外部確認';
     const externalCadence = external?.source === 'cloudflare_alarm' ? '約1分、同じCloudflare上の補助確認' : '約5分ごとの補助確認';
+    const ownThreshold = typeof external?.dbThresholdMs === 'number' && Number.isSafeInteger(external.dbThresholdMs)
+      && external.dbThresholdMs > 0 ? external.dbThresholdMs : null;
+    const externalPolicy = ownThreshold === null ? '' : `、DB警告${ownThreshold}ms基準（主系判定とは独立）`;
     const externalLabel = external?.status === 'ok' ? '正常' : external?.status === 'degraded' ? '遅延・一部不調'
       : external?.status === 'down' ? '応答確認できず' : '未確認';
     const externalTime = external?.observedAt != null
       ? ` · <!date^${Math.floor(external.observedAt/1000)}^{date_short_pretty} {time}|${new Date(external.observedAt).toISOString()}>` : '';
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text:
-      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>\n${externalHeading}: ${externalLabel}${externalTime}（${externalCadence}）` } });
+      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>\n${externalHeading}: ${externalLabel}${externalTime}（${externalCadence}${externalPolicy}）` } });
   }
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
     `:clock1: as of <!date^${Math.floor(now/1000)}^{date_short_pretty} {time}|${new Date(now).toISOString()}>` }] });

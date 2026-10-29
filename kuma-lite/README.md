@@ -263,6 +263,10 @@ DOWN から DEGRADED は部分復旧として扱い、DEGRADED から完全復�
 旧 `latency_threshold_ms` の正の安全整数は DB 専用の
 `db_latency_threshold_ms` に引き継ぎます。HTTP 全体の閾値
 `http_latency_threshold_ms` は `NULL` のままで、明示設定するまで有効になりません。
+
+別Worker・外部の補助確認は、固定のDB警告1000ms基準を保持します。
+主系の警告閾値が1500msでも補助結果を無効にせず、画面には補助側の基準を明示します。
+補助結果は主系の状態・稼働率・通知判定には混ぜません。
 新しい DB 閾値を明示的に `NULL` にした場合、旧列への fallback はしません。
 
 相関ID・段階計測・部分復旧と完全復旧・AI分析の公開仕様は

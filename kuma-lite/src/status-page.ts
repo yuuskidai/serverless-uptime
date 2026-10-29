@@ -1172,7 +1172,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
       </div>
 
       ${reasonLine}
-      ${renderExternalWitness(view.external)}
+      ${renderExternalWitness(view.external, view.monitor.db_latency_threshold_ms)}
 
       <div class="mt-5">
         <div class="bar-row" role="img"
@@ -1207,7 +1207,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 }
 
 /** A separate observation, never a replacement for the primary monitor state. */
-function renderExternalWitness(witness: ExternalWitness | null): string {
+function renderExternalWitness(witness: ExternalWitness | null, primaryDbThreshold?: number | null): string {
   const cloudflare = witness?.source === 'cloudflare_alarm';
   const heading = cloudflare ? '別Worker確認（Cloudflare）' : '外部確認';
   const label = witness?.status === 'ok' ? '正常' : witness?.status === 'degraded' ? '遅延・一部不調'
@@ -1221,7 +1221,13 @@ function renderExternalWitness(witness: ExternalWitness | null): string {
   const provenance = url ? ` · <a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" class="underline">確認記録</a>` : '';
   const cadence = cloudflare ? '約1分ごとの補助確認。同じCloudflare上で動作し、150秒以上古い場合は未確認です。'
     : '約5分ごとの補助確認。更新が古い場合は未確認です。';
-  return `<p class="mt-2 text-xs text-slate-400 leading-snug">${heading}: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">${cadence}</span></p>`;
+  const threshold = typeof witness?.dbThresholdMs === 'number' && Number.isSafeInteger(witness.dbThresholdMs)
+    && witness.dbThresholdMs > 0 ? witness.dbThresholdMs : null;
+  const differentPrimary = typeof primaryDbThreshold === 'number' && Number.isSafeInteger(primaryDbThreshold)
+    && primaryDbThreshold > 0 && primaryDbThreshold !== threshold;
+  const policy = threshold === null ? '' : `DB警告${threshold}ms基準。${differentPrimary
+    ? `主系${primaryDbThreshold}msとは別基準の補助確認です。` : '主系の判定・稼働率とは独立した補助確認です。'}`;
+  return `<p class="mt-2 text-xs text-slate-400 leading-snug">${heading}: ${label}${escapeHtml(time + elapsed)}${provenance}<span class="block text-[10px] text-slate-500">${escapeHtml(policy)}${cadence}</span></p>`;
 }
 
 function safeExternalRunUrl(value: string | null): string | null {
