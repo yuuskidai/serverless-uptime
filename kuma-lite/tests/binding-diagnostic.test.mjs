@@ -38,10 +38,8 @@ function makeLane(cycle = 1, options = {}) {
   return { time, lane: diagnostic.createBindingDiagnostic(bindings(), cohort(), scheduled, scheduled + 1000, options.window ?? window, time) };
 }
 
-test('diagnostic defaults OFF and accepts only an absolute window of at most twenty minutes', () => {
-  assert.equal(diagnostic.BINDING_DIAGNOSTIC_FROM, null);
-  assert.equal(diagnostic.BINDING_DIAGNOSTIC_UNTIL, null);
-  assert.equal(diagnostic.createBindingDiagnostic(bindings(), cohort(), FROM, FROM), undefined);
+test('unconfigured diagnostic is OFF and only absolute windows of at most twenty minutes are accepted', () => {
+  assert.equal(diagnostic.createBindingDiagnostic(bindings(), cohort(), FROM, FROM, { from: null, until: null }, clock(FROM)), undefined);
   for (const bad of [{ from: null, until: window.until }, { from: '2026-10-29T10:00:00', until: window.until },
     { ...window, until: new Date(FROM + 20 * 60000 + 1).toISOString() }, { from: window.until, until: window.from }]) {
     assert.equal(diagnostic.createBindingDiagnostic(bindings(), cohort(), FROM, FROM, bad, clock(FROM)), undefined);
@@ -260,4 +258,22 @@ test('caller cancellation is contaminated, while a fully returned HTTP503 stays 
   }
   const { lane } = makeLane(); lane.start(5); lane.finish(5, false); await lane.wait(6);
   assert.equal(lane.timings(6).diagnostic_contaminated, true);
+});
+
+
+test('reviewed source window bounds natural raw schedules, all four regimes and expiry', () => {
+  const from = diagnostic.BINDING_DIAGNOSTIC_FROM, until = diagnostic.BINDING_DIAGNOSTIC_UNTIL;
+  if (from === null || until === null) { assert.equal(from, null); assert.equal(until, null); return; }
+  const start = Date.parse(from), end = Date.parse(until);
+  assert.ok(Number.isSafeInteger(start) && Number.isSafeInteger(end) && end > start && end - start <= 1200000);
+  const modes = [];
+  for (let n = 0; n < 4; n++) {
+    const raw = start + n * 60000 + 52009, received = raw + 803;
+    const lane = diagnostic.createBindingDiagnostic(bindings(), cohort(), raw, received, undefined, clock(received));
+    modes.push(lane.timings(5).diagnostic_mode);
+  }
+  assert.deepEqual(modes, ['parallel_control', 'portal_first', 'parallel_control', 'core_first']);
+  assert.equal(diagnostic.createBindingDiagnostic(bindings(), cohort(), start - 1, start - 1, undefined, clock(start - 1)), undefined);
+  assert.equal(diagnostic.createBindingDiagnostic(bindings(), cohort(), end, end, undefined, clock(end)), undefined);
+  assert.equal(end - start, 20 * 60000);
 });

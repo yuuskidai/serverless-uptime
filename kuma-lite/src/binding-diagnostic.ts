@@ -2,8 +2,8 @@ import type { Env, Monitor } from './types';
 
 // A source-reviewed absolute window keeps cold isolates from extending the
 // diagnostic by starting a fresh relative timer. Both unset means disabled.
-export const BINDING_DIAGNOSTIC_FROM: string | null = null;
-export const BINDING_DIAGNOSTIC_UNTIL: string | null = null;
+export const BINDING_DIAGNOSTIC_FROM: string | null = '2026-10-29T00:53:00.000Z';
+export const BINDING_DIAGNOSTIC_UNTIL: string | null = '2026-10-29T01:13:00.000Z';
 export type BindingDiagnosticMode = 'parallel_control' | 'portal_first' | 'core_first';
 export interface BindingDiagnosticTimings {
   diagnostic_mode: BindingDiagnosticMode;

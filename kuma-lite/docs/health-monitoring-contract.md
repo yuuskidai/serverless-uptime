@@ -213,7 +213,7 @@ start a new HTTP latency incident. Existing values and target timeouts are not a
 
 `src/binding-diagnostic.ts` contains an opt-in experiment for the existing four
 health targets. `BINDING_DIAGNOSTIC_FROM` and `BINDING_DIAGNOSTIC_UNTIL` are both
-`null` by default. Enabling it requires a reviewed source change to two absolute
+`null` in the inactive preparation state. Enabling it requires a reviewed source change to two absolute
 ISO timestamps with explicit time zones and a duration no greater than 20 minutes.
 It adds no probes, Cron triggers, migrations, routes, or notification destinations.
 
@@ -254,7 +254,17 @@ eligible evidence; the diagnostic does not exclude failures merely for being 503
 In particular, a binding-only negative result does not reject the broader
 concurrent-CPU hypothesis. Public fetches may also contribute interference;
 their placement and thread relationship are not established by this experiment.
+The experiment also changes in-flight request and connection pressure, so even a
+positive result cannot attribute the cause to CPU alone. Whether D1 operations
+contribute to a particular connection pool is not established by this experiment.
 The local readiness model in the runner tests is not production causal evidence.
+
+The reviewed activation window is 2026-10-29 09:53 through 10:13 JST
+(`2026-10-29T00:53:00.000Z` through `2026-10-29T01:13:00.000Z`).
+It is inactive before and after that absolute window. A final slot can finish
+after expiry or bypass serialization; retain its observation and contamination
+flag, and exclude it from a fully-contained causal cohort rather than extending
+the diagnostic window.
 
 After expiry, new runs use the original parallel behavior automatically. Restore
 both constants to `null` in a new descendant commit and verify the deployed
