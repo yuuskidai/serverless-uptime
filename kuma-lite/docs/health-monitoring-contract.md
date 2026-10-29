@@ -271,8 +271,8 @@ restored natural parallel monitoring. Those six observations remain missing and
 UNKNOWN; the interrupted experiment is invalid for improvement claims. No
 historical observation, lease, incident, or notification state is repaired or replayed.
 
-A separate retry is scheduled for 2026-10-29 10:32 through 10:52 JST
-(`2026-10-29T01:32:00.000Z` through `2026-10-29T01:52:00.000Z`), using the
+A separate retry is scheduled for 2026-10-29 10:38 through 10:58 JST
+(`2026-10-29T01:38:00.000Z` through `2026-10-29T01:58:00.000Z`), using the
 reviewed timer-wrapper/fail-open fix. Analyze this retry separately from the
 interrupted window. It is inactive before and after that absolute window.
 A final slot can finish after expiry or bypass serialization; retain its
