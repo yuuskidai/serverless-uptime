@@ -139,8 +139,14 @@ function runnerFixture({ cycle = 1, probe, overrides = {}, deliver } = {}) {
   return { ...fixture, slot, time, claims, events, run: () => run(fixture.env, slot, { receivedAt: slot + 1000 }) };
 }
 
-test('all claims precede dispatch waits; public probes run once while the second binding queues', async () => {
-  const first = deferred(); const f = runnerFixture({ probe: async (_env, monitor) => { if (monitor.id === 5) await first.promise; return completedResult('up'); } });
+test('all claims precede dispatch waits; public probes run once while the second binding queues', async t => {
+  const first = deferred();
+  const f = runnerFixture({ probe: async (_env, monitor) => {
+    if (monitor.id === 5) await first.promise;
+    if (monitor.id === 6) f.time.advance(260);
+    return completedResult('up');
+  } });
+  t.mock.method(Date, 'now', () => f.time.now());
   const pending = f.run();
   try {
     await flush(); assert.deepEqual(new Set(f.claims), new Set([5, 6, 9, 10]));
@@ -150,6 +156,9 @@ test('all claims precede dispatch waits; public probes run once while the second
     assert.equal(f.events.filter(id => id === 6).length, 1);
     const audit = JSON.parse(f.sqlite.prepare("SELECT timings_json FROM monitor_attempts WHERE monitor_id=6").get().timings_json);
     assert.equal(audit.dispatch_wait_ms, 82); assert.equal(audit.diagnostic_mode, 'portal_first');
+    assert.equal(audit.probe_ms, 260, 'probe clock excludes the separate 82ms queue');
+    assert.equal(audit.received_to_probe_ms, 82);
+    assert.equal(f.sqlite.prepare('SELECT ts FROM checks WHERE monitor_id=6').get().ts, f.slot + 1082);
     assert.equal(audit.diagnostic_contaminated, false);
     assert.equal(f.sqlite.prepare('SELECT count(*) n FROM checks').get().n, 4);
   } finally { first.resolve(); await pending; f.close(); }

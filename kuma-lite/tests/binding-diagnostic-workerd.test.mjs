@@ -114,8 +114,9 @@ async function fixture(t, cycle = 1, fault = 'none') {
         return Response.json(health, { headers });
       },
     },
-    { name: 'portal', script: targetScript(cycle === 3 ? 10 : 180), modules: true, compatibilityDate: '2025-01-01', outboundService: deny },
-    { name: 'core', script: targetScript(cycle === 3 ? 180 : 10), modules: true, compatibilityDate: '2025-01-01', outboundService: deny },
+    // A real successor probe may take longer than its earlier dispatch wait.
+    { name: 'portal', script: targetScript(cycle === 3 ? 260 : 180), modules: true, compatibilityDate: '2025-01-01', outboundService: deny },
+    { name: 'core', script: targetScript(cycle === 3 ? 180 : 260), modules: true, compatibilityDate: '2025-01-01', outboundService: deny },
   ] }));
   t.after(() => mf.dispose());
   const db = await mf.getD1Database('DB', 'runner');
@@ -169,8 +170,12 @@ for (const cycle of [1, 3]) test(`native active runner commits all four targets 
   assert.equal(timings.get(first).dispatch_wait_ms, 0);
   assert.ok(timings.get(second).dispatch_wait_ms >= 100);
   assert.ok(timings.get(second).received_to_probe_ms >= timings.get(second).dispatch_wait_ms);
-  assert.ok(timings.get(second).probe_ms < timings.get(second).dispatch_wait_ms, 'queue time must not become probe time');
   const firstCheck = checks.find(value => value.monitor_id === first), secondCheck = checks.find(value => value.monitor_id === second);
+  // Check the saved start clocks, not the relative duration of two independent
+  // waits: CI scheduling can lengthen the actual probe after the queue ends.
+  assert.equal(firstCheck.ts - timings.get(first).received_to_probe_ms,
+    secondCheck.ts - timings.get(second).received_to_probe_ms);
+  assert.ok(Number.isFinite(timings.get(second).probe_ms) && timings.get(second).probe_ms >= 0);
   assert.ok(firstCheck.ts + timings.get(first).probe_ms <= secondCheck.ts);
   assert.equal((await f.db.prepare('SELECT count(*) n FROM monitor_execution WHERE lease_until<>0').first()).n, 0);
   assert.equal((await f.db.prepare('SELECT count(*) n FROM notification_outbox').first()).n, 0);
