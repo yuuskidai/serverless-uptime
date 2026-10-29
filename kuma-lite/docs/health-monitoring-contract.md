@@ -271,13 +271,41 @@ restored natural parallel monitoring. Those six observations remain missing and
 UNKNOWN; the interrupted experiment is invalid for improvement claims. No
 historical observation, lease, incident, or notification state is repaired or replayed.
 
-A separate retry is scheduled for 2026-10-29 10:38 through 10:58 JST
+The first separate retry ran on 2026-10-29 from 10:38 through 10:58 JST
 (`2026-10-29T01:38:00.000Z` through `2026-10-29T01:58:00.000Z`), using the
 reviewed timer-wrapper/fail-open fix. Analyze this retry separately from the
 interrupted window. It is inactive before and after that absolute window.
 A final slot can finish after expiry or bypass serialization; retain its
 observation and contamination flag, and exclude it from a fully-contained
 causal cohort rather than extending the diagnostic window.
+
+The operator's read-only D1 comparison recorded all 20 same-slot cohorts and
+80 checks as clean, with no missing or duplicate checks. Portal's parallel
+control had Database latency at least 1000 ms in 5 of 10 observations, including
+one HTTP 503; its two serial orders together had none in 10 observations. Core
+had 2 of 10 parallel Database observations at least 1000 ms and none in 10 serial
+observations. All 40 public-shadow observations were normal. The independent
+witness accepted 20 natural slots, with all 40 target responses HTTP 200,
+maximum Database latency 124 ms and maximum total latency 187 ms, at generation 1.
+These are separate measurement paths; the witness does not cancel a binding
+failure. The small sample and fixed even-minute control leave time-period
+confounding, and the result does not establish CPU as the sole cause.
+
+OFF descendant `969c0401250e4100ee18930a67023bef929ae872` restored both constants
+to `null`. The operator verified deployed monitor version
+`0e210ce1-d292-4cb4-8135-eddf3afbaecf` at 100% on 10:59:21 JST. The natural
+10:58 slot had four recorded checks, no diagnostic fields, and 2818 ms measured
+binding interval overlap. The remaining post-expiry slots require their own
+verification; this first restored slot does not assert the whole five-slot result.
+
+A second separate window is scheduled for 2026-10-29 11:05 through 11:25 JST
+(`2026-10-29T02:05:00.000Z` through `2026-10-29T02:25:00.000Z`). It starts on an
+odd minute, reversing control/serial minute parity while retaining the same
+four-slot cycle and existing probes. Report both windows separately, including
+all outcomes, matured UNKNOWN observations and preset clean-cohort exclusions.
+Do not exclude high latency or HTTP 503, fill missing checks, extend the window
+to collect favorable results, or infer a permanent remedy from either window.
+The parity reversal does not remove all traffic, placement or time confounding.
 
 After expiry, new runs use the original parallel behavior automatically. Restore
 both constants to `null` in a new descendant commit and verify the deployed
