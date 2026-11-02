@@ -1,6 +1,7 @@
 import type { CheckResult, Env, Monitor } from './types';
 import type { MonitorLease } from './monitor-execution';
 import type { StateTransition } from './state-transition';
+import { diagnosticOutboxInsertStatement } from './diagnostic-notification-policy';
 
 const DB_NOW = "(CAST(strftime('%s','now') AS INTEGER) * 1000)";
 export const NOTIFICATION_DELIVERY_LEASE_MS = 30_000;
@@ -33,6 +34,9 @@ export function outboxInsertStatement(
 ): D1PreparedStatement | null {
   if (monitor.monitor_role === 'shadow' ||
     !['availability', 'diagnostic'].includes(monitor.monitor_role ?? 'availability')) return null;
+  if (monitor.monitor_role === 'diagnostic') {
+    return diagnosticOutboxInsertStatement(env,monitor,lease,result,transition,ts);
+  }
   let kind = transition.kind;
   const repair = kind === null;
   if (repair) {
@@ -213,6 +217,14 @@ async function drainMonitor(env: Env, monitorId: number): Promise<void> {
         const legacyThread = payload.transition.previousSlackAlertTs;
         if (typeof legacyThread === 'string' && legacyThread.length > 0 && legacyThread.length <= 128) thread=legacyThread;
       }
+      // A lost initial Slack acknowledgement must not create a new top-level
+      // "recovery" without its warning. Preserve the uncertain warning receipt
+      // and record this skipped reply; Discord-only delivery needs no Slack ts.
+      if (monitor.monitor_role==='diagnostic' && event.kind==='up' && !thread &&
+        env.SLACK_BOT_TOKEN && env.SLACK_SIGNING_SECRET && env.SLACK_DEFAULT_CHANNEL) {
+        await finishEvent(env,event,token,'cancelled','diagnostic_thread_unavailable',null);
+        continue;
+      }
       const transition = { ...payload.transition, previousSlackAlertTs: thread };
       if (event.kind==='down' || event.kind==='degraded') thread=null;
       let status: 'sent' | 'uncertain' | 'failed' = 'sent';
@@ -232,7 +244,9 @@ async function drainMonitor(env: Env, monitorId: number): Promise<void> {
         errorCode = status==='failed' ? 'not_configured' : 'delivery_unconfirmed';
         if ((event.kind==='down' || event.kind==='degraded') && typeof problem?.slackAlertTs==='string') thread=problem.slackAlertTs;
       }
-      if (event.kind==='up') thread=null;
+      // A known unsent diagnostic recovery may be retried later. Keep its
+      // acknowledged warning thread; ambiguous sends remain non-retryable.
+      if (event.kind==='up' && (monitor.monitor_role!=='diagnostic' || status!=='failed')) thread=null;
       await finishEvent(env, event, token, status, errorCode, thread);
       console.log({ event:'notification_outbox_delivery', monitor_id:monitorId, outbox_id:event.id,
         scheduled_slot:event.scheduled_slot, config_revision:event.config_revision, attempted_status:status });
