@@ -467,6 +467,11 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       blocks: args.blocks,
       thread_ts: args.threadTs,
       reply_broadcast: args.threadTs ? args.replyBroadcast : undefined,
+      // Block Kit owns formatting; the accessibility/push fallback stays plain
+      // and must not turn health text into mentions or automatic link previews.
+      parse: 'none',
+      link_names: false,
+      mrkdwn: false,
       unfurl_links: false,
       unfurl_media: false,
     });

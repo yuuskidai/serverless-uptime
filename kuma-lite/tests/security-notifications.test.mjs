@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadTs } from './helpers.mjs';
 
-const { validSecurityAlert, renderSecurityAlert, deliverSecurityAlert } = loadTs('security-notifications');
+const { validSecurityAlert, renderSecurityAlert, renderSecurityAlertBlocks, deliverSecurityAlert } = loadTs('security-notifications');
 const now = Date.now();
 const env = { SLACK_BOT_TOKEN: 'synthetic-test-token', SLACK_DEFAULT_CHANNEL: 'C0123456789' };
 const sample = extra => ({ version: 1, id: '17818655-47b9-443e-8543-a768f3941310', source: 'core',
@@ -44,8 +44,100 @@ test('a valid warning uses only the fixed channel and safe blocks, and retries r
     assert.equal(call.body.link_names, false); assert.equal(call.body.unfurl_links, false);
     assert.equal(call.body.unfurl_media, false);
     assert.equal(call.body.blocks[0].text.type, 'plain_text');
+    assert.equal(call.body.blocks[0].type, 'header');
+    assert.ok(call.body.blocks.some(block => block.type === 'divider'));
+    assert.ok(call.body.blocks.some(block => block.type === 'section' && block.fields?.length >= 4));
     assert.match(call.body.text, /不正侵入が成立したとは判断できません/);
     assert.doesNotMatch(call.body.text, /synthetic-test-token|https?:|<!|<@/);
+  }
+});
+
+test('rich cards distinguish WAF outcomes and retain sampling limits without inventing attack success', () => {
+  const outputs = {};
+  for (const action of ['block', 'managed_challenge', 'js_challenge', 'challenge', 'log', 'mixed']) {
+    outputs[action] = JSON.stringify(renderSecurityAlertBlocks(sample({ source: 'waf', kind: 'waf_activity',
+      host: 'partner-portal.opus-system.jp', action, detailCode: 'sampled_waf', count: 9 })));
+    assert.match(outputs[action], /観測記録/);
+    assert.match(outputs[action], /サンプリング/);
+    assert.match(outputs[action], /通信全件の件数ではありません/);
+    assert.match(outputs[action], /侵入が成立したとは判断できません/);
+    assert.doesNotMatch(outputs[action], /侵入を防止しました|侵入成功を確認|9人|9件の攻撃/);
+  }
+  assert.match(outputs.block, /WAFで遮断/);
+  for (const action of ['managed_challenge', 'js_challenge', 'challenge']) {
+    assert.match(outputs[action], /通過・遮断の最終結果は/);
+    assert.doesNotMatch(outputs[action], /WAFで遮断|遮断を記録/);
+  }
+  assert.match(outputs.log, /記録のみ/);
+  assert.match(outputs.log, /遮断されたことは、この記録だけでは確認できません/);
+  assert.doesNotMatch(outputs.mixed, /WAFで遮断|遮断を記録/);
+});
+
+test('management changes, auth denials, and an unknown monitoring pipeline have actionable distinct wording', () => {
+  for (const kind of ['admin_privilege_changed', 'totp_disabled', 'security_policy_weakened']) {
+    const blocks = renderSecurityAlertBlocks(sample({ kind, severity: 'critical' }));
+    assert.match(blocks[0].text.text, /^🚨 重要な管理変更/);
+    assert.match(JSON.stringify(blocks), /優先して確認|優先して確認し/);
+    assert.match(JSON.stringify(blocks), /想定外/);
+  }
+  const denied = JSON.stringify(renderSecurityAlertBlocks(sample({ kind: 'auth_rate_limited_burst' })));
+  assert.match(denied, /保存処理の異常でも拒否/);
+  assert.match(denied, /上限到達とは断定できません/);
+  const unknown = JSON.stringify(renderSecurityAlertBlocks(sample({ source: 'pipeline', kind: 'pipeline_degraded',
+    host: undefined, detailCode: 'analytics_gap' })));
+  assert.match(unknown, /監視状態が未確認/);
+  assert.match(unknown, /監視の正常性は未確認/);
+  assert.doesNotMatch(unknown, /正常です|復旧しました|✅/);
+});
+
+test('JST time crosses the UTC day boundary correctly and anonymous IDs do not crowd the card', () => {
+  const timestamp = Date.parse('2026-11-01T18:36:00Z');
+  const alert = sample({ occurredAt: timestamp, windowStart: timestamp - 60_000, windowEnd: timestamp,
+    subjectHash: 'a'.repeat(64) });
+  const blocks = JSON.stringify(renderSecurityAlertBlocks(alert));
+  assert.match(blocks, /2026\/11\/02 03:36:00/);
+  assert.match(blocks, /2026\/11\/02 03:35:00/);
+  assert.match(blocks, /JST/);
+  assert.match(blocks, /aaaaaaaaaaaa…/);
+  assert.doesNotMatch(blocks, new RegExp('a'.repeat(64)));
+  assert.match(renderSecurityAlert(alert), new RegExp('a'.repeat(64)));
+  assert.match(renderSecurityAlert(alert), /対応の目安/);
+});
+
+test('all security card variants fit Block Kit limits and expose only fixed navigation URLs', () => {
+  const variants = [
+    ...['auth_failure_burst', 'account_locked', 'auth_rate_limited_burst', 'authorization_denied_burst',
+      'admin_privilege_changed', 'totp_disabled', 'security_policy_weakened'].map(kind => sample({ kind,
+      severity: ['admin_privilege_changed', 'totp_disabled', 'security_policy_weakened'].includes(kind) ? 'critical' : 'warning' })),
+    sample({ source: 'waf', kind: 'waf_activity', detailCode: 'sampled_waf', action: 'block', host: 'opus-system.jp' }),
+    sample({ source: 'ddos', kind: 'ddos_attack', detailCode: 'native_ddos', host: 'opus-system.jp' }),
+    sample({ source: 'pipeline', kind: 'pipeline_degraded', detailCode: 'delivery_failed', host: undefined }),
+  ];
+  const allowed = new Set(['https://core-os.opus-system.jp/', 'https://partner-portal.opus-system.jp/', 'https://dash.cloudflare.com/']);
+  for (const variant of variants) {
+    const blocks = renderSecurityAlertBlocks({ ...variant, count: 1_000_000_000, subjectHash: 'b'.repeat(64), ruleId: 'r'.repeat(64) });
+    assert.ok(blocks.length <= 50);
+    for (const block of blocks) {
+      if (block.type === 'header') assert.ok(block.text.text.length <= 150);
+      if (block.text) assert.ok(block.text.text.length <= 3000);
+      if (block.fields) {
+        assert.ok(block.fields.length <= 10);
+        assert.ok(block.fields.every(field => field.text.length <= 2000));
+      }
+      if (block.type === 'context') {
+        assert.ok(block.elements.length <= 10);
+        assert.ok(block.elements.every(element => element.text.length <= 2000));
+      }
+      if (block.type === 'actions') {
+        assert.ok(block.elements.length <= 25);
+        for (const button of block.elements) {
+          assert.equal(button.type, 'button'); assert.ok(button.text.text.length <= 75);
+          assert.ok(allowed.has(button.url)); assert.ok(button.url.length <= 3000);
+        }
+      }
+    }
+    assert.ok(renderSecurityAlert(variant).length <= 4000);
+    assert.doesNotMatch(JSON.stringify(blocks), /<!|<@|hooks\.slack|token|cookie/i);
   }
 });
 

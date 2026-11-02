@@ -53,5 +53,8 @@ test('real workerd grants Slack delivery only through the named binding and keep
   assert.equal(calls[0].body.channel, channel);
   assert.equal(calls[0].body.client_msg_id, alert.id);
   assert.equal(calls[0].body.blocks[0].text.type, 'plain_text');
+  assert.equal(calls[0].body.blocks[0].type, 'header');
+  assert.ok(calls[0].body.blocks.some(block => block.type === 'section' && block.fields?.length >= 4));
+  assert.match(JSON.stringify(calls[0].body.blocks), /対応の目安/);
   assert.doesNotMatch(JSON.stringify(calls[0].body), /synthetic-local-token|<!|<@/);
 });

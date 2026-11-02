@@ -5,6 +5,7 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as urlDisplay from '../src/url-display.ts';
 import * as monitorPolicy from '../src/monitor-policy.ts';
+import * as notificationLayout from '../src/slack-notification-layout.ts';
 
 function load(file,dependencies,globals={}){
  const module={exports:{}};const source=readFileSync(new URL('../src/'+file+'.ts',import.meta.url),'utf8');
@@ -16,7 +17,7 @@ function load(file,dependencies,globals={}){
 function fixture(options={}){
  const posts=[],reactions=[],discord=[],jobs=[];
  const bot={defaultChannelId:'synthetic-channel',slack:{async postBlocks(_channel,payload){posts.push(payload);if(options.post)return options.post(payload);return {ts:'synthetic-thread'};},async addReaction(...args){reactions.push(args);}}};
- const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>bot},'./url-display':urlDisplay},{fetch:async(_url,init)=>{discord.push(JSON.parse(init.body));assert.equal(init.redirect,'manual');assert.ok(init.signal instanceof AbortSignal);return options.discordResponse?options.discordResponse():new Response(null,{status:204});}});
+ const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>bot},'./url-display':urlDisplay,'./slack-notification-layout':notificationLayout},{fetch:async(_url,init)=>{discord.push(JSON.parse(init.body));assert.equal(init.redirect,'manual');assert.ok(init.signal instanceof AbortSignal);return options.discordResponse?options.discordResponse():new Response(null,{status:204});}});
  const transition=load('state-notifications',{'./notifier':notifier,'./monitor-policy':monitorPolicy,'./rca':{async enqueueRca(_env,job){jobs.push(job);if(options.enqueue)return options.enqueue();}}},{setTimeout:(callback,ms)=>setTimeout(callback,options.shortDeadline&&ms===18000?5:ms)});
  return {notifier,transition,posts,reactions,discord,jobs,env:{DISCORD_WEBHOOK_URL:'https://synthetic.invalid/discord'},monitor:{id:1,name:'Synthetic',url:'https://synthetic.invalid/healthz'},detail:{reason:'応答遅延が継続',components:[],version:null}};
 }
@@ -119,11 +120,11 @@ test('queued delivery renders the observation time rather than the later send ti
  const f=fixture();const observed=Date.parse('2026-10-25T10:00:00Z');
  await f.transition.notifyTransition(f.env,f.monitor,{healthz_reason:'failure',error:null,healthz_components:null,healthz_version:null},
   {kind:'down',previousSlackAlertTs:null},observed);
- assert.match(JSON.stringify(f.posts),new RegExp(String(observed/1000)));
+ assert.match(JSON.stringify(f.posts),/2026\/10\/25 19:00:00 JST/);
  assert.equal(f.discord[0].embeds[0].timestamp,'2026-10-25T10:00:00.000Z');
 });
 test('missing notification channels are a known unsent failure',async()=>{
- const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>null},'./url-display':urlDisplay});
+ const notifier=load('notifier',{'./slack-bot':{buildSlackBot:()=>null},'./url-display':urlDisplay,'./slack-notification-layout':notificationLayout});
  await assert.rejects(notifier.notifyDown({}, {name:'Synthetic'}, {reason:'failure',components:[],version:null}),error=>error.code==='not_configured');
 });
 

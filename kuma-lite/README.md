@@ -298,6 +298,14 @@ Slack の bot token と signing secret を登録すると、DOWN/復旧通知が
 飛び、`/kuma` スラッシュコマンドが利用可能になります（`/status` は Slack 予約名
 のため使えません。`/kuma-status` も同じハンドラに紐付いています）。
 
+監視・内部診断・セキュリティ通知は、Block Kit のカード表示で重要度・対象・
+観測時刻（JST）・原因・対応の目安をまとめ、閲覧用ボタンを付けます。
+表示時刻は配信時刻ではなく元の検査・検知時刻です。長い原因文やコンポーネント
+一覧は Slack の上限内へ収め、リンクから認証情報・クエリ・フラグメントを除きます。
+通知条件・配信先・スレッド・重複防止は表示変更と分離しています。
+Cloudflare 標準 DDoS ポリシーから Slack へ直接届く通知は、この Worker の
+表示変更の対象外です。
+
 ```bash
 npx wrangler secret put SLACK_BOT_TOKEN        # xoxb-...
 npx wrangler secret put SLACK_SIGNING_SECRET   # Slack App の Signing Secret

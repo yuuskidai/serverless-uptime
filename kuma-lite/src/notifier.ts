@@ -1,6 +1,7 @@
 import type { ComponentHealth, Env, Monitor } from './types';
 import { buildSlackBot } from './slack-bot';
-import { publicFacingDisplay, publicFacingUrl } from './url-display';
+import { publicFacingUrl } from './url-display';
+import { renderMonitorSlackMessage } from './slack-notification-layout';
 
 export class NotificationDeliveryError extends Error {
   constructor(public readonly code: 'not_configured' | 'uncertain', public readonly slackAlertTs: string | null = null) {
@@ -59,18 +60,14 @@ export async function notifyInternalPath(
   const guidance = '公開サービスの稼働判定とは別の内部診断です。';
   const bot = buildSlackBot(env);
   requireNotificationChannel(env);
+  const slackMessage = renderMonitorSlackMessage(monitor, detail, kind, { internal: true });
   const [discord, slack] = await Promise.allSettled([
     env.DISCORD_WEBHOOK_URL ? postWebhook(env.DISCORD_WEBHOOK_URL, {
       embeds: [{ title, description: `${truncate(message, 800)}\n\n${guidance}`,
         color: normal ? 0x94a3b8 : 0xfbbf24, timestamp: observedIso(detail) }],
     }) : Promise.resolve(),
     bot?.defaultChannelId ? bot.slack.postBlocks(bot.defaultChannelId, {
-      text: slackEscape(`${title} — ${message}`),
-      blocks: [
-        { type: 'header', text: { type: 'plain_text', text: truncate(title, 150), emoji: false } },
-        { type: 'section', text: { type: 'mrkdwn', text: slackEscape(truncate(message, 500)) } },
-        { type: 'context', elements: [{ type: 'mrkdwn', text: guidance }] },
-      ],
+      ...slackMessage,
       threadTs: threadTs ?? undefined,
     }) : Promise.resolve(null),
   ]);
@@ -276,40 +273,8 @@ async function sendSlackDown(
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return null;
 
-  const fallback = `🔴 DOWN: ${monitor.name} — ${detail.reason}`;
-  const blocks: unknown[] = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `🔴  DOWN — ${monitor.name}`, emoji: true },
-    },
-    {
-      type: 'section',
-      fields: [
-        {
-          type: 'mrkdwn',
-          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
-        },
-        {
-          type: 'mrkdwn',
-          text: `*Triggered*\n<!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
-        },
-      ],
-    },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*Reason*\n${slackEscape(truncate(detail.reason, 500))}`,
-      },
-    },
-    ...componentsSlackBlocks(detail.components),
-    ...buildContextBlocks(detail.version, ':warning:  Recovery will reply in this thread.'),
-  ];
-
-  const result = await bot.slack.postBlocks(bot.defaultChannelId, {
-    text: slackEscape(fallback),
-    blocks,
-  });
+  const message = renderMonitorSlackMessage(monitor, detail, 'down');
+  const result = await bot.slack.postBlocks(bot.defaultChannelId, message);
   return result.ts || null;
 }
 
@@ -321,36 +286,8 @@ async function sendSlackDegraded(
   const bot = buildSlackBot(env);
   if (!bot?.defaultChannelId) return null;
 
-  const fallback = `🟡 DEGRADED: ${monitor.name} — ${detail.reason}`;
-  const blocks: unknown[] = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `🟡  DEGRADED — ${monitor.name}`, emoji: true },
-    },
-    {
-      type: 'section',
-      fields: [
-        {
-          type: 'mrkdwn',
-          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
-        },
-        {
-          type: 'mrkdwn',
-          text: `*Detected*\n<!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
-        },
-      ],
-    },
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*Reason*\n${slackEscape(truncate(detail.reason, 500))}`,
-      },
-    },
-    ...componentsSlackBlocks(detail.components),
-    ...buildContextBlocks(detail.version, null),
-  ];
-  const result = await bot.slack.postBlocks(bot.defaultChannelId, { text: slackEscape(fallback), blocks });
+  const message = renderMonitorSlackMessage(monitor, detail, 'degraded');
+  const result = await bot.slack.postBlocks(bot.defaultChannelId, message);
   return result.ts || null;
 }
 
@@ -368,89 +305,19 @@ async function sendSlackRecovery(
   const channel = bot.defaultChannelId;
   // DOWN -> DEGRADED formerly emitted a green RECOVERED message. Distinguish response
   // restoration from full recovery, and label durations as monitor observations.
-  const content = recoveryText(monitor, kind, downDurationMs, detail);
-  const fallback = `${content.title} — ${content.message}${content.duration ? ` (${content.duration})` : ''}`;
-  const blocks: unknown[] = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: content.title, emoji: true },
-    },
-    {
-      type: 'section',
-      fields: [
-        {
-          type: 'mrkdwn',
-          text: `*URL*\n<${publicFacingUrl(monitor.url)}|${slackEscape(publicFacingDisplay(monitor.url))}>`,
-        },
-        ...(content.duration ? [{ type: 'mrkdwn', text: slackEscape(content.duration) }] : []),
-      ],
-    },
-    { type: 'section', text: { type: 'mrkdwn', text: slackEscape(content.message) } },
-    {
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: `${kind === 'partial' ? ':large_yellow_circle: Response restored; degradation continues' : ':large_green_circle: Full recovery observed'} at <!date^${unixSec(detail?.observedAt)}^{date_short_pretty} {time}|${observedIso(detail)}>`,
-        },
-      ],
-    },
-  ];
-
+  const message = renderMonitorSlackMessage(monitor,
+    detail ?? { reason: '', components: [], version: null }, kind === 'partial' ? 'partial' : 'up',
+    { durationMs: downDurationMs, previousStatus: kind === 'degraded' ? 'degraded' : 'down' });
   await bot.slack.postBlocks(channel, {
-      text: slackEscape(fallback),
-      blocks,
-      threadTs: slackAlertTs ?? undefined,
-      // Threaded recoveries also broadcast to the channel timeline so the
-      // resolution is visible without expanding the thread. No-op when
-      // there's no thread (top-level fallback path).
-      replyBroadcast: Boolean(slackAlertTs),
+    ...message,
+    threadTs: slackAlertTs ?? undefined,
+    // Retain the public recovery's existing thread and timeline behavior.
+    replyBroadcast: Boolean(slackAlertTs),
   });
   // A failed decorative reaction does not mean the recovery message was undelivered.
   if (slackAlertTs && kind !== 'partial') {
     await bot.slack.addReaction(`slack:${channel}:`, slackAlertTs, 'white_check_mark').catch(() => undefined);
   }
-}
-
-// ── Block Kit helpers ────────────────────────────────────────────────────
-
-/**
- * Render a "Components" section block when the incident has any
- * unhealthy components. Returns an empty array when there's nothing
- * to show, so the caller can spread it inline without extra
- * conditionals. The list is bullet-formatted via mrkdwn rather than
- * built as separate blocks to keep the message compact.
- */
-function componentsSlackBlocks(components: ComponentHealth[]): unknown[] {
-  if (components.length === 0) return [];
-  const lines = components.map((c) => `• ${formatComponentLine(c)}`).join('\n');
-  return [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `*Components*\n${slackEscape(lines)}`,
-      },
-    },
-  ];
-}
-
-/**
- * Combine the optional build-SHA chip and a static guidance line
- * (e.g. "Recovery will reply in this thread.") into a single
- * context block. Returns at most one block — empty array when
- * neither piece of context is present.
- */
-function buildContextBlocks(version: string | null, guidance: string | null): unknown[] {
-  const elements: unknown[] = [];
-  if (version) {
-    elements.push({ type: 'mrkdwn', text: `:gear:  build \`${slackEscape(version)}\`` });
-  }
-  if (guidance) {
-    elements.push({ type: 'mrkdwn', text: guidance });
-  }
-  if (elements.length === 0) return [];
-  return [{ type: 'context', elements }];
 }
 
 function formatComponentLine(c: ComponentHealth): string {
@@ -482,16 +349,8 @@ function observedIso(detail?: IncidentDetail): string {
   return new Date(detail?.observedAt ?? Date.now()).toISOString();
 }
 
-function unixSec(observedAt?: number): number {
-  return Math.floor((observedAt ?? Date.now()) / 1000);
-}
-
 function truncate(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
-}
-
-function slackEscape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function formatDuration(ms: number): string {

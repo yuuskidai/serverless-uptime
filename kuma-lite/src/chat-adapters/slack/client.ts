@@ -163,6 +163,9 @@ export class SlackClient {
      */
     reply_broadcast?: boolean;
     blocks?: unknown[];
+    parse?: 'none' | 'full';
+    link_names?: boolean;
+    mrkdwn?: boolean;
     attachments?: unknown[];
     metadata?: unknown;
     unfurl_links?: boolean;

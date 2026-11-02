@@ -92,20 +92,135 @@ const DETAIL_LABELS: Record<NonNullable<SecurityAlert['detailCode']>, string> = 
   analytics_unavailable: '分析APIを取得できません', analytics_gap: '分析記録に欠測があります',
   queue_capacity: '通知保存枠に達しました', delivery_failed: '通知の配信を確認できません',
 };
+const ACTION_LABELS: Record<NonNullable<SecurityAlert['action']>, string> = {
+  block: '🛡️ 遮断を記録', managed_challenge: '追加確認を要求', js_challenge: 'JavaScriptによる追加確認',
+  challenge: '追加確認を要求', log: '記録のみ', mixed: '複数の処理が混在',
+};
+const SERVICE_LABELS: Record<NonNullable<SecurityAlert['host']>, string> = {
+  'core-os.opus-system.jp': 'Core OS', 'partner-portal.opus-system.jp': 'Partner Portal', 'opus-system.jp': 'opus-system.jp',
+};
+const CAUTION = 'この通知だけで不正侵入が成立したとは判断できません。';
+
+function jst(timestamp: number): string {
+  const date = new Date(timestamp + 9 * 3_600_000).toISOString();
+  return `${date.slice(0, 10).replaceAll('-', '/')} ${date.slice(11, 19)}`;
+}
+
+function targetLabel(alert: SecurityAlert): string {
+  return alert.host ? SERVICE_LABELS[alert.host] : SOURCE_LABELS[alert.source];
+}
+
+function securityPresentation(alert: SecurityAlert): { heading: string; summary: string; guidance: string } {
+  if (alert.kind === 'waf_activity') {
+    const action = alert.action;
+    return {
+      heading: action === 'block' ? '🛡️ WAFで遮断' : action === 'log' ? '🟠 WAFで記録'
+        : action && action !== 'mixed' ? '🛡️ WAFの追加確認' : '🟠 WAFイベント',
+      summary: action === 'block' ? 'WAFルールに一致した通信の遮断を記録しました。'
+        : action === 'log' ? 'WAFルールに一致した通信を記録しました。遮断されたことは、この記録だけでは確認できません。'
+          : action && action !== 'mixed' ? 'Cloudflareが追加確認を要求した記録です。通過・遮断の最終結果は、この通知だけでは分かりません。'
+            : 'WAFで観測した記録です。処理の内訳をSecurity Eventsで確認してください。',
+      guidance: '繰り返しや対象の広がりをSecurity Eventsで確認してください。サンプリングを含む観測記録であり、通信全件の件数ではありません。',
+    };
+  }
+  const descriptions: Record<Exclude<SecurityAlert['kind'], 'waf_activity'>, { summary: string; guidance: string }> = {
+    auth_failure_burst: {
+      summary: '短時間に認証失敗が集中したことを記録しました。',
+      guidance: '利用者の操作状況と認証ログを確認し、正規利用の失敗と不審な試行を切り分けてください。',
+    },
+    account_locked: {
+      summary: '認証失敗に伴うアカウントロックを記録しました。',
+      guidance: '利用者本人の操作かを認証ログで確認し、本人確認のうえで必要な対応を行ってください。',
+    },
+    auth_rate_limited_burst: {
+      summary: '認証試行の拒否が集中したことを記録しました。',
+      guidance: '正規利用者への影響と認証基盤の状態を確認してください。保存処理の異常でも拒否されるため、攻撃や上限到達とは断定できません。',
+    },
+    authorization_denied_burst: {
+      summary: '権限で許可されない操作の拒否が繰り返された記録です。',
+      guidance: '意図した操作かを確認し、対象の権限と監査ログを照合してください。',
+    },
+    admin_privilege_changed: {
+      summary: '管理者権限の変更を記録しました。',
+      guidance: '承認済みの変更かを優先して確認してください。想定外なら対象アカウントの権限・セッションと監査ログを確認してください。',
+    },
+    totp_disabled: {
+      summary: '二段階認証の無効化を記録しました。',
+      guidance: '本人・管理者が意図した操作かを優先して確認してください。想定外なら対象アカウントの保護設定・セッションを確認してください。',
+    },
+    security_policy_weakened: {
+      summary: 'セキュリティ設定を緩和する変更を記録しました。',
+      guidance: '承認内容と監査ログを優先して確認し、想定外なら保護設定を見直してください。',
+    },
+    ddos_attack: {
+      summary: 'CloudflareからHTTP DDoS通知を受信しました。',
+      guidance: 'Cloudflareの防御状況と公開サービスへの影響を確認してください。',
+    },
+    pipeline_degraded: {
+      summary: 'セキュリティ監視の取得・保存・配信の一部を確認できません。',
+      guidance: '監視の正常性は未確認です。連携先・保存枠・配信状況を確認してください。',
+    },
+  };
+  return {
+    heading: alert.kind === 'pipeline_degraded' ? '🟠 監視状態が未確認' : alert.severity === 'critical' ? '🚨 重要な管理変更' : '🟠 セキュリティ警告',
+    ...descriptions[alert.kind],
+  };
+}
+
+/** Rich display is derived only from the same validated capability DTO as the fallback. */
+export function renderSecurityAlertBlocks(alert: SecurityAlert): unknown[] {
+  const presentation = securityPresentation(alert);
+  const fields = [
+    { type: 'mrkdwn', text: `*対象*\n${targetLabel(alert)}${alert.host ? `\n${alert.host}` : ''}` },
+    { type: 'mrkdwn', text: `*重要度*\n${alert.severity === 'critical' ? '🔴 要確認' : '🟠 警告'}` },
+    { type: 'mrkdwn', text: `*${alert.kind === 'waf_activity' ? '観測記録' : '観測件数'}*\n${alert.count.toLocaleString('ja-JP')} 件` },
+    { type: 'mrkdwn', text: `*区分*\n${alert.detailCode ? DETAIL_LABELS[alert.detailCode] : SOURCE_LABELS[alert.source]}` },
+    { type: 'mrkdwn', text: `*検知時刻（JST）*\n${jst(alert.occurredAt)}` },
+    { type: 'mrkdwn', text: `*観測期間（JST）*\n${jst(alert.windowStart)}\n〜 ${jst(alert.windowEnd)}` },
+  ];
+  if (alert.action) fields.push({ type: 'mrkdwn', text: `*Cloudflare処理*\n${ACTION_LABELS[alert.action]}` });
+  const context = [
+    ...(alert.ruleId ? [{ type: 'plain_text', text: `ルール: ${alert.ruleId}`, emoji: false }] : []),
+    ...(alert.subjectHash ? [{ type: 'plain_text', text: `匿名の対象ID: ${alert.subjectHash.slice(0, 12)}…`, emoji: false }] : []),
+    { type: 'plain_text', text: `通知ID: ${alert.id}`, emoji: false },
+  ];
+  const buttons: unknown[] = [];
+  if (alert.host && alert.host !== 'opus-system.jp') buttons.push({
+    type: 'button', action_id: 'security_open_service',
+    text: { type: 'plain_text', text: '対象サービスを開く', emoji: false }, url: `https://${alert.host}/`,
+  });
+  if (alert.source === 'waf' || alert.source === 'ddos' || alert.source === 'pipeline') buttons.push({
+    type: 'button', action_id: 'security_open_cloudflare',
+    text: { type: 'plain_text', text: 'Cloudflareを開く', emoji: false }, url: 'https://dash.cloudflare.com/',
+  });
+  return [
+    { type: 'header', text: { type: 'plain_text', text: `${presentation.heading}｜${targetLabel(alert)}`, emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${TITLES[alert.kind]}*\n${presentation.summary}` } },
+    { type: 'section', fields },
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: `*対応の目安*\n${presentation.guidance}` } },
+    ...(buttons.length ? [{ type: 'actions', elements: buttons }] : []),
+    { type: 'context', elements: [{ type: 'plain_text', text: CAUTION, emoji: false }] },
+    { type: 'context', elements: context },
+  ];
+}
 
 /** Every variable field has already passed a narrow alphabet/enum validation. */
 export function renderSecurityAlert(alert: SecurityAlert): string {
+  const presentation = securityPresentation(alert);
   const lines = [
     `${alert.severity === 'critical' ? '【要確認】' : '【警告】'}${TITLES[alert.kind]}`,
     `対象: ${SOURCE_LABELS[alert.source]}${alert.host ? ` (${alert.host})` : ''}`,
-    `件数: ${alert.count}`,
-    `観測: ${new Date(alert.windowStart).toISOString()} ～ ${new Date(alert.windowEnd).toISOString()}`,
+    presentation.summary,
+    `${alert.kind === 'waf_activity' ? '観測記録' : '観測件数'}: ${alert.count}`,
+    `検知（JST）: ${jst(alert.occurredAt)}`,
+    `観測（JST）: ${jst(alert.windowStart)} ～ ${jst(alert.windowEnd)}`,
   ];
   if (alert.detailCode) lines.push(`区分: ${DETAIL_LABELS[alert.detailCode]}`);
-  if (alert.action) lines.push(`Cloudflare処理: ${alert.action}`);
+  if (alert.action) lines.push(`Cloudflare処理: ${ACTION_LABELS[alert.action]}`);
   if (alert.ruleId) lines.push(`ルール: ${alert.ruleId}`);
   if (alert.subjectHash) lines.push(`対象識別子: ${alert.subjectHash}`);
-  lines.push('この通知だけで不正侵入が成立したとは判断できません。', `通知ID: ${alert.id}`);
+  lines.push(`対応の目安: ${presentation.guidance}`, CAUTION, `通知ID: ${alert.id}`);
   return lines.join('\n');
 }
 
@@ -165,7 +280,7 @@ export async function deliverSecurityAlert(
       headers: { Authorization: `Bearer ${env.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' },
       body: JSON.stringify({ channel: env.SLACK_DEFAULT_CHANNEL, client_msg_id: input.id,
         text, mrkdwn: false, parse: 'none', link_names: false, unfurl_links: false, unfurl_media: false,
-        blocks: [{ type: 'section', text: { type: 'plain_text', text, emoji: false } }],
+        blocks: renderSecurityAlertBlocks(input),
       }),
     });
     // A non-cooperative transport can resolve after this call has already timed out.
