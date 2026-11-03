@@ -57,4 +57,16 @@ test('real workerd grants Slack delivery only through the named binding and keep
   assert.ok(calls[0].body.blocks.some(block => block.type === 'section' && block.fields?.length >= 4));
   assert.match(JSON.stringify(calls[0].body.blocks), /対応の目安/);
   assert.doesNotMatch(JSON.stringify(calls[0].body), /synthetic-local-token|<!|<@/);
+  const waf = { ...alert, id: '27818655-47b9-443e-8543-a768f3941310', source: 'waf', kind: 'waf_activity',
+    host: 'partner-portal.opus-system.jp', count: 9, action: 'block', detailCode: 'sampled_waf',
+    ruleSummary: { rules: [{ ruleId: '2b5d06e34a814a889bee9a0699702280',
+      description: 'React - RCE - CVE:CVE-2025-55182', count: 7 }], otherCount: 1, unknownCount: 1, limited: false } };
+  assert.deepEqual(await invoke(waf), { ok: true });
+  assert.equal(calls.length, 2); assert.equal(calls[1].body.client_msg_id, waf.id);
+  const rules = calls[1].body.blocks.find(block => block.text?.text.startsWith('一致ルール'));
+  assert.equal(rules.text.type, 'plain_text'); assert.match(rules.text.text, /React - RCE/);
+  assert.match(rules.text.text, /内訳を表示していない記録: 1 件/); assert.match(rules.text.text, /ルール情報を取得できない記録: 1 件/);
+  assert.deepEqual(await invoke({ ...waf, count: 8 }), { ok: false, code: 'invalid_alert' });
+  assert.deepEqual(await invoke({ ...alert, ruleSummary: waf.ruleSummary }), { ok: false, code: 'invalid_alert' });
+  assert.equal(calls.length, 2);
 });

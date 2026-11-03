@@ -10,6 +10,10 @@ const sample = extra => ({ version: 1, id: '17818655-47b9-443e-8543-a768f3941310
   windowEnd: now, count: 10, host: 'core-os.opus-system.jp', detailCode: 'password', ...extra });
 const success = () => Response.json({ ok: true, channel: env.SLACK_DEFAULT_CHANNEL, ts: '1793000000.123456' });
 const plain = value => JSON.parse(JSON.stringify(value));
+const ruleSummary = extra => ({ rules: [{ ruleId: '2b5d06e34a814a889bee9a0699702280',
+  description: 'React - RCE - CVE:CVE-2025-55182', count: 20 }], otherCount: 2, unknownCount: 1, limited: false, ...extra });
+const waf = extra => sample({ source: 'waf', kind: 'waf_activity', host: 'partner-portal.opus-system.jp',
+  action: 'block', detailCode: 'sampled_waf', count: 23, ...extra });
 
 test('strict capability validation refuses arbitrary Slack payloads, secrets, spoofed severity and sources', () => {
   assert.equal(validSecurityAlert(sample(), now), true);
@@ -50,6 +54,104 @@ test('a valid warning uses only the fixed channel and safe blocks, and retries r
     assert.match(call.body.text, /不正侵入が成立したとは判断できません/);
     assert.doesNotMatch(call.body.text, /synthetic-test-token|https?:|<!|<@/);
   }
+});
+
+test('WAF rule summaries are source-pinned, bounded and exactly account for the notification window total', () => {
+  assert.equal(validSecurityAlert(waf({ ruleSummary: ruleSummary() }), now), true);
+  assert.equal(validSecurityAlert(waf({ ruleSummary: ruleSummary({ rules: [{ ruleId: 'unicode-rule', description: '正規の名前 🔒', count: 20 }] }) }), now), true);
+  assert.equal(validSecurityAlert(waf({ ruleSummary: ruleSummary({ rules: [], otherCount: 0, unknownCount: 23 }) }), now), true);
+  assert.equal(validSecurityAlert(waf({ ruleSummary: ruleSummary({ rules: [{ ruleId: 'known-name-unavailable', count: 23 }], otherCount: 0, unknownCount: 0 }) }), now), true);
+  const rule = { ruleId: 'known-rule', description: 'Provider label', count: 20 };
+  const invalid = [
+    undefined, null, [], {}, { rules: [rule], otherCount: 2, unknownCount: 1 },
+    ruleSummary({ fields: [] }), ruleSummary({ rules: 'not-an-array' }),
+    ruleSummary({ rules: Array.from({ length: 4 }, (_, i) => ({ ruleId: 'rule-' + i, count: 5 })), otherCount: 3, unknownCount: 0 }),
+    ruleSummary({ rules: [{ ruleId: 'duplicate', count: 10 }, { ruleId: 'duplicate', count: 10 }] }),
+    ruleSummary({ rules: [{ ...rule, text: '<!channel>' }] }),
+    ruleSummary({ rules: [{ ...rule, url: 'https://attacker.invalid' }] }),
+    ruleSummary({ rules: [{ ...rule, ruleId: '<@U12345678>' }] }),
+    ruleSummary({ rules: [{ ...rule, ruleId: 'x'.repeat(65) }] }),
+    ruleSummary({ rules: [{ ...rule, ruleId: '' }] }),
+    ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER, '20'].map(count => ruleSummary({ rules: [{ ...rule, count }] })),
+    ...[-1, 1.5, 1_000_000_001, '2'].map(otherCount => ruleSummary({ otherCount })),
+    ...[-1, 1.5, 1_000_000_001, '1'].map(unknownCount => ruleSummary({ unknownCount })),
+    ruleSummary({ limited: 'false' }), ruleSummary({ otherCount: 1 }), ruleSummary({ unknownCount: 2 }),
+    ...['', '   ', 'a'.repeat(161), 'line\nbreak', 'tab\tlabel', 'c1\u0085label',
+      'bidi\u202elabel', 'rtl\u200flabel', 'isolate\u2067label', 'paragraph\u2029label',
+      'high\ud800label', 'low\udfffLabel'].map(description => ruleSummary({ rules: [{ ...rule, description }] })),
+  ];
+  for (const summary of invalid) assert.equal(validSecurityAlert(waf({ ruleSummary: summary }), now), false, JSON.stringify(summary));
+  for (const alert of [sample({ count: 23 }), sample({ source: 'pipeline', kind: 'pipeline_degraded', host: undefined, count: 23 }),
+    sample({ source: 'ddos', kind: 'ddos_attack', host: 'opus-system.jp', count: 23 })]) {
+    assert.equal(validSecurityAlert({ ...alert, ruleSummary: ruleSummary() }, now), false);
+  }
+});
+
+test('the matching-rules section adds names, IDs and observed counts without changing the existing rich card', () => {
+  const legacy = renderSecurityAlertBlocks(waf());
+  const alert = waf({ ruleSummary: ruleSummary() });
+  const blocks = renderSecurityAlertBlocks(alert);
+  const index = blocks.findIndex(block => block.type === 'section' && block.text?.text.startsWith('一致ルール'));
+  assert.equal(index, 4); assert.equal(blocks[index].text.type, 'plain_text');
+  assert.match(blocks[index].text.text, /React - RCE - CVE:CVE-2025-55182｜20 件/);
+  assert.match(blocks[index].text.text, /ルールID: 2b5d06e34a814a889bee9a0699702280/);
+  assert.match(blocks[index].text.text, /内訳を表示していない記録: 2 件/);
+  assert.match(blocks[index].text.text, /ルール情報を取得できない記録: 1 件/);
+  assert.deepEqual(plain(blocks.filter((_, i) => i !== index)), plain(legacy));
+  assert.match(renderSecurityAlert(alert), /React - RCE/);
+  assert.match(renderSecurityAlert(alert), /内訳を表示していない記録: 2 件/);
+  assert.match(JSON.stringify(blocks), /サンプリング/);
+  assert.doesNotMatch(JSON.stringify(blocks), /23件の攻撃|侵入を防止しました/);
+});
+
+test('unknown and capped rule metadata remains explicit, and legacy queued notifications still render', () => {
+  const limited = waf({ ruleSummary: ruleSummary({ limited: true }) });
+  const rendered = JSON.stringify(renderSecurityAlertBlocks(limited));
+  assert.match(rendered, /取得・保持上限により内訳は一部/);
+  assert.match(rendered, /全体の順位は示していません/);
+  const unknown = waf({ ruleSummary: ruleSummary({ rules: [], otherCount: 0, unknownCount: 23 }) });
+  assert.match(JSON.stringify(renderSecurityAlertBlocks(unknown)), /ルール情報を取得できない記録: 23 件/);
+  assert.doesNotMatch(JSON.stringify(renderSecurityAlertBlocks(unknown)), /名称未取得|2b5d06/);
+  const old = waf({ ruleId: 'legacy-rule' });
+  assert.equal(validSecurityAlert(old, now), true);
+  assert.match(JSON.stringify(renderSecurityAlertBlocks(old)), /ルール: legacy-rule/);
+  assert.match(renderSecurityAlert(old), /ルール: legacy-rule/);
+  assert.doesNotMatch(JSON.stringify(renderSecurityAlertBlocks(old)), /一致ルール/);
+});
+
+test('provider rule names stay literal and rule-rich retries keep the same destination and message ID', async () => {
+  const description = '<!channel> <https://attacker.invalid|open> & *bold*';
+  const alert = waf({ count: 1, ruleSummary: ruleSummary({ rules: [{ ruleId: 'literal-label', description, count: 1 }], otherCount: 0, unknownCount: 0 }) });
+  assert.equal(validSecurityAlert(alert, now), true);
+  const calls = [];
+  const options = { wallNow: () => now, fetchImpl: async (_url, init) => { calls.push(JSON.parse(init.body)); return success(); } };
+  assert.deepEqual(plain(await deliverSecurityAlert(env, alert, options)), { ok: true });
+  assert.deepEqual(plain(await deliverSecurityAlert(env, alert, options)), { ok: true });
+  for (const payload of calls) {
+    assert.equal(payload.client_msg_id, alert.id); assert.equal(payload.channel, env.SLACK_DEFAULT_CHANNEL);
+    assert.equal(payload.mrkdwn, false); assert.equal(payload.parse, 'none'); assert.equal(payload.link_names, false);
+    assert.doesNotMatch(payload.text, /<!|<@|<https:/);
+    const ruleBlock = payload.blocks.find(block => block.text?.text.includes(description));
+    assert.equal(ruleBlock.text.type, 'plain_text');
+    assert.ok(payload.blocks.filter(block => block.text?.type === 'mrkdwn').every(block => !block.text.text.includes(description)));
+    const buttons = payload.blocks.find(block => block.type === 'actions').elements;
+    assert.ok(buttons.every(button => ['https://partner-portal.opus-system.jp/', 'https://dash.cloudflare.com/'].includes(button.url)));
+  }
+});
+
+test('three maximum-length provider labels and all count fields fit Slack text limits', () => {
+  const rules = Array.from({ length: 3 }, (_, i) => ({ ruleId: String(i).repeat(64), description: '&'.repeat(160), count: 333_333_333 }));
+  const alert = waf({ count: 1_000_000_000, subjectHash: 'a'.repeat(64), ruleSummary: { rules, otherCount: 1, unknownCount: 0, limited: true } });
+  assert.equal(validSecurityAlert(alert, now), true);
+  const blocks = renderSecurityAlertBlocks(alert);
+  assert.ok(blocks.length <= 50);
+  for (const block of blocks) {
+    if (block.type === 'header') assert.ok(block.text.text.length <= 150);
+    if (block.text) assert.ok(block.text.text.length <= 3000);
+    if (block.fields) assert.ok(block.fields.length <= 10 && block.fields.every(field => field.text.length <= 2000));
+    if (block.type === 'context') assert.ok(block.elements.length <= 10 && block.elements.every(element => element.text.length <= 2000));
+  }
+  assert.ok(renderSecurityAlert(alert).length <= 4000);
 });
 
 test('rich cards distinguish WAF outcomes and retain sampling limits without inventing attack success', () => {

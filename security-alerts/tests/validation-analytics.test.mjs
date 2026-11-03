@@ -8,6 +8,7 @@ const bundle=buildSync({stdin:{contents:`export {appEvent,boundedJSON} from './s
 const {appEvent,boundedJSON,pollWaf,analyticsDiagnostic}=await import('data:text/javascript;base64,'+Buffer.from(bundle).toString('base64'));
 const valid=events=>({data:{viewer:{zones:[{firewallEventsAdaptive:events}]}}});
 const sample=(at,extra={})=>({action:'block',clientRequestHTTPHost:'core-os.opus-system.jp',datetime:new Date(at).toISOString(),...extra});
+const unknownRules=(count,limited=false)=>({rules:[],otherCount:0,unknownCount:count,limited});
 
 test('event allowlist rejects extra fields, unsafe hashes and stale/future input',()=>{
  const now=Date.now(),event={version:1,eventId:crypto.randomUUID(),occurredAt:now,kind:'auth_failure',actorHash:'b'.repeat(64)};
@@ -35,11 +36,80 @@ test('Free sampled WAF records preserve bounded observations and reject invalid 
   // Simulate its variable boundary instead of accepting any client JSON as the old fixture did.
   if(!/\$zone\s*:\s*string\b/.test(payload.query)||!/\$filter\s*:\s*FirewallEventsAdaptiveFilter_InputObject\b/.test(payload.query))return Response.json({errors:[{message:'unknown type "String"'}]});
   assert.deepEqual(payload.variables,{zone:'6a83ef6dd7723ac97485c613c9a5ca34',filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:['core-os.opus-system.jp','partner-portal.opus-system.jp']}});
-  assert.equal(options.redirect,'manual');assert.equal(options.method,'POST');assert.doesNotMatch(payload.query,/clientIP|clientRequestPath|clientRequestQuery|userAgent|firewallEventsAdaptiveGroups/);return Response.json(valid([sample(start),sample(start+1)]));
+  assert.equal(options.redirect,'manual');assert.equal(options.method,'POST');assert.doesNotMatch(payload.query,/clientIP|clientRequestPath|clientRequestQuery|userAgent|firewallEventsAdaptiveGroups/);
+  for(const field of ['source','ruleId','description'])assert.match(payload.query,new RegExp(`\\b${field}\\b`));
+  return Response.json(valid([sample(start),sample(start+1)]));
  };
- assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:2}],complete:true});
+ assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:2,ruleCounts:unknownRules(2)}],complete:true});
  globalThis.fetch=async()=>Response.json(valid([sample(start,{action:'skip'})]));assert.deepEqual(await pollWaf(env,start,end),{groups:[],complete:true});
- globalThis.fetch=async()=>Response.json(valid(Array.from({length:1000},(_,i)=>sample(start+i))));assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:1000}],complete:false});
+ globalThis.fetch=async()=>Response.json(valid(Array.from({length:1000},(_,i)=>sample(start+i))));assert.deepEqual(await pollWaf(env,start,end),{groups:[{action:'block',host:'core-os.opus-system.jp',count:1000,ruleCounts:unknownRules(1000,true)}],complete:false});
+});
+
+test('rule metadata counts remain per host/action and rule ID while missing labels remain usable',async t=>{
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+ const env={CF_ANALYTICS_TOKEN:'synthetic-local-token'},start=Date.now()-120000,end=Date.now()-60000;
+ const rows=[
+  sample(start,{source:'firewallManaged',ruleId:'rule-a',description:'React RCE'}),
+  sample(start+1,{source:'firewallManaged',ruleId:'rule-a',description:'A later label'}),
+  sample(start+2,{ruleId:'rule-b',description:null}),
+  sample(start+3,{ruleId:'rule-b',description:'Second rule'}),
+  sample(start+4,{ruleId:'rule-a',description:'Different action',action:'log'}),
+  sample(start+5,{ruleId:'rule-a',description:'Different host',clientRequestHTTPHost:'partner-portal.opus-system.jp'}),
+ ];
+ globalThis.fetch=async()=>Response.json(valid(rows));
+ const read=await pollWaf(env,start,end);
+ assert.equal(read.groups.length,3);
+ assert.deepEqual(read.groups[0],{action:'block',host:'core-os.opus-system.jp',count:4,ruleCounts:{rules:[
+  {ruleId:'rule-a',count:2,description:'React RCE'},{ruleId:'rule-b',count:2,description:'Second rule'},
+ ],otherCount:0,unknownCount:0,limited:false}});
+ assert.equal(read.groups[1].count,1);assert.equal(read.groups[2].count,1);
+ for(const group of read.groups)assert.equal(group.ruleCounts.rules.reduce((n,r)=>n+r.count,0)+group.ruleCounts.otherCount+group.ruleCounts.unknownCount,group.count);
+});
+
+test('unknown rule IDs preserve event counts and descriptions are bounded without splitting emoji',async t=>{
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+ const env={CF_ANALYTICS_TOKEN:'synthetic-local-token'},start=Date.now()-120000,end=Date.now()-60000;
+ const invalid=[undefined,null,'','<!here>','x'.repeat(65),{},123];
+ const rows=invalid.map((ruleId,i)=>sample(start+i,{ruleId,description:'ignored'}));
+ rows.push(sample(start+10,{ruleId:'valid-rule',description:'\u0000  Rule\n\t\u0085\u061c\u200e\u200f\u202e '+ '🔥'.repeat(100)}));
+ rows.push(sample(start+11,{ruleId:'label-missing',description:{private:'not retained'}}));
+ globalThis.fetch=async()=>Response.json(valid(rows));
+ const group=(await pollWaf(env,start,end)).groups[0];
+ assert.equal(group.count,9);assert.equal(group.ruleCounts.unknownCount,7);
+ const description=group.ruleCounts.rules[0].description;
+ assert.ok(description.length<=160);assert.match(description,/^Rule 🔥/);assert.ok(description.endsWith('🔥'));
+ assert.doesNotMatch(description,/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+ assert.deepEqual(group.ruleCounts.rules[1],{ruleId:'label-missing',count:1});
+ assert.doesNotMatch(JSON.stringify(group),/not retained|ignored|<!here>/);
+ globalThis.fetch=async()=>Response.json(valid([sample(start,{ruleId:'invalid-unicode',description:'\ud800'}),sample(start+1,{ruleId:'partly-valid',description:'\udc00Valid'})]));
+ const unicode=(await pollWaf(env,start,end)).groups[0].ruleCounts.rules;
+ assert.deepEqual(unicode,[{ruleId:'invalid-unicode',count:1},{ruleId:'partly-valid',count:1,description:'Valid'}]);
+});
+
+test('the per-poll rule cap retains exact known and other counts without dropping observations',async t=>{
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+ const env={CF_ANALYTICS_TOKEN:'synthetic-local-token'},start=Date.now()-120000,end=Date.now()-60000;
+ const rows=Array.from({length:35},(_,i)=>sample(start+i,{ruleId:`rule-${i}`,description:`Rule ${i}`}));
+ rows.push(sample(start+40,{ruleId:'rule-34'}),sample(start+41,{ruleId:'rule-0'}),sample(start+42,{ruleId:null}));
+ globalThis.fetch=async()=>Response.json(valid(rows));
+ const group=(await pollWaf(env,start,end)).groups[0];
+ assert.equal(group.count,38);assert.equal(group.ruleCounts.rules.length,32);
+ assert.equal(group.ruleCounts.rules[0].count,2);assert.equal(group.ruleCounts.otherCount,4);
+ assert.equal(group.ruleCounts.unknownCount,1);assert.equal(group.ruleCounts.limited,true);
+ assert.equal(group.ruleCounts.rules.reduce((n,r)=>n+r.count,0)+group.ruleCounts.otherCount+group.ruleCounts.unknownCount,38);
+});
+
+test('a full enriched sample fits the finite larger body cap and oversized responses still fail safely',async t=>{
+ const original=globalThis.fetch;t.after(()=>{globalThis.fetch=original;});
+ const env={CF_ANALYTICS_TOKEN:'synthetic-local-token'},start=Date.now()-120000,end=Date.now()-60000;
+ const body=JSON.stringify(valid(Array.from({length:1000},(_,i)=>sample(start+i,{source:'firewallManaged',ruleId:'a'.repeat(64),description:'あ'.repeat(160)}))));
+ assert.ok(new TextEncoder().encode(body).length>262144);assert.ok(new TextEncoder().encode(body).length<1048576);
+ globalThis.fetch=async()=>new Response(body);
+ const read=await pollWaf(env,start,end);assert.equal(read.complete,false);
+ assert.equal(read.groups[0].count,1000);assert.equal(read.groups[0].ruleCounts.rules[0].count,1000);
+ assert.equal(read.groups[0].ruleCounts.limited,true);
+ globalThis.fetch=async()=>new Response('x'.repeat(1048577));
+ await assert.rejects(pollWaf(env,start,end),error=>analyticsDiagnostic(error).code==='invalid_response');
 });
 
 

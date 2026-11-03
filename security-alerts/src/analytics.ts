@@ -2,6 +2,25 @@ import { HOSTS, ZONE_ID } from './types';
 import type { AnalyticsDiagnosticCode, Env, WafGroup, WafRead } from './types';
 import { boundedJSON, object } from './validation';
 const actions = ['block', 'managed_challenge', 'js_challenge', 'challenge', 'log'] as const;
+const MAX_RULES_PER_GROUP = 32;
+const MAX_RULE_DESCRIPTION = 160;
+// Rule descriptions make a full 1,000-record sample larger than 256 KiB.
+// Keep a finite one-MiB body cap without widening the existing time budget.
+const MAX_WAF_RESPONSE_BYTES = 1024 * 1024;
+
+function ruleDescription(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clean = value.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return undefined;
+  let out = '';
+  for (const character of clean) {
+    const codepoint=character.codePointAt(0)!;
+    if(codepoint>=0xd800&&codepoint<=0xdfff)continue;
+    if (out.length + character.length > MAX_RULE_DESCRIPTION) break;
+    out += character;
+  }
+  return out || undefined;
+}
 
 class AnalyticsFailure extends Error {
   constructor(readonly diagnosticCode: AnalyticsDiagnosticCode, readonly httpStatus: number | null = null) {
@@ -46,7 +65,7 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
         body: JSON.stringify({query: `query SecurityEvents($zone:string,$filter:FirewallEventsAdaptiveFilter_InputObject) {
           viewer { zones(filter:{zoneTag:$zone}) { firewallEventsAdaptive(limit:1000,
             filter:$filter,orderBy:[datetime_ASC]) {
-              action clientRequestHTTPHost datetime
+              action clientRequestHTTPHost datetime source ruleId description
           } } } }`, variables: {zone: ZONE_ID, filter:{datetime_geq:new Date(start).toISOString(),datetime_lt:new Date(end).toISOString(),clientRequestHTTPHost_in:HOSTS}}}),
       }).then(value => {if(performance.now() >= deadline || controller.signal.aborted){if(value.body)void value.body.cancel().catch(()=>undefined);throw new AnalyticsFailure('request_timeout');}return value;}),
       new Promise<Response>((_, reject) => { controller.signal.addEventListener('abort', () => reject(new AnalyticsFailure('request_timeout')), {once:true}); }),
@@ -56,7 +75,7 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
       const status=response.status;
       throw new AnalyticsFailure(status===401?'http_unauthorized':status===403?'http_forbidden':status===429?'http_rate_limited':status>=500?'http_server_error':'http_unexpected_status',status);
     }
-    const value = await boundedJSON(response, 262144, Math.max(1, Math.min(2000, deadline - performance.now())));
+    const value = await boundedJSON(response, MAX_WAF_RESPONSE_BYTES, Math.max(1, Math.min(2000, deadline - performance.now())));
     if (performance.now() >= deadline) throw new AnalyticsFailure('request_timeout',response.status);
     if (!object(value)) throw new AnalyticsFailure('invalid_response',response.status);
     if(value.errors!==undefined&&value.errors!==null){
@@ -72,7 +91,7 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
     if(events.length>1000)throw new AnalyticsFailure('invalid_response',response.status);
     const groups = new Map<string,WafGroup>();
     for (const event of events) {
-      if(!object(event)||Object.keys(event).some(key=>!['action','clientRequestHTTPHost','datetime'].includes(key))
+      if(!object(event)||Object.keys(event).some(key=>!['action','clientRequestHTTPHost','datetime','source','ruleId','description'].includes(key))
         ||typeof event.action!=='string'||event.action.length>64
         ||!HOSTS.includes(event.clientRequestHTTPHost as typeof HOSTS[number])
         ||typeof event.datetime!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(event.datetime))throw new AnalyticsFailure('row_invalid',response.status);
@@ -82,8 +101,23 @@ export async function pollWaf(env: Env, start: number, end: number): Promise<Waf
       // Only the requested safe fields are accepted; no raw identities are retained.
       if(!actions.includes(event.action as typeof actions[number]))continue;
       const host=event.clientRequestHTTPHost as typeof HOSTS[number],action=event.action as WafGroup['action'],key=`${host}:${action}`;
-      const group=groups.get(key);
-      if(group)group.count++;else groups.set(key,{host,action,count:1});
+      let group=groups.get(key);
+      if(!group){
+        group={host,action,count:0,ruleCounts:{rules:[],otherCount:0,unknownCount:0,limited:events.length===1000}};
+        groups.set(key,group);
+      }
+      group.count++;
+      const counts=group.ruleCounts!;
+      // Missing/invalid metadata does not erase an otherwise valid observation.
+      // IDs, rather than mutable description text, define each rule's count.
+      if(typeof event.ruleId!=='string'||!/^[A-Za-z0-9_-]{1,64}$/.test(event.ruleId)){
+        counts.unknownCount++;
+        continue;
+      }
+      const description=ruleDescription(event.description),rule=counts.rules.find(item=>item.ruleId===event.ruleId);
+      if(rule){rule.count++;if(!rule.description&&description)rule.description=description;}
+      else if(counts.rules.length<MAX_RULES_PER_GROUP)counts.rules.push({ruleId:event.ruleId,count:1,...(description?{description}:{})});
+      else{counts.otherCount++;counts.limited=true;}
     }
     // Reaching the bounded sample limit does not erase known safe observations.
     return {groups:[...groups.values()],complete:events.length<1000};

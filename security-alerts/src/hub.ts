@@ -1,8 +1,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import { HOSTS, MINUTE } from './types';
-import type { Alert, AlertKind, App, Control, DeliveryResult, Env } from './types';
+import type { Alert, AlertKind, App, Control, DeliveryResult, Env, WafRuleBreakdown } from './types';
 import { appEvent } from './validation';
 import { analyticsDiagnostic, pollWaf } from './analytics';
+import { appendWafRuleWindow, summarizeWafRules } from './waf-rule-counts';
 const MAX_SEEN=1792, MAX_CRITICAL_SEEN=128, MAX_LOCKED_SEEN=128, MAX_BUCKETS=256, MAX_QUEUE=128, MAX_DAY=200;
 type Priority='regular'|'critical'|'locked'|'pipeline';
 const LIMITS={regular:{pending:96,day:160},critical:{pending:16,day:20},locked:{pending:8,day:10},pipeline:{pending:8,day:10}};
@@ -49,10 +50,16 @@ export class SecurityHub extends DurableObject<Env> {
     this.ctx.storage.sql.exec('INSERT INTO outbox(id,alert,attempts,next,lease_until,lease_token,created,priority) VALUES(?,?,0,?,0,NULL,?,?)',full.id,JSON.stringify(full),Date.now(),Date.now(),priority);
     c.pending++;c.queuedToday++;quota.pending++;quota.day++;return true;
   }
-  private bump(c:Control,key:string,count:number,threshold:number,now:number,alert:Omit<Alert,'version'|'id'|'count'|'windowStart'|'windowEnd'>,allowAlert=true,windowStart?:number):boolean {
+  private bump(c:Control,key:string,count:number,threshold:number,now:number,alert:Omit<Alert,'version'|'id'|'count'|'windowStart'|'windowEnd'>,allowAlert=true,windowStart?:number,ruleCounts?:WafRuleBreakdown):boolean {
     let row=this.rows<BucketRow>('SELECT key,start,count,last_alert FROM buckets WHERE key=?',key)[0];
     if(!row){if(key.startsWith('subject:') && c.bucketCount>=MAX_BUCKETS){this.saturation(c,now);return false;}row={key,start:windowStart??now,count:0,last_alert:0};if(key.startsWith('subject:'))c.bucketCount++;}
     if(now-row.start>=FIVE){row.start=windowStart??now;row.count=0;}
+    if(alert.source==='waf'){
+      c.wafRuleWindows??={};
+      const window=appendWafRuleWindow(c.wafRuleWindows[key],row.start,row.count,count,ruleCounts);
+      c.wafRuleWindows[key]=window;
+      alert={...alert,ruleSummary:summarizeWafRules(window)};
+    }
     row.count=Math.min(1_000_000_000,row.count+count);
     let queued=false;
     if(allowAlert&&row.count>=threshold&&now-row.last_alert>=15*MINUTE){
@@ -117,6 +124,9 @@ export class SecurityHub extends DurableObject<Env> {
   private prune(c:Control,now:number) {
     this.ctx.storage.sql.exec('DELETE FROM seen WHERE expires<=?',now);
     this.ctx.storage.sql.exec("DELETE FROM buckets WHERE updated<? AND key NOT LIKE 'global:%'",now-HOUR);
+    if(c.wafRuleWindows)for(const [key,window] of Object.entries(c.wafRuleWindows)){
+      if(window.start<now-HOUR)delete c.wafRuleWindows[key];
+    }
     this.ctx.storage.sql.exec('DELETE FROM receipts WHERE at<?',now-7*DAY);
     // Receipts are bounded independently from time under high traffic.
     this.ctx.storage.sql.exec('DELETE FROM receipts WHERE id IN (SELECT id FROM receipts ORDER BY at DESC LIMIT -1 OFFSET 1600)');
@@ -142,11 +152,11 @@ export class SecurityHub extends DurableObject<Env> {
     if(!query)return;
     try {
       const read=await pollWaf(this.env,query.start,query.end);
-      this.ctx.storage.transactionSync(()=>{
-        const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token)return;
+      const accepted=this.ctx.storage.transactionSync(()=>{
+        const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token)return false;
         for(const group of read.groups){
           const key=`waf:${group.host}:${group.action}`;
-          this.bump(c,key,group.count,1,query.end,{source:'waf',kind:'waf_activity',severity:'warning',occurredAt:Date.now(),host:group.host,action:group.action,detailCode:'sampled_waf',...(group.ruleId?{ruleId:group.ruleId}:{})},true,query.start);
+          this.bump(c,key,group.count,1,query.end,{source:'waf',kind:'waf_activity',severity:'warning',occurredAt:Date.now(),host:group.host,action:group.action,detailCode:'sampled_waf'},true,query.start,group.ruleCounts);
         }
         c.analytics.cursor=query.end;c.analytics.lastSuccess=Date.now();c.analytics.nextTry=0;c.analytics.diagnostic=null;
         if(!read.complete){
@@ -156,8 +166,14 @@ export class SecurityHub extends DurableObject<Env> {
           c.analytics.diagnostic={code:'result_truncated',httpStatus:200,at:Date.now()};
         }else{c.analytics.status=query.end>=end?'ok':'unknown';c.analytics.code=query.end>=end?null:'analytics_gap';}
         this.save(c);
+        return true;
       });
+      // Finite private diagnostics also verify the dedicated Analytics token's
+      // new field selection during natural alarms, without manufacturing alerts.
+      console.log({event:'security_waf_rule_poll',window_start:query.start,window_end:query.end,
+        accepted,complete:read.complete,groups:read.groups.length,observed_records:read.groups.reduce((sum,g)=>sum+g.count,0)});
     } catch(error) {
+      console.warn({event:'security_waf_rule_poll_failed',...analyticsDiagnostic(error),window_start:query.start,window_end:query.end});
       this.ctx.storage.transactionSync(()=>{
         const c=this.control();if(!c.enabled||c.generation!==generation||c.active?.token!==token)return;
         const code=error instanceof Error&&error.message==='analytics_gap'?'analytics_gap':'analytics_unavailable';

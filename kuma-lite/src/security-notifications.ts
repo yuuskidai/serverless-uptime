@@ -1,6 +1,18 @@
 import type { Env } from './types';
 
-/** Capability-only DTO. No free-form message, destination, URL, or Slack payload is accepted. */
+export interface WafRuleCount {
+  ruleId: string;
+  description?: string;
+  count: number;
+}
+export interface WafRuleBreakdown {
+  rules: WafRuleCount[];
+  otherCount: number;
+  unknownCount: number;
+  limited: boolean;
+}
+
+/** Capability-only DTO. Bounded WAF labels are metadata; callers cannot supply a message, destination, URL, or Slack payload. */
 export interface SecurityAlert {
   version: 1;
   id: string;
@@ -17,6 +29,7 @@ export interface SecurityAlert {
   host?: 'core-os.opus-system.jp' | 'partner-portal.opus-system.jp' | 'opus-system.jp';
   action?: 'block' | 'managed_challenge' | 'js_challenge' | 'challenge' | 'log' | 'mixed';
   ruleId?: string;
+  ruleSummary?: WafRuleBreakdown;
   detailCode?: 'password' | 'totp' | 'recovery' | 'ip' | 'account' | 'sampled_waf'
     | 'native_ddos' | 'analytics_unavailable' | 'analytics_gap' | 'queue_capacity' | 'delivery_failed';
 }
@@ -29,7 +42,7 @@ export type SecurityDeliveryResult = { ok: true }
 const SEVEN_DAYS = 7 * 86_400_000;
 const MAX_RESPONSE_BYTES = 16_384;
 const REQUIRED = ['version', 'id', 'source', 'kind', 'severity', 'occurredAt', 'windowStart', 'windowEnd', 'count'];
-const ALLOWED = new Set([...REQUIRED, 'subjectHash', 'host', 'action', 'ruleId', 'detailCode']);
+const ALLOWED = new Set([...REQUIRED, 'subjectHash', 'host', 'action', 'ruleId', 'ruleSummary', 'detailCode']);
 const APP_KINDS = new Set(['auth_failure_burst', 'account_locked', 'auth_rate_limited_burst',
   'authorization_denied_burst', 'admin_privilege_changed', 'totp_disabled', 'security_policy_weakened']);
 const CRITICAL_KINDS = new Set(['admin_privilege_changed', 'totp_disabled', 'security_policy_weakened']);
@@ -37,6 +50,39 @@ const HOSTS = new Set(['core-os.opus-system.jp', 'partner-portal.opus-system.jp'
 const ACTIONS = new Set(['block', 'managed_challenge', 'js_challenge', 'challenge', 'log', 'mixed']);
 const DETAILS = new Set(['password', 'totp', 'recovery', 'ip', 'account', 'sampled_waf', 'native_ddos',
   'analytics_unavailable', 'analytics_gap', 'queue_capacity', 'delivery_failed']);
+
+function validRuleSummary(input: unknown, expectedCount: number): input is WafRuleBreakdown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+  const summary = input as Record<string, unknown>;
+  const fields = ['rules', 'otherCount', 'unknownCount', 'limited'];
+  if (Object.keys(summary).some(key => !fields.includes(key)) || fields.some(key => !Object.hasOwn(summary, key))
+    || !Array.isArray(summary.rules) || summary.rules.length > 3 || typeof summary.limited !== 'boolean') return false;
+  for (const key of ['otherCount', 'unknownCount']) {
+    if (!Number.isSafeInteger(summary[key]) || (summary[key] as number) < 0 || (summary[key] as number) > 1_000_000_000) return false;
+  }
+  let count = (summary.otherCount as number) + (summary.unknownCount as number);
+  const ids = new Set<string>();
+  for (const value of summary.rules) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const rule = value as Record<string, unknown>;
+    if (Object.keys(rule).some(key => !['ruleId', 'description', 'count'].includes(key))
+      || !Object.hasOwn(rule, 'ruleId') || !Object.hasOwn(rule, 'count')
+      || typeof rule.ruleId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(rule.ruleId) || ids.has(rule.ruleId)
+      || !Number.isSafeInteger(rule.count) || (rule.count as number) < 1 || (rule.count as number) > 1_000_000_000) return false;
+    if (Object.hasOwn(rule, 'description')) {
+      if (typeof rule.description !== 'string' || !rule.description.trim() || rule.description.length > 160
+        || /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/.test(rule.description)) return false;
+      for (const character of rule.description) {
+        const codePoint = character.codePointAt(0)!;
+        if (codePoint >= 0xd800 && codePoint <= 0xdfff) return false;
+      }
+    }
+    ids.add(rule.ruleId); count += rule.count as number;
+    if (count > expectedCount) return false;
+  }
+  // A latest-poll rule must never be labelled with the accumulated host total.
+  return count === expectedCount;
+}
 
 export function validSecurityAlert(value: unknown, now = Date.now()): value is SecurityAlert {
   try {
@@ -64,6 +110,8 @@ export function validSecurityAlert(value: unknown, now = Date.now()): value is S
     if (v.host !== undefined && !HOSTS.has(v.host as string)) return false;
     if (v.action !== undefined && !ACTIONS.has(v.action as string)) return false;
     if (v.ruleId !== undefined && (typeof v.ruleId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(v.ruleId))) return false;
+    if (Object.hasOwn(v, 'ruleSummary') && (v.source !== 'waf' || v.kind !== 'waf_activity'
+      || !validRuleSummary(v.ruleSummary, v.count as number))) return false;
     if (v.detailCode !== undefined && !DETAILS.has(v.detailCode as string)) return false;
     return true;
   } catch { return false; }
@@ -108,6 +156,19 @@ function jst(timestamp: number): string {
 
 function targetLabel(alert: SecurityAlert): string {
   return alert.host ? SERVICE_LABELS[alert.host] : SOURCE_LABELS[alert.source];
+}
+
+/** Names are bounded provider metadata, kept literal instead of Slack markup. */
+function ruleSummaryLines(summary: WafRuleBreakdown): string[] {
+  const lines = ['一致ルール（通知時点の観測・抜粋）'];
+  for (const [index, rule] of summary.rules.entries()) {
+    lines.push(`${index + 1}. ${rule.description ?? '名称未取得'}｜${rule.count.toLocaleString('ja-JP')} 件`,
+      `   ルールID: ${rule.ruleId}`);
+  }
+  if (summary.otherCount) lines.push(`内訳を表示していない記録: ${summary.otherCount.toLocaleString('ja-JP')} 件`);
+  if (summary.unknownCount) lines.push(`ルール情報を取得できない記録: ${summary.unknownCount.toLocaleString('ja-JP')} 件`);
+  if (summary.limited) lines.push('取得・保持上限により内訳は一部です。全体の順位は示していません。');
+  return lines;
 }
 
 function securityPresentation(alert: SecurityAlert): { heading: string; summary: string; guidance: string } {
@@ -180,7 +241,7 @@ export function renderSecurityAlertBlocks(alert: SecurityAlert): unknown[] {
   ];
   if (alert.action) fields.push({ type: 'mrkdwn', text: `*Cloudflare処理*\n${ACTION_LABELS[alert.action]}` });
   const context = [
-    ...(alert.ruleId ? [{ type: 'plain_text', text: `ルール: ${alert.ruleId}`, emoji: false }] : []),
+    ...(!alert.ruleSummary && alert.ruleId ? [{ type: 'plain_text', text: `ルール: ${alert.ruleId}`, emoji: false }] : []),
     ...(alert.subjectHash ? [{ type: 'plain_text', text: `匿名の対象ID: ${alert.subjectHash.slice(0, 12)}…`, emoji: false }] : []),
     { type: 'plain_text', text: `通知ID: ${alert.id}`, emoji: false },
   ];
@@ -198,6 +259,9 @@ export function renderSecurityAlertBlocks(alert: SecurityAlert): unknown[] {
     { type: 'section', text: { type: 'mrkdwn', text: `*${TITLES[alert.kind]}*\n${presentation.summary}` } },
     { type: 'section', fields },
     { type: 'divider' },
+    ...(alert.ruleSummary ? [{ type: 'section', text: {
+      type: 'plain_text', text: ruleSummaryLines(alert.ruleSummary).join('\n'), emoji: false,
+    } }] : []),
     { type: 'section', text: { type: 'mrkdwn', text: `*対応の目安*\n${presentation.guidance}` } },
     ...(buttons.length ? [{ type: 'actions', elements: buttons }] : []),
     { type: 'context', elements: [{ type: 'plain_text', text: CAUTION, emoji: false }] },
@@ -205,7 +269,7 @@ export function renderSecurityAlertBlocks(alert: SecurityAlert): unknown[] {
   ];
 }
 
-/** Every variable field has already passed a narrow alphabet/enum validation. */
+/** Bounded WAF labels stay literal; all other fields use narrow alphabets/enums. */
 export function renderSecurityAlert(alert: SecurityAlert): string {
   const presentation = securityPresentation(alert);
   const lines = [
@@ -218,7 +282,11 @@ export function renderSecurityAlert(alert: SecurityAlert): string {
   ];
   if (alert.detailCode) lines.push(`区分: ${DETAIL_LABELS[alert.detailCode]}`);
   if (alert.action) lines.push(`Cloudflare処理: ${ACTION_LABELS[alert.action]}`);
-  if (alert.ruleId) lines.push(`ルール: ${alert.ruleId}`);
+  if (alert.ruleSummary) {
+    // The plain fallback also disables Slack parsing; escape reserved syntax so
+    // a rule named <script> or <!channel> cannot become a link or mention.
+    lines.push(...ruleSummaryLines(alert.ruleSummary).map(line => line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')));
+  } else if (alert.ruleId) lines.push(`ルール: ${alert.ruleId}`);
   if (alert.subjectHash) lines.push(`対象識別子: ${alert.subjectHash}`);
   lines.push(`対応の目安: ${presentation.guidance}`, CAUTION, `通知ID: ${alert.id}`);
   return lines.join('\n');

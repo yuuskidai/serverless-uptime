@@ -14,12 +14,22 @@ export interface AppEvent {
 }
 export type AlertKind = 'auth_failure_burst' | 'account_locked' | 'auth_rate_limited_burst' | 'authorization_denied_burst'
   | 'admin_privilege_changed' | 'totp_disabled' | 'security_policy_weakened' | 'waf_activity' | 'ddos_attack' | 'pipeline_degraded';
+export interface WafRuleCount { ruleId: string; description?: string; count: number }
+/** Poll/window storage retains at most32 rules; a notification displays at most3. */
+export interface WafRuleBreakdown {
+  rules: WafRuleCount[];
+  otherCount: number;
+  unknownCount: number;
+  limited: boolean;
+}
+export interface WafRuleWindow { start: number; count: number; breakdown: WafRuleBreakdown }
 export interface Alert {
   version: 1; id: string; source: App | 'waf' | 'ddos' | 'pipeline'; kind: AlertKind;
   severity: 'warning' | 'critical'; occurredAt: number; windowStart: number; windowEnd: number; count: number;
   subjectHash?: string; host?: typeof HOSTS[number] | 'opus-system.jp';
   action?: 'block' | 'managed_challenge' | 'js_challenge' | 'challenge' | 'log' | 'mixed';
   ruleId?: string;
+  ruleSummary?: WafRuleBreakdown;
   detailCode?: typeof REASONS[number] | 'sampled_waf' | 'native_ddos' | 'analytics_unavailable' | 'analytics_gap' | 'queue_capacity' | 'delivery_failed';
 }
 export interface DeliveryResult { ok: boolean; retryAfterMs?: number; code?: string }
@@ -29,7 +39,7 @@ export interface Env {
   CF_ANALYTICS_TOKEN?: string; ADMIN_SECRET?: string;
   VERSION_METADATA?: WorkerVersionMetadata;
 }
-export interface WafGroup { action: Alert['action']; host: typeof HOSTS[number]; count: number; ruleId?: string }
+export interface WafGroup { action: Alert['action']; host: typeof HOSTS[number]; count: number; ruleId?: string; ruleCounts?: WafRuleBreakdown }
 export interface WafRead {groups:WafGroup[];complete:boolean}
 export type AnalyticsDiagnosticCode = 'credential_missing' | 'http_unauthorized' | 'http_forbidden' | 'http_rate_limited'
   | 'http_server_error' | 'http_unexpected_status' | 'request_timeout' | 'network_error'
@@ -43,6 +53,8 @@ export interface Control {
   saturationUntil: number; quota: Record<'regular'|'critical'|'locked'|'pipeline', {pending:number;day:number}>;
   sent: number; dead: number; deadAcknowledged: number; deadAcknowledgedAt: number | null; rejected: number; saturated: boolean;
   day: number; queuedToday: number; suppressed: number;
+  /** Bounded private JSON state; SQL schema and existing bucket keys remain unchanged. */
+  wafRuleWindows?: Record<string, WafRuleWindow>;
   analytics: { cursor: number | null; lastSuccess: number | null; nextTry: number;
     diagnostic?: {code:AnalyticsDiagnosticCode;httpStatus:number|null;at:number} | null;
     gapCount?:number;lastGap?:{start:number;end:number;at:number;reason:'sample_limit'|'backfill_limit'} | null;
