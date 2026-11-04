@@ -1,6 +1,23 @@
 import { expect, test } from "@playwright/test";
 import { login, restoreSqliteSnapshot, screenshot } from "../util-test";
 
+/**
+ * The successful save callback hides the sidebar before scheduling a document
+ * reload. Waiting only for sidebar removal let tests inspect the old analytics
+ * head or start another edit while that earlier reload was still pending.
+ * Register the navigation wait before clicking, then retain every state assertion.
+ * @param {Page} page Playwright page
+ * @returns {Promise<void>}
+ */
+async function saveStatusPageAndWaitForReload(page) {
+    const [navigation] = await Promise.all([
+        page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+        page.getByTestId("save-button").click(),
+    ]);
+    expect(navigation, "Saving a Status Page must reload the document").not.toBeNull();
+    expect(navigation.ok(), "The saved Status Page document must load successfully").toBeTruthy();
+}
+
 test.describe("Status Page", () => {
     test.beforeEach(async ({ page }) => {
         await restoreSqliteSnapshot(page);
@@ -113,7 +130,7 @@ test.describe("Status Page", () => {
 
         // Save the changes
         await screenshot(testInfo, page);
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
         await expect(page.getByTestId("edit-sidebar")).toHaveCount(0);
 
         // Ensure changes are visible
@@ -161,7 +178,7 @@ test.describe("Status Page", () => {
         await page.getByTestId("analytics-type-select").selectOption("umami");
         await page.getByTestId("analytics-script-url-input").fill(umamiAnalyticsScriptUrl);
         await page.getByTestId("analytics-id-input").fill(umamiAnalyticsWebsiteId);
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
 
         await expect(page.getByTestId("edit-sidebar")).toHaveCount(0);
         await expect(page.getByTestId("powered-by")).toContainText("Powered by");
@@ -180,7 +197,7 @@ test.describe("Status Page", () => {
         await page.getByTestId("analytics-type-select").selectOption("plausible");
         await page.getByTestId("analytics-script-url-input").fill(plausibleAnalyticsScriptUrl);
         await page.getByTestId("analytics-id-input").fill(plausibleAnalyticsDomainsUrls);
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
         await screenshot(testInfo, page);
         await page.waitForFunction(
             (scriptUrl) => {
@@ -197,7 +214,7 @@ test.describe("Status Page", () => {
         await page.getByTestId("analytics-type-select").selectOption("matomo");
         await page.getByTestId("analytics-script-url-input").fill(matomoUrl);
         await page.getByTestId("analytics-id-input").fill(matomoSiteId);
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
         await screenshot(testInfo, page);
         await page.waitForFunction(
             (url) => {
@@ -267,7 +284,7 @@ test.describe("Status Page", () => {
         await page.getByTestId("monitor-select").click();
         await page.getByTestId("monitor-select").getByRole("option", { name: normalMonitorName }).click();
 
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
         await expect(page.getByTestId("edit-sidebar")).toHaveCount(0);
 
         // Fetch the RSS feed
@@ -305,7 +322,7 @@ test.describe("Status Page", () => {
         await page.getByTestId("edit-button").click();
         await expect(page.getByTestId("edit-sidebar")).toHaveCount(1);
         await page.getByTestId("rss-title-input").fill(customRssTitle);
-        await page.getByTestId("save-button").click();
+        await saveStatusPageAndWaitForReload(page);
         await expect(page.getByTestId("edit-sidebar")).toHaveCount(0);
 
         // Fetch RSS feed again - should use custom RSS title
