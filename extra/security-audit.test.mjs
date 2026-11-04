@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { OSV_URL, LIMITS, loadRootInventory, scanOsvArchive, databaseProvenance,
-  downloadPublicDatabase, parseAuditArguments, runSecurityAudit, verifyFreshness } from './security-audit.mjs';
+  downloadPublicDatabase, parseAuditArguments, runSecurityAudit, verifyFreshness, classifyAuditFailure } from './security-audit.mjs';
 import { classifyReviewedMatch } from './lib/legacy-patch-review.mjs';
 import { affectedBySemver, npmRangesForComparison } from './lib/osv-semver.mjs';
 
@@ -44,6 +44,23 @@ with zipfile.ZipFile(sys.argv[1],'w',compression=zipfile.ZIP_STORED) as z:
   return path;
 }
 const limits = { ...LIMITS, minimumEntries: 1, requireKnownAdvisory: false };
+
+test('finite diagnostics distinguish network, HTTP and evidence failures without echoing bodies or credentials', () => {
+  const network = new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } });
+  assert.deepEqual(classifyAuditFailure(network, 'database'), { phase: 'database', kind: 'network', code: 'ECONNRESET' });
+  assert.deepEqual(classifyAuditFailure(new Error('Public OSV snapshot download failed: HTTP 503'), 'database'),
+    { phase: 'database', kind: 'publisher_http', code: 'HTTP_503' });
+  let httpAssertion;
+  try { assert.equal(503, 200, 'Public OSV snapshot download failed: HTTP 503'); } catch (error) { httpAssertion = error; }
+  assert.deepEqual(classifyAuditFailure(httpAssertion, 'database'), { phase: 'database', kind: 'publisher_http', code: 'HTTP_503' });
+  assert.deepEqual(classifyAuditFailure(new Error('Database is stale; obtain a fresh public snapshot'), 'database'),
+    { phase: 'database', kind: 'evidence', code: 'SNAPSHOT_STALE' });
+  const poison = new Error('Authorization: Bearer synthetic-do-not-echo; provider raw response');
+  poison.cause = { code: 'synthetic-do-not-echo' };
+  const diagnostic = classifyAuditFailure(poison, 'synthetic-do-not-echo');
+  assert.deepEqual(diagnostic, { phase: 'unknown', kind: 'validation', code: 'UNKNOWN_FAILURE' });
+  assert.ok(!JSON.stringify(diagnostic).includes('synthetic-do-not-echo'));
+});
 
 test('inventory includes production/dev/absent optional and resolves a real local source link', t => {
   const f = fixture(t);

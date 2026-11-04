@@ -19,6 +19,44 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const sha = value => createHash('sha256').update(value).digest('hex');
 const packageName = value => typeof value === 'string' && value.length <= 214 && value.trim() === value
   && !/[\x00-\x1f\x7f]/.test(value) && /^(?:@[A-Za-z0-9_.~-]+\/)?[A-Za-z0-9_.~-]+$/.test(value);
+
+// CI previously emitted only result=error, hiding the distinction between a
+// transport failure and rejected evidence. Never echo provider/error bodies.
+export function classifyAuditFailure(error, phase) {
+  const phases = ['arguments', 'inventory', 'source_review', 'database', 'matching'];
+  phase = phases.includes(phase) ? phase : 'unknown';
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const networkCodes = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'CERT_HAS_EXPIRED', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID'];
+  const causeCode = error?.cause?.code;
+  if (networkCodes.includes(causeCode)) return { phase, kind: 'network', code: causeCode };
+  if (['TimeoutError', 'AbortError'].includes(error?.name)) return { phase, kind: 'network', code: 'REQUEST_TIMEOUT_OR_ABORT' };
+  if (message === 'fetch failed') return { phase, kind: 'network', code: 'FETCH_FAILED' };
+  const status = /^Public OSV snapshot download failed: HTTP ([1-5][0-9]{2})(?:\n|$)/.exec(message);
+  if (status) return { phase, kind: 'publisher_http', code: 'HTTP_' + status[1] };
+  const metadata = new Map([
+    ['Database is stale; obtain a fresh public snapshot', 'SNAPSHOT_STALE'],
+    ['Database timestamp is in the future', 'SNAPSHOT_FUTURE'],
+    ['Missing/invalid public snapshot Content-Length', 'CONTENT_LENGTH_INVALID'],
+    ['Unexpected snapshot content encoding', 'CONTENT_ENCODING_UNSUPPORTED'],
+    ['Incomplete public snapshot body', 'DOWNLOAD_INCOMPLETE'],
+    ['Unexpected public database origin', 'PUBLISHER_ORIGIN_MISMATCH'],
+    ['Database hash disagrees with provenance', 'RECEIPT_HASH_MISMATCH'],
+    ['Database changed during local scan', 'SNAPSHOT_CHANGED'],
+  ]);
+  for (const [prefix, code] of metadata) {
+    if (message === prefix || message.startsWith(prefix + '\n')) return { phase, kind: 'evidence', code };
+  }
+  if (phase === 'matching' && error?.code === 'ENOENT') return { phase, kind: 'environment', code: 'ZIP_READER_UNAVAILABLE' };
+  if (message.startsWith('Public OSV ZIP scan failed') || message === 'Incomplete/unchecked OSV ZIP') {
+    return { phase, kind: 'evidence', code: 'ZIP_READER_REJECTED' };
+  }
+  if (error instanceof SyntaxError) return { phase, kind: 'evidence', code: 'INVALID_JSON' };
+  return { phase, kind: 'validation', code: {
+    arguments: 'ARGUMENTS_INVALID', inventory: 'INVENTORY_INVALID', source_review: 'PATCH_REVIEW_FAILED',
+    database: 'DATABASE_REQUEST_OR_VALIDATION_FAILED', matching: 'ADVISORY_OR_INTEGRITY_VALIDATION_FAILED',
+  }[phase] ?? 'UNKNOWN_FAILURE' };
+}
 function dateValue(value, label) {
   assert.equal(typeof value, 'string', `Missing/invalid ${label}`);
   const time = Date.parse(value);
@@ -366,11 +404,12 @@ export async function runSecurityAudit({ root = DEFAULT_ROOT, databasePath, meta
     assert.deepEqual(verifyLegacyPatches(root, inventory), verification, 'Patched source changed during audit');
     report.result = report.unsupported.length ? 'unsupported' : report.matches.some(match => match.classification === 'actionable') ? 'actionable' : 'passed';
   } catch (error) {
-    report.error = error.message;
+    report.diagnostic = classifyAuditFailure(error, phase);
+    report.error = report.diagnostic.code;
     report.failedPhase = phase;
     if (['inventory', 'source_review'].includes(phase)) {
       report.result = 'unsupported';
-      report.unsupported.push({ category: phase === 'inventory' ? 'INVENTORY_UNSUPPORTED' : 'PATCH_REVIEW_INCOMPLETE', reason: error.message });
+      report.unsupported.push({ category: phase === 'inventory' ? 'INVENTORY_UNSUPPORTED' : 'PATCH_REVIEW_INCOMPLETE', reason: report.diagnostic.code });
     }
   } finally {
     report.rawMatchingOccurrences = report.matches.length;
@@ -410,6 +449,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const report = await runSecurityAudit(parseAuditArguments(process.argv.slice(2)));
     console.log(`Legacy local OSV audit: result=${report.result}; raw=${report.rawMatchingOccurrences}; patched=${report.reviewedPatchedOccurrences}; notAffected=${report.reviewedNotAffectedOccurrences}; actionable=${report.actionableOccurrences}; unsupported=${report.unsupported.length}`);
+    if (report.diagnostic) console.error(`Audit diagnostic: phase=${report.diagnostic.phase}; kind=${report.diagnostic.kind}; code=${report.diagnostic.code}`);
     if (report.result !== 'passed' || !report.matchingComplete) process.exitCode = 1;
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  } catch (error) {
+    const diagnostic = classifyAuditFailure(error, 'arguments');
+    console.error(`Audit diagnostic: phase=${diagnostic.phase}; kind=${diagnostic.kind}; code=${diagnostic.code}`);
+    process.exitCode = 1;
+  }
 }

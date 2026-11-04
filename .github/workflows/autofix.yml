@@ -46,4 +46,11 @@ jobs:
         run: npm run tsc
         continue-on-error: true
 
+      # Forks have no upstream autofix.ci installation. Keep every local check,
+      # and fail on formatter changes without requiring a new external App.
+      - name: Verify fork formatting is unchanged
+        if: github.repository != 'louislam/uptime-kuma'
+        run: git diff --exit-code
+
       - uses: autofix-ci/action@635ffb0c9798bd160680f18fd73371e355b85f27
+        if: github.repository == 'louislam/uptime-kuma'

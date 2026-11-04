@@ -117,7 +117,7 @@ test("tar7 retains download-dist extraction API and rejects parent traversal", a
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-tar-"));
     try {
         const input = path.join(directory, "input");
-            const output = path.join(directory, "output");
+        const output = path.join(directory, "output");
         fs.mkdirSync(input);
         fs.mkdirSync(output);
         fs.writeFileSync(path.join(input, "fixture.txt"), "safe");
@@ -178,15 +178,23 @@ test("native SQLite still opens a local in-memory database after installer depen
     const sqlite = require("@louislam/sqlite3");
     let database;
     await new Promise((resolve, reject) => {
-        database = new sqlite.Database(":memory:", error => error ? reject(error) : resolve());
+        database = new sqlite.Database(":memory:", (error) => (error ? reject(error) : resolve()));
     });
     try {
-        await new Promise((resolve, reject) => database.run("CREATE TABLE fixture(value TEXT)", error => error ? reject(error) : resolve()));
-        await new Promise((resolve, reject) => database.run("INSERT INTO fixture(value) VALUES (?)", ["local"], error => error ? reject(error) : resolve()));
-        const row = await new Promise((resolve, reject) => database.get("SELECT value FROM fixture", (error, row) => error ? reject(error) : resolve(row)));
+        await new Promise((resolve, reject) =>
+            database.run("CREATE TABLE fixture(value TEXT)", (error) => (error ? reject(error) : resolve()))
+        );
+        await new Promise((resolve, reject) =>
+            database.run("INSERT INTO fixture(value) VALUES (?)", ["local"], (error) =>
+                error ? reject(error) : resolve()
+            )
+        );
+        const row = await new Promise((resolve, reject) =>
+            database.get("SELECT value FROM fixture", (error, row) => (error ? reject(error) : resolve(row)))
+        );
         assert.equal(row.value, "local");
     } finally {
-        await new Promise((resolve, reject) => database.close(error => error ? reject(error) : resolve()));
+        await new Promise((resolve, reject) => database.close((error) => (error ? reject(error) : resolve())));
     }
 });
 
@@ -199,4 +207,37 @@ test("legacy runtime entry and setup retain the reviewed Node22 source instead o
     assert.match(source, /const bannedNodeVersions = "<22\.0\.0"/);
     assert.doesNotMatch(manifest.scripts.setup, /git checkout|download-dist/);
     assert.match(manifest.scripts.setup, /npm run build/);
+});
+
+test("fork autofix keeps all local checks and fails on format changes without the upstream App", () => {
+    const { spawnSync } = require("node:child_process");
+    const yaml = require("yaml");
+    const source = fs.readFileSync(path.join(__dirname, "../.github/workflows/autofix.yml"), "utf8");
+    const workflow = yaml.parse(source);
+    const job = workflow.jobs.autofix;
+    for (const command of ["npm run lint-fix:js", "npm run lint-fix:style", "npm run fmt", "npm run tsc"]) {
+        const step = job.steps.find((step) => step.run === command);
+        assert.ok(step, "Existing local check must remain");
+        assert.equal(step.if, undefined, "Existing local check must run for the fork");
+    }
+    const external = job.steps.find((step) => step.uses?.startsWith("autofix-ci/action@"));
+    assert.equal(external.uses, "autofix-ci/action@635ffb0c9798bd160680f18fd73371e355b85f27");
+    assert.equal(external.if, "github.repository == 'louislam/uptime-kuma'");
+    const guard = job.steps.find((step) => step.run === "git diff --exit-code");
+    assert.equal(guard.if, "github.repository != 'louislam/uptime-kuma'");
+    assert.notEqual(guard["continue-on-error"], true, "Formatter drift must fail the fork job");
+    assert.equal(job.permissions.contents, "read");
+
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "fork-format-guard-"));
+    try {
+        const git = (args) => spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+        assert.equal(git(["init", "--quiet"]).status, 0);
+        fs.writeFileSync(path.join(directory, "fixture.txt"), "reviewed\n");
+        assert.equal(git(["add", "fixture.txt"]).status, 0);
+        assert.equal(git(["diff", "--exit-code"]).status, 0);
+        fs.writeFileSync(path.join(directory, "fixture.txt"), "formatter changed this\n");
+        assert.equal(git(["diff", "--exit-code"]).status, 1);
+    } finally {
+        fs.rmSync(directory, { recursive: true, force: true });
+    }
 });

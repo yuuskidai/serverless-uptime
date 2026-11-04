@@ -2,6 +2,9 @@ process.env.UPTIME_KUMA_HIDE_LOG = ["info_db", "info_server"].join(",");
 
 const { describe, test, mock, before, after } = require("node:test");
 const assert = require("node:assert");
+const { mkdtempSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const DomainExpiry = require("../../server/model/domain_expiry");
 const mockWebhook = require("./notification-providers/mock-webhook");
 const TestDB = require("../mock-testdb");
@@ -12,7 +15,17 @@ const { setSetting } = require("../../server/util-server");
 const dayjs = require("dayjs");
 dayjs.extend(require("dayjs/plugin/utc"));
 
-const testDb = new TestDB();
+const testDb = new TestDB(mkdtempSync(join(tmpdir(), "kuma-rdap-test-")));
+const originalFetch = globalThis.fetch;
+const rdapRequests = [];
+const expiryFixtures = {
+    "google.wiki": "2026-11-26T23:59:59.000Z",
+    "google.com": "2028-09-14T04:00:00.000Z",
+};
+const bootstrapFixture = structuredClone(require("../../extra/rdap-dns.json"));
+for (const [tlds, urls] of bootstrapFixture.services) {
+    urls.splice(0, urls.length, `https://rdap.unit.invalid/${tlds[0]}/`);
+}
 
 describe("Domain Expiry", () => {
     const monHttpCom = {
@@ -24,9 +37,30 @@ describe("Domain Expiry", () => {
     before(async () => {
         await testDb.create();
         Notification.init();
+        // Real registries can renew or become unavailable. Preserve exact date
+        // and cache assertions against deterministic IANA/RDAP responses instead.
+        globalThis.fetch = async (input) => {
+            const url = new URL(typeof input === "string" ? input : input.url);
+            rdapRequests.push(url);
+            if (url.href === "https://data.iana.org/rdap/dns.json") {
+                return Response.json(structuredClone(bootstrapFixture));
+            }
+            assert.strictEqual(url.hostname, "rdap.unit.invalid", "RDAP tests must not contact external providers");
+            const domain = url.pathname.split("/domain/")[1];
+            assert.ok(Object.hasOwn(expiryFixtures, domain), "Unexpected RDAP domain in test");
+            return Response.json({
+                objectClassName: "domain",
+                ldhName: domain,
+                events: [
+                    { eventAction: "registration", eventDate: "2000-01-01T00:00:00.000Z" },
+                    { eventAction: "expiration", eventDate: expiryFixtures[domain] },
+                ],
+            });
+        };
     });
 
     after(async () => {
+        globalThis.fetch = originalFetch;
         Settings.stopCacheCleaner();
         await testDb.destroy();
     });
@@ -34,6 +68,7 @@ describe("Domain Expiry", () => {
     test("getExpiryDate() returns correct expiry date for .wiki domain with no A record", async () => {
         const d = DomainExpiry.createByName("google.wiki");
         assert.deepEqual(await d.getExpiryDate(), new Date("2026-11-26T23:59:59.000Z"));
+        assert.ok(rdapRequests.some((url) => url.pathname.endsWith("/domain/google.wiki")));
     });
 
     describe("checkSupport()", () => {

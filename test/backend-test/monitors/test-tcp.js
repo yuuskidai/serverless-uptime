@@ -3,6 +3,10 @@ const assert = require("node:assert");
 const { TCPMonitorType } = require("../../../server/monitor-types/tcp");
 const { UP, PENDING } = require("../../../src/util");
 const net = require("net");
+const tls = require("node:tls");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
+const { X509Certificate } = require("node:crypto");
 
 describe("TCP Monitor", () => {
     /**
@@ -94,28 +98,74 @@ describe("TCP Monitor", () => {
         await assert.rejects(tcpMonitor.check(monitor, heartbeat, {}), new Error("Connection failed"));
     });
 
-    test("check() rejects when TLS certificate is expired or invalid", async () => {
-        const tcpMonitor = new TCPMonitorType();
+    test("check() rejects when TLS certificate is expired or invalid", { timeout: 10000 }, async (t) => {
+        // External badssl reachability made a certificate regression fail as a
+        // plain TCP error. Trust only this synthetic local certificate, keeping
+        // real TLS validation enabled so its expired lifetime must cause refusal.
+        const fixture = path.join(__dirname, "fixtures", "expired-tls");
+        const certificate = readFileSync(path.join(fixture, "certificate.pem"));
+        const parsed = new X509Certificate(certificate);
+        assert.ok(Date.parse(parsed.validTo) < Date.now(), "TLS fixture must already be expired");
+        assert.strictEqual(parsed.checkIP("127.0.0.1"), "127.0.0.1");
 
-        const monitor = {
-            hostname: "expired.badssl.com",
-            port: 443,
-            smtpSecurity: "secure",
-            isEnabledExpiryNotification: () => true,
-            handleTlsInfo: async (tlsInfo) => {
-                return tlsInfo;
+        const sockets = new Set();
+        const server = tls.createServer(
+            {
+                key: readFileSync(path.join(fixture, "private-key.pem")),
+                cert: certificate,
             },
-        };
+            (socket) => socket.end()
+        );
+        server.on("connection", (socket) => {
+            sockets.add(socket);
+            socket.once("close", () => sockets.delete(socket));
+        });
+        // tcp-ping opens and closes a plain connection before the TLS attempt.
+        server.on("tlsClientError", () => {});
 
-        const heartbeat = {
-            msg: "",
-            status: PENDING,
-        };
+        try {
+            await new Promise((resolve, reject) => {
+                server.once("error", reject);
+                server.listen(0, "127.0.0.1", () => {
+                    server.removeListener("error", reject);
+                    resolve();
+                });
+            });
+            const port = server.address().port;
+            const errors = [];
+            let tlsAttempts = 0;
+            const connect = tls.connect;
+            t.mock.method(tls, "connect", (options) => {
+                assert.strictEqual(options.host, "127.0.0.1");
+                assert.strictEqual(options.port, port);
+                assert.notStrictEqual(options.rejectUnauthorized, false, "Certificate validation must remain enabled");
+                tlsAttempts++;
+                const socket = connect({ ...options, ca: certificate, servername: "localhost" });
+                socket.once("error", (error) => errors.push(error.code));
+                return socket;
+            });
+            const monitor = {
+                hostname: "127.0.0.1",
+                port,
+                smtpSecurity: "secure",
+                isEnabledExpiryNotification: () => true,
+                handleTlsInfo: async () =>
+                    assert.fail("Expired TLS must reject before a trusted connection is reported"),
+            };
+            const heartbeat = { msg: "", status: PENDING };
 
-        // Regex: contains with "TLS Connection failed:" or "Certificate is invalid"
-        const regex = /TLS Connection failed:|Certificate is invalid/;
-
-        await assert.rejects(tcpMonitor.check(monitor, heartbeat, {}), regex);
+            await assert.rejects(
+                new TCPMonitorType().check(monitor, heartbeat, {}),
+                /^Error: TLS Connection failed: certificate has expired$/
+            );
+            assert.strictEqual(tlsAttempts, 1, "The monitor must reach real TLS verification");
+            assert.deepStrictEqual(errors, ["CERT_HAS_EXPIRED"]);
+        } finally {
+            for (const socket of sockets) {
+                socket.destroy();
+            }
+            await new Promise((resolve) => server.close(resolve));
+        }
     });
 
     test("check() sets status to UP when TLS certificate is valid (SSL)", async () => {
