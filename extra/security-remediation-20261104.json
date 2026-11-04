@@ -974,5 +974,32 @@
             "test/backend-test/test-domain.js": "1d46251b096d071e651f146f8dd65f8d5e8c0b0f2d74855eb9f2272dae0c97a8",
             "test/dependency-security.test.js": "68ccc3b5d822ed893d11056aef681e83926bf23efd46b623b595db34fac1c593"
         }
+    },
+    "python_compatibility_followup": {
+        "at_utc": "2026-11-04T07:58:06.363562+00:00",
+        "source_baseline": "04cf325d1e9b976477587b89ab91ae30f5e3be2c",
+        "diagnosis": "CPython3.10 rejects OSV ISO timestamps with1/2/4/5/7/8/9 fractional digits while Python3.12 accepts them. The unchanged public snapshot caused ValueError and exit1 in the previous reader under CPython3.10.21.",
+        "change": "Normalize only the strictly validated temporary timestamp to6 microsecond digits before fromisoformat. Original advisory records, archive bytes/CRC and review hashes are unchanged.",
+        "validation": {
+            "python_versions": ["3.10.21", "3.12.14"],
+            "security_auditor_tests_each": 23,
+            "fail": 0,
+            "skip": 0,
+            "full_snapshot_python310": {
+                "processed": 231158,
+                "crc_verified": 231158,
+                "raw": 11,
+                "patched": 2,
+                "notAffected": 9,
+                "actionable": 0,
+                "unsupported": 0,
+                "result": "passed"
+            },
+            "malformed_future_stale_crc_guards_retained": true
+        },
+        "files_sha256": {
+            "extra/lib/scan-osv-archive.py": "849df06d0fa2939143b6483485fdce3f8ab4a1dfa0396dd3725005834de8dfef",
+            "extra/security-audit.test.mjs": "6ac1d6e2cbccbf15143a64b15b1a3f30c7c40b924b73846236697afbce7b9027"
+        }
     }
 }

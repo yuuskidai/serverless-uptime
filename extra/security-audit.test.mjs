@@ -146,6 +146,36 @@ test('complete ZIP scan verifies every entry and filters only after metadata/CRC
   await assert.rejects(scanOsvArchive(path, ['alpha'], () => {}, { limits, now: epoch }), /CRC|scan failed/);
 });
 
+test('OSV fractional timestamps work on Python3.10 without changing advisory bytes or review hashes', async t => {
+  const root = directory(t);
+  const records = Array.from({ length: 10 }, (_, digits) => {
+    const fraction = digits ? '.' + '123456789'.slice(0, digits) : '';
+    return { ...advisory('alpha', 'GHSA-fraction-' + digits), modified: '2026-11-04T09:00:00' + fraction + 'Z' };
+  });
+  const path = zip(root, records.map(record => [record.id + '.json', record]));
+  const observed = [];
+  const stats = await scanOsvArchive(path, ['alpha'], record => observed.push(record), { limits, now: epoch });
+  assert.equal(stats.processedEntries, records.length);
+  assert.equal(stats.crc32VerifiedEntries, records.length);
+  assert.deepEqual(observed, records);
+  for (let i = 0; i < records.length; i++) {
+    assert.equal(createHash('sha256').update(JSON.stringify(observed[i])).digest('hex'),
+      createHash('sha256').update(JSON.stringify(records[i])).digest('hex'));
+  }
+});
+
+test('fraction compatibility still rejects malformed dates, excessive precision and future withdrawals', async t => {
+  const root = directory(t);
+  for (const modified of ['2026-11-04T09:00:00.1234567890Z', '2026-02-30T09:00:00.1Z',
+    '2026-11-04T24:00:00.1234Z', '2026-11-04T09:00:00.12+24:00']) {
+    const path = zip(root, [['GHSA-synthetic-safe.json', { ...advisory(), modified }]]);
+    await assert.rejects(scanOsvArchive(path, ['alpha'], () => {}, { limits, now: epoch }), /scan failed/);
+  }
+  const future = { ...advisory(), withdrawn: '2026-11-04T10:00:01.123456789Z' };
+  const path = zip(root, [['GHSA-synthetic-safe.json', future]]);
+  await assert.rejects(scanOsvArchive(path, ['alpha'], () => {}, { limits, now: epoch }), /Future OSV withdrawal/);
+});
+
 test('malformed unrelated metadata and duplicate/truncated archives cannot report success', async t => {
   const root = directory(t);
   let path = zip(root, [['GHSA-synthetic-safe.json', advisory()],

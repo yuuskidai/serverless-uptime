@@ -27,10 +27,18 @@ def unique_object(items):
 
 
 def date_value(value):
-    require(isinstance(value, str) and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})', value), 'Invalid OSV date')
+    require(isinstance(value, str), 'Invalid OSV date')
+    match = re.fullmatch(r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})', value)
+    require(match is not None, 'Invalid OSV date')
     offset = re.search(r'[+-](\d{2}):(\d{2})$', value)
     require(offset is None or int(offset[1]) <= 23 and int(offset[2]) <= 59, 'Invalid OSV timezone offset')
-    return datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() * 1000
+    # Python3.10 only accepts3/6 fractional digits; public OSV uses up to9.
+    # Normalize this validation-only value to microseconds, matching newer
+    # Python precision. The original record, bytes, CRC and review hash stay intact.
+    fraction = '.' + match[2][:6].ljust(6, '0') if match[2] else ''
+    zone = '+00:00' if match[3] == 'Z' else match[3]
+    normalized = match[1] + fraction + zone
+    return datetime.datetime.fromisoformat(normalized).timestamp() * 1000
 
 
 def repository_only(affected):
