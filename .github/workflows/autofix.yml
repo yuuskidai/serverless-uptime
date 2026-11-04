@@ -44,7 +44,6 @@ jobs:
 
       - name: Compile TypeScript
         run: npm run tsc
-        continue-on-error: true
 
       # Forks have no upstream autofix.ci installation. Keep every local check,
       # and fail on formatter changes without requiring a new external App.

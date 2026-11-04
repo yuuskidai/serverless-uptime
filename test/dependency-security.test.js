@@ -490,6 +490,8 @@ test("fork autofix keeps all local checks and fails on format changes without th
         assert.ok(step, "Existing local check must remain");
         assert.equal(step.if, undefined, "Existing local check must run for the fork");
     }
+    const compiler = job.steps.find((step) => step.run === "npm run tsc");
+    assert.notEqual(compiler["continue-on-error"], true, "TypeScript compilation must fail the workflow on errors");
     const external = job.steps.find((step) => step.uses?.startsWith("autofix-ci/action@"));
     assert.equal(external.uses, "autofix-ci/action@635ffb0c9798bd160680f18fd73371e355b85f27");
     assert.equal(external.if, "github.repository == 'louislam/uptime-kuma'");

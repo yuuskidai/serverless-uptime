@@ -2,7 +2,7 @@ const { describe, test } = require("node:test");
 const assert = require("node:assert");
 const dayjs = require("dayjs");
 
-const { SQL_DATETIME_FORMAT } = require("../../src/util");
+const { SQL_DATETIME_FORMAT, isoToUTCDateTime, utcToISODateTime, evaluateJsonQuery } = require("../../src/util");
 
 dayjs.extend(require("dayjs/plugin/utc"));
 dayjs.extend(require("dayjs/plugin/customParseFormat"));
@@ -21,5 +21,18 @@ describe("Server Utilities", () => {
         // Verify it can be parsed back
         const parsedDate = dayjs.utc(sqlFormat, SQL_DATETIME_FORMAT);
         assert.strictEqual(parsedDate.unix(), current.unix());
+    });
+
+    test("compiled shared date helpers preserve UTC conversion", () => {
+        assert.strictEqual(isoToUTCDateTime("2025-12-19T10:04:02.129+09:00"), "2025-12-19 01:04:02");
+        assert.strictEqual(utcToISODateTime("2025-12-19 01:04:02"), "2025-12-19T01:04:02.000Z");
+    });
+
+    test("compiled shared JSONata helper evaluates queries and rejects invalid expressions", async () => {
+        assert.deepStrictEqual(await evaluateJsonQuery('{"prices":[2,3]}', "$sum(prices)", "==", 5), {
+            status: true,
+            response: 5,
+        });
+        await assert.rejects(evaluateJsonQuery("{}", "(", "==", 5), /Error evaluating JSON query/);
     });
 });
