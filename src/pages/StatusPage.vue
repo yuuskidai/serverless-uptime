@@ -1,7 +1,7 @@
 <template>
     <div v-if="loadedTheme" class="container mt-3">
         <!-- Sidebar for edit mode -->
-        <div v-if="enableEditMode" class="sidebar" data-testid="edit-sidebar">
+        <div v-if="editMode" class="sidebar" data-testid="edit-sidebar">
             <div class="sidebar-body">
                 <div class="my-3">
                     <label for="slug" class="form-label">{{ $t("Slug") }}</label>
@@ -236,7 +236,7 @@
         </div>
 
         <!-- Main Status Page -->
-        <div :class="{ edit: enableEditMode }" class="main">
+        <div :class="{ edit: editMode }" class="main">
             <!-- Logo & Title -->
             <h1 class="mb-4 title-flex">
                 <!-- Logo -->
@@ -250,7 +250,7 @@
                         <font-awesome-icon icon="times" class="text-danger" />
                     </button>
                     <img :src="logoURL" alt class="logo me-2" :class="logoClass" />
-                    <font-awesome-icon v-if="enableEditMode" class="icon-upload" icon="upload" />
+                    <font-awesome-icon v-if="editMode" class="icon-upload" icon="upload" />
                 </span>
 
                 <!-- Uploader -->
@@ -273,8 +273,13 @@
 
             <!-- Admin functions -->
             <div v-if="hasToken" class="mb-2">
-                <div v-if="!enableEditMode">
-                    <button class="btn btn-primary mb-2 me-2" data-testid="edit-button" @click="edit">
+                <div v-if="!editMode">
+                    <button
+                        class="btn btn-primary mb-2 me-2"
+                        :disabled="loading && privateConfigReady"
+                        data-testid="edit-button"
+                        @click="edit"
+                    >
                         <font-awesome-icon icon="edit" />
                         {{ $t("Edit Status Page") }}
                     </button>
@@ -427,7 +432,7 @@
             <!-- Description -->
             <strong v-if="editMode">{{ $t("Description") }}:</strong>
             <Editable
-                v-if="enableEditMode"
+                v-if="editMode"
                 v-model="config.description"
                 :contenteditable="editMode"
                 tag="div"
@@ -435,12 +440,7 @@
                 data-testid="description-editable"
             />
             <!-- eslint-disable vue/no-v-html-->
-            <div
-                v-if="!enableEditMode"
-                class="alert-heading p-2"
-                data-testid="description"
-                v-html="descriptionHTML"
-            ></div>
+            <div v-if="!editMode" class="alert-heading p-2" data-testid="description" v-html="descriptionHTML"></div>
             <!-- eslint-enable vue/no-v-html-->
 
             <div v-if="editMode" class="mb-4">
@@ -489,7 +489,7 @@
                 </div>
 
                 <PublicGroupList
-                    :edit-mode="enableEditMode"
+                    :edit-mode="editMode"
                     :show-tags="config.showTags"
                     :show-certificate-expiry="config.showCertificateExpiry"
                     :show-only-last-heartbeat="config.showOnlyLastHeartbeat"
@@ -512,7 +512,7 @@
                         <div class="shadow-box incident-list-box">
                             <IncidentHistory
                                 :incidents="dateGroup"
-                                :edit-mode="enableEditMode"
+                                :edit-mode="editMode"
                                 :loading="incidentHistoryLoading"
                                 @edit-incident="$refs.incidentManageModal.showEdit($event)"
                                 @delete-incident="$refs.incidentManageModal.showDelete($event)"
@@ -540,7 +540,7 @@
 
             <!-- Incident Manage Modal -->
             <IncidentManageModal
-                v-if="enableEditMode"
+                v-if="editMode"
                 ref="incidentManageModal"
                 :slug="slug"
                 @incident-updated="loadIncidentHistory"
@@ -548,24 +548,19 @@
 
             <footer class="mt-5 mb-4">
                 <div class="custom-footer-text text-start">
-                    <strong v-if="enableEditMode">{{ $t("Custom Footer") }}:</strong>
+                    <strong v-if="editMode">{{ $t("Custom Footer") }}:</strong>
                 </div>
                 <Editable
-                    v-if="enableEditMode"
+                    v-if="editMode"
                     v-model="config.footerText"
                     tag="div"
-                    :contenteditable="enableEditMode"
+                    :contenteditable="editMode"
                     :noNL="false"
                     class="alert-heading p-2"
                     data-testid="custom-footer-editable"
                 />
                 <!-- eslint-disable vue/no-v-html-->
-                <div
-                    v-if="!enableEditMode"
-                    class="alert-heading p-2"
-                    data-testid="footer-text"
-                    v-html="footerHTML"
-                ></div>
+                <div v-if="!editMode" class="alert-heading p-2" data-testid="footer-text" v-html="footerHTML"></div>
                 <!-- eslint-enable vue/no-v-html-->
 
                 <p v-if="config.showPoweredBy" data-testid="powered-by">
@@ -686,6 +681,11 @@ export default {
         return {
             slug: null,
             enableEditMode: false,
+            publicDataSlug: null,
+            privateConfigReady: false,
+            privateConfigRequestId: 0,
+            privateConfigContext: null,
+            privateDraftContext: null,
             enableEditIncidentMode: false,
             hasToken: false,
             config: {
@@ -762,7 +762,27 @@ export default {
         },
 
         editMode() {
-            return this.enableEditMode && this.$root.socket.connected;
+            const context = this.privateConfigContext;
+            return !!(
+                this.enableEditMode &&
+                this.privateConfigReady &&
+                context &&
+                this.$root.loggedIn &&
+                this.$root.socket.connected &&
+                context.slug === this.slug &&
+                context.connectCount === this.$root.socket.connectCount &&
+                context.username === this.$root.username
+            );
+        },
+
+        privateConfigSession() {
+            return [
+                this.slug,
+                this.$root.loggedIn,
+                this.$root.socket.connected,
+                this.$root.socket.connectCount,
+                this.$root.username,
+            ];
         },
 
         editIncidentMode() {
@@ -897,24 +917,19 @@ export default {
     },
     watch: {
         /**
-         * If connected to the socket and logged in, request private data of this statusPage
-         * @param {boolean} loggedIn Is the client logged in?
+         * Invalidate private editor readiness when its page/auth/connection changes.
          * @returns {void}
          */
-        "$root.loggedIn"(loggedIn) {
-            if (loggedIn) {
-                this.$root.getSocket().emit("getStatusPage", this.slug, (res) => {
-                    if (res.ok) {
-                        this.config = res.config;
-
-                        if (!this.config.customCSS) {
-                            this.config.customCSS = "body {\n" + "  \n" + "}\n";
-                        }
-                    } else {
-                        this.$root.toastError(res.msg);
-                    }
-                });
+        privateConfigSession() {
+            const draft = this.privateDraftContext;
+            if (
+                !this.$root.loggedIn ||
+                (draft && (draft.slug !== this.slug || draft.username !== this.$root.username))
+            ) {
+                this.privateDraftContext = null;
             }
+            this.resetPrivateConfig();
+            this.loadPrivateConfig();
         },
 
         /**
@@ -984,8 +999,12 @@ export default {
             this.slug = "default";
         }
 
+        const publicSlug = this.slug;
         this.getData()
             .then((res) => {
+                if (this.slug !== publicSlug) {
+                    return;
+                }
                 this.config = res.data.config;
 
                 if (!this.config.domainNameList) {
@@ -1023,6 +1042,10 @@ export default {
                 );
 
                 this.updateUpdateTimer();
+                // Apply groups/icon/public fields before any private ACK can open
+                // the editor; a late public snapshot must not erase an active draft.
+                this.publicDataSlug = publicSlug;
+                this.loadPrivateConfig();
             })
             .catch(function (error) {
                 if (error.response.status === 404) {
@@ -1040,7 +1063,79 @@ export default {
             this.edit();
         }
     },
+    beforeUnmount() {
+        this.clickedEditButton = false;
+        this.resetPrivateConfig();
+    },
     methods: {
+        /**
+         * Invalidate pending private replies when auth, connection or page changes.
+         * @returns {void}
+         */
+        resetPrivateConfig() {
+            this.privateConfigRequestId++;
+            this.privateConfigReady = false;
+            this.enableEditMode = false;
+            this.privateConfigContext = null;
+            this.loading = false;
+        },
+
+        /**
+         * Load the current private snapshot before exposing any editable fields.
+         * @returns {void}
+         */
+        loadPrivateConfig() {
+            if (
+                !this.clickedEditButton ||
+                this.publicDataSlug !== this.slug ||
+                !this.$root.loggedIn ||
+                !this.$root.socket.connected
+            ) {
+                return;
+            }
+            this.resetPrivateConfig();
+            const requestId = this.privateConfigRequestId;
+            const socket = this.$root.getSocket();
+            const context = {
+                slug: this.slug,
+                username: this.$root.username,
+                connectCount: this.$root.socket.connectCount,
+            };
+            socket.emit("getStatusPage", context.slug, (res) => {
+                if (
+                    requestId !== this.privateConfigRequestId ||
+                    socket !== this.$root.getSocket() ||
+                    !this.$root.loggedIn ||
+                    !this.$root.socket.connected ||
+                    context.slug !== this.slug ||
+                    context.username !== this.$root.username ||
+                    context.connectCount !== this.$root.socket.connectCount
+                ) {
+                    return;
+                }
+                if (!res.ok) {
+                    this.$root.toastError(res.msg);
+                    return; // Read-only view keeps Edit available for an explicit retry.
+                }
+                const draft = this.privateDraftContext;
+                if (!draft || draft.slug !== context.slug || draft.username !== context.username) {
+                    // The old editor opened before this ACK, so assigning this
+                    // snapshot silently replaced RSS/analytics input before Save.
+                    this.config = res.config;
+                    if (!this.config.domainNameList) {
+                        this.config.domainNameList = [];
+                    }
+                    if (!this.config.customCSS) {
+                        this.config.customCSS = "body {\n" + "  \n" + "}\n";
+                    }
+                }
+                this.privateDraftContext = { slug: context.slug, username: context.username };
+                this.privateConfigContext = context;
+                this.privateConfigReady = true;
+                this.enableEditMode = true;
+                this.loadedData = true;
+            });
+        },
         /**
          * Get status page data
          * It should be preloaded in window.preloadData
@@ -1131,13 +1226,13 @@ export default {
          * @returns {void}
          */
         edit() {
-            if (this.hasToken) {
-                this.$root.initSocketIO(true);
-                this.enableEditMode = true;
+            if (this.loading && this.privateConfigReady) {
+                return; // Keep the acknowledged Save's redirect, including renamed slugs.
+            }
+            if (this.hasToken && !this.editMode) {
                 this.clickedEditButton = true;
-
-                // Try to fix #1658
-                this.loadedData = true;
+                this.$root.initSocketIO(true);
+                this.loadPrivateConfig();
             }
         },
 
@@ -1146,13 +1241,20 @@ export default {
          * @returns {void}
          */
         save() {
+            if (!this.editMode || this.loading) {
+                return;
+            }
             this.loading = true;
+            const requestId = this.privateConfigRequestId;
             let startTime = new Date();
             this.config.slug = this.config.slug.trim().toLowerCase();
 
             this.$root
                 .getSocket()
                 .emit("saveStatusPage", this.slug, this.config, this.imgDataUrl, this.$root.publicGroupList, (res) => {
+                    if (requestId !== this.privateConfigRequestId || !this.editMode) {
+                        return;
+                    }
                     if (res.ok) {
                         this.enableEditMode = false;
                         this.$root.publicGroupList = res.publicGroupList;
@@ -1166,6 +1268,9 @@ export default {
                         }
 
                         setTimeout(() => {
+                            if (requestId !== this.privateConfigRequestId) {
+                                return;
+                            }
                             this.loading = false;
                             location.href = "/status/" + this.config.slug;
                         }, time);

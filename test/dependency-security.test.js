@@ -6,6 +6,276 @@ const os = require("node:os");
 const { createServer } = require("node:http");
 const { once } = require("node:events");
 const { createRequire } = require("node:module");
+const { runInNewContext } = require("node:vm");
+
+/**
+ * Load the actual component options with only UI/IO boundaries replaced.
+ * @param {object} options Synthetic readiness/authentication state
+ * @param {boolean} options.publicReady Whether the public snapshot is already loaded
+ * @param {boolean} options.loggedIn Whether the synthetic root is authenticated
+ * @returns {object} Actual component methods with isolated IO controls
+ */
+function statusPageFixture({ publicReady = true, loggedIn = true } = {}) {
+    const { parse } = require("@vue/compiler-sfc");
+    const espree = require("espree");
+    const source = fs.readFileSync(
+        process.env.STATUS_PAGE_COMPONENT_BASELINE_FILE || path.join(__dirname, "../src/pages/StatusPage.vue"),
+        "utf8"
+    );
+    const descriptor = parse(source).descriptor;
+    const script = descriptor.script.content;
+    const ast = espree.parse(script, { ecmaVersion: "latest", sourceType: "module", range: true });
+    const exported = ast.body.find((node) => node.type === "ExportDefaultDeclaration").declaration;
+    const timers = [];
+    const globals = {
+        dayjs: require("dayjs"),
+        setInterval: () => 1,
+        clearInterval() {},
+        setTimeout: (callback) => timers.push(callback),
+        window: { addEventListener() {} },
+        document: {},
+        location: {},
+        favicon: { badge() {} },
+        toast: { error() {}, success() {} },
+    };
+    for (const node of ast.body.filter((node) => node.type === "ImportDeclaration")) {
+        for (const specifier of node.specifiers) {
+            if (!(specifier.local.name in globals)) {
+                globals[specifier.local.name] = {};
+            }
+        }
+    }
+    const component = runInNewContext("(" + script.slice(...exported.range) + ")", globals);
+    const pending = [];
+    const saved = [];
+    const errors = [];
+    const socket = {
+        connected: true,
+        emit(event, ...args) {
+            if (event === "getStatusPage") {
+                pending.push({ slug: args[0], ack: args[1] });
+            }
+            if (event === "saveStatusPage") {
+                saved.push({ config: JSON.parse(JSON.stringify(args[1])), ack: args.at(-1) });
+            }
+        },
+    };
+    const vm = {
+        $route: { params: { slug: "synthetic-status" }, query: {} },
+        $root: {
+            loggedIn,
+            username: "synthetic-user",
+            socket: { connected: true, connectCount: 1 },
+            publicGroupList: [{ name: "Existing group", monitorList: [] }],
+            getSocket: () => socket,
+            initSocketIO() {},
+            toastError: (message) => errors.push(message),
+        },
+    };
+    Object.assign(vm, component.data.call(vm));
+    for (const [name, method] of Object.entries(component.methods)) {
+        vm[name] = method.bind(vm);
+    }
+    for (const [name, getter] of Object.entries(component.computed)) {
+        Object.defineProperty(vm, name, { get: () => getter.call(vm) });
+    }
+    const config = (values = {}) => ({
+        slug: "synthetic-status",
+        rssTitle: "",
+        analyticsScriptUrl: "",
+        autoRefreshInterval: 30,
+        domainNameList: ["synthetic.invalid"],
+        ...values,
+    });
+    vm.hasToken = true;
+    vm.slug = "synthetic-status";
+    vm.config = config();
+    vm.loading = false;
+    vm.publicDataSlug = publicReady ? vm.slug : null;
+    vm.updateHeartbeatList = () => {};
+    vm.loadIncidentHistory = () => {};
+    vm.updateUpdateTimer = () => {};
+    const sessionChanged = () =>
+        component.watch.privateConfigSession
+            ? component.watch.privateConfigSession.call(vm)
+            : component.watch["$root.loggedIn"].call(vm, vm.$root.loggedIn);
+    return {
+        vm,
+        component,
+        config,
+        pending,
+        saved,
+        errors,
+        timers,
+        sessionChanged,
+        location: globals.location,
+        template: descriptor.template.content,
+    };
+}
+
+test("StatusPage private ACK readiness prevents the reproduced RSS and analytics lost edit", () => {
+    const f = statusPageFixture({ loggedIn: false });
+    f.vm.edit();
+    assert.equal(Boolean(f.vm.editMode), false, "Editor must stay closed before private configuration arrives");
+    f.vm.save();
+    assert.equal(f.saved.length, 0, "Direct Save must fail closed before readiness");
+    f.vm.$root.loggedIn = true;
+    f.sessionChanged();
+    assert.equal(f.pending.length, 1);
+    assert.equal(Boolean(f.vm.editMode), false);
+    f.pending[0].ack({ ok: true, config: f.config() });
+    assert.equal(f.vm.editMode, true);
+    assert.match(f.template, /v-if="editMode" class="sidebar"/);
+    assert.doesNotMatch(f.template, /enableEditMode/);
+    f.vm.config.rssTitle = "Synthetic custom RSS";
+    f.vm.config.analyticsScriptUrl = "https://synthetic.invalid/analytics.js";
+    // Even a duplicate ACK cannot replace an already opened draft.
+    f.pending[0].ack({ ok: true, config: f.config() });
+    f.vm.save();
+    assert.equal(f.saved.length, 1);
+    assert.equal(f.saved[0].config.rssTitle, "Synthetic custom RSS");
+    assert.equal(f.saved[0].config.analyticsScriptUrl, "https://synthetic.invalid/analytics.js");
+    assert.deepEqual(f.saved[0].config.domainNameList, ["synthetic.invalid"]);
+});
+
+test("StatusPage already authenticated Edit fetches private config without a new login transition", () => {
+    const f = statusPageFixture();
+    f.vm.edit();
+    assert.equal(f.pending.length, 1);
+    assert.equal(Boolean(f.vm.editMode), false);
+    f.pending[0].ack({ ok: true, config: f.config({ domainNameList: ["private.invalid"] }) });
+    assert.equal(f.vm.editMode, true);
+    assert.deepEqual(Array.from(f.vm.config.domainNameList), ["private.invalid"]);
+    assert.equal(typeof f.vm.config.customCSS, "string");
+});
+
+test("StatusPage public groups and icon finish loading before private ACK can expose an editor", async () => {
+    const f = statusPageFixture({ publicReady: false });
+    f.vm.loading = true;
+    let resolvePublic;
+    f.vm.getData = () =>
+        new Promise((resolve) => {
+            resolvePublic = resolve;
+        });
+    await f.component.mounted.call(f.vm);
+    f.vm.edit();
+    assert.equal(f.pending.length, 0);
+    assert.equal(Boolean(f.vm.editMode), false);
+    const groups = [{ name: "Loaded group", monitorList: [{ id: 1 }] }];
+    const incident = { id: 1 };
+    resolvePublic({
+        data: {
+            config: f.config({ icon: "/synthetic-icon.svg" }),
+            publicGroupList: groups,
+            maintenanceList: [],
+            incident,
+        },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(f.pending.length, 1);
+    assert.equal(f.vm.$root.publicGroupList, groups);
+    assert.equal(f.vm.incident, incident);
+    assert.equal(f.vm.imgDataUrl, "/synthetic-icon.svg");
+    f.pending[0].ack({ ok: true, config: f.config() });
+    f.vm.config.rssTitle = "Retained private draft";
+    await Promise.resolve();
+    assert.equal(f.vm.config.rssTitle, "Retained private draft");
+    assert.equal(f.vm.$root.publicGroupList, groups);
+});
+
+test("StatusPage ignores old request ACKs and permits explicit retry after a private load failure", () => {
+    const f = statusPageFixture();
+    f.vm.edit();
+    f.vm.edit();
+    assert.equal(f.pending.length, 2);
+    f.pending[0].ack({ ok: true, config: f.config({ rssTitle: "stale" }) });
+    assert.equal(Boolean(f.vm.editMode), false);
+    assert.equal(f.vm.config.rssTitle, "");
+    f.pending[1].ack({ ok: false, msg: "Synthetic unavailable" });
+    assert.equal(f.vm.enableEditMode, false);
+    assert.equal(Boolean(f.vm.editMode), false);
+    f.vm.save();
+    assert.equal(f.saved.length, 0);
+    f.vm.edit();
+    assert.equal(f.pending.length, 3);
+    f.pending[2].ack({ ok: true, config: f.config({ rssTitle: "current" }) });
+    assert.equal(f.vm.editMode, true);
+    assert.equal(f.vm.config.rssTitle, "current");
+});
+
+test("StatusPage reconnect invalidates private readiness while preserving a same-user draft", () => {
+    const f = statusPageFixture();
+    f.vm.edit();
+    f.pending[0].ack({ ok: true, config: f.config() });
+    f.vm.config.rssTitle = "Unsaved draft";
+    f.vm.$root.socket.connected = false;
+    assert.equal(Boolean(f.vm.editMode), false);
+    f.sessionChanged();
+    f.vm.save();
+    assert.equal(f.saved.length, 0);
+    f.vm.$root.socket.connected = true;
+    f.vm.$root.socket.connectCount++;
+    f.sessionChanged();
+    f.pending[1].ack({ ok: false, msg: "Synthetic authentication pending" });
+    assert.equal(f.vm.enableEditMode, false);
+    f.vm.edit();
+    f.pending[2].ack({ ok: true, config: f.config({ rssTitle: "server snapshot" }) });
+    assert.equal(f.vm.editMode, true);
+    assert.equal(f.vm.config.rssTitle, "Unsaved draft");
+    f.vm.save();
+    assert.equal(f.saved[0].config.rssTitle, "Unsaved draft");
+});
+
+test("StatusPage logout, new slug and unmount reject old private replies and stale save callbacks", () => {
+    for (const change of ["logout", "slug", "unmount"]) {
+        const f = statusPageFixture();
+        f.vm.edit();
+        if (change === "logout") {
+            f.vm.$root.loggedIn = false;
+            f.sessionChanged();
+        }
+        if (change === "slug") {
+            f.vm.slug = "different-status";
+            f.sessionChanged();
+        }
+        if (change === "unmount") {
+            f.component.beforeUnmount.call(f.vm);
+        }
+        f.pending[0].ack({ ok: true, config: f.config() });
+        assert.equal(Boolean(f.vm.editMode), false);
+        f.vm.save();
+        assert.equal(f.saved.length, 0);
+    }
+    const f = statusPageFixture();
+    f.vm.edit();
+    f.pending[0].ack({ ok: true, config: f.config() });
+    f.vm.save();
+    f.vm.$root.loggedIn = false;
+    f.sessionChanged();
+    f.saved[0].ack({ ok: true, publicGroupList: [] });
+    assert.equal(f.timers.length, 0);
+});
+
+test("StatusPage Edit cannot cancel a pending Save redirect after a slug rename", () => {
+    const f = statusPageFixture();
+    f.vm.edit();
+    f.pending[0].ack({ ok: true, config: f.config() });
+    f.vm.config.slug = "renamed-synthetic";
+    f.vm.save();
+    const requestId = f.vm.privateConfigRequestId;
+    f.vm.edit();
+    assert.equal(f.pending.length, 1);
+    assert.equal(f.vm.privateConfigRequestId, requestId);
+    f.saved[0].ack({ ok: true, publicGroupList: [] });
+    assert.equal(f.vm.enableEditMode, false);
+    f.vm.edit();
+    assert.equal(f.pending.length, 1);
+    assert.equal(f.vm.privateConfigRequestId, requestId);
+    assert.equal(f.timers.length, 1);
+    f.timers[0]();
+    assert.equal(f.location.href, "/status/renamed-synthetic");
+});
 
 test("legacy source backports and real CJS/ESM consumers reject resource exhaustion", { timeout: 20_000 }, async () => {
     const { verifyLegacyPatches } = await import("../extra/lib/legacy-patch-review.mjs");

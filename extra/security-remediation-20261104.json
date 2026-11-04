@@ -1001,5 +1001,16 @@
             "extra/lib/scan-osv-archive.py": "849df06d0fa2939143b6483485fdce3f8ab4a1dfa0396dd3725005834de8dfef",
             "extra/security-audit.test.mjs": "6ac1d6e2cbccbf15143a64b15b1a3f30c7c40b924b73846236697afbce7b9027"
         }
+    },
+    "status_page_editor_followup": {
+        "trigger": "StatusPage RSS custom-title assertion initially failed and then passed on CI retry after document-navigation synchronization was corrected.",
+        "diagnosis": "Actual unmodified component edit/watch/save methods deterministically exposed inputs before the private-config ACK, then replaced typed RSS/analytics values with the old server snapshot and emitted those old values on Save. A pending public initialization could also overwrite private edits.",
+        "exact_ci_save_payload_captured": false,
+        "scope": ["src/pages/StatusPage.vue", "test/dependency-security.test.js"],
+        "fix": "Wait for the complete initial public snapshot and a successful current-connection private snapshot before exposing any editor control or accepting Save. Reject stale request/socket/slug/auth replies, retain same-user drafts across reconnect, keep explicit Edit retry on failed private load, and preserve pending Save redirects.",
+        "regressions": "Actual component methods/watchers with delayed synthetic IO; existing CI dependency-security discovery. Baseline readiness test fails on135570ed; fixed regression and production frontend build results recorded locally.",
+        "e2e_policy": "All original E2E assertions, timeouts and retries retained. No sleep, polling, skip or weakened assertion added.",
+        "evidence": "/workspace/.cache/security-remaining-20261104/legacy/e2e-repro/",
+        "limitation": "The source race is reproduced; the exact CI save payload was not captured. Final natural Chromium CI remains the integration check."
     }
 }
