@@ -19,7 +19,8 @@ const nodeVersion = process.versions.node;
 
 // Get the required Node.js version from package.json
 const requiredNodeVersions = require("../package.json").engines.node;
-const bannedNodeVersions = " < 18 || 20.0.* || 20.1.* || 20.2.* || 20.3.* ";
+// SEC-20261104: security-patched dependencies and the build toolchain require Node22+.
+const bannedNodeVersions = "<22.0.0";
 console.log(`Your Node.js version: ${nodeVersion}`);
 
 const semver = require("semver");

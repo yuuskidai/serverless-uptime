@@ -1,5 +1,6 @@
 module.exports = {
-    ignorePatterns: ["test/*.js", "server/modules/*", "src/util.js"],
+    // Reviewed upstream backports are checked by source hashes and actual regressions.
+    ignorePatterns: ["test/*.js", "server/modules/*", "src/util.js", "vendor/**"],
     root: true,
     env: {
         browser: true,

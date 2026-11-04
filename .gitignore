@@ -1,6 +1,11 @@
 node_modules
 .DS_Store
 dist
+# Reviewed dependency backports are source and must survive a fresh checkout.
+!vendor/glob/dist/
+!vendor/glob/dist/**
+!vendor/minimatch/dist/
+!vendor/minimatch/dist/**
 dist-ssr
 *.local
 .idea

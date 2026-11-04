@@ -32,6 +32,11 @@ export default defineConfig({
         }),
     ],
     css: {
+        // SEC-20261104: Vite6 fixes the server advisories; retain the legacy
+        // Sass importer used by the existing theme's node_modules imports.
+        preprocessorOptions: {
+            scss: { api: "legacy" },
+        },
         postcss: {
             parser: postCssScss,
             map: false,

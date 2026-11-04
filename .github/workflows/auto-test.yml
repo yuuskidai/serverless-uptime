@@ -34,7 +34,7 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-22.04, windows-latest, ubuntu-22.04-arm]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-        node: [20, 24]
+        node: [22, 24]
         # Also test non-LTS, but only on Ubuntu.
         include:
           - os: ubuntu-22.04
@@ -62,6 +62,11 @@ jobs:
         if: matrix.os == 'ubuntu-22.04-arm'
         run: npm rebuild @louislam/sqlite3
 
+      - run: npm run test:dependency-security
+      - name: Match the full public advisory snapshot locally
+        if: matrix.os == 'ubuntu-22.04' && matrix.node == 24
+        run: npm run audit:dependencies
+
       - run: npm run build
       - run: npm run test-backend
         env:
@@ -76,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 22]
+        node: [22]
         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
 
     steps:
@@ -116,10 +121,10 @@ jobs:
           path: node_modules
           key: node-modules-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('**/package-lock.json') }}
 
-      - name: Use Node.js 20
+      - name: Use Node.js 22
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
-          node-version: 20
+          node-version: 22
       - run: npm clean-install --no-fund
       - run: npm run lint:prod
 
@@ -128,7 +133,7 @@ jobs:
     permissions:
       contents: read
     env:
-      PLAYWRIGHT_VERSION: ~1.39.0
+      PLAYWRIGHT_VERSION: 1.64.1
     steps:
       - run: git config --global core.autocrlf false # Mainly for Windows
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

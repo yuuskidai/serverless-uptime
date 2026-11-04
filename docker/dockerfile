@@ -18,7 +18,10 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
 COPY --chown=node:node .npmrc .npmrc
 COPY --chown=node:node package.json package.json
 COPY --chown=node:node package-lock.json package-lock.json
-RUN npm ci --omit=dev
+# Security backports are local file dependencies, required before npm ci.
+COPY --chown=node:node vendor ./vendor
+RUN node -e "if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Legacy root requires Node22+; rebuild base2 first')"
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY . .
 COPY --chown=node:node --from=build_healthcheck /app/extra/healthcheck /app/extra/healthcheck
 RUN mkdir ./data

@@ -26,5 +26,10 @@ upstream Uptime Kuma:
   inspired by Uptime Kuma's user experience. It is also distributed
   under the MIT License.
 
+* The legacy Node application keeps its upstream functionality, with
+  dependency security updates, compatible glob/minimatch source backports,
+  a Vite/Sass compatibility setting and Node22+ runtime/build entry points.
+  See vendor/SECURITY.md and each vendored license/provenance manifest.
+
 All other directories and files in this repository remain the work
 of the upstream Uptime Kuma project and its contributors.

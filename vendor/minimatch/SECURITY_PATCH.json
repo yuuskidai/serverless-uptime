@@ -1,0 +1,55 @@
+{
+  "name": "minimatch",
+  "version": "9.0.9",
+  "source": {
+    "name": "minimatch",
+    "version": "9.0.9",
+    "dist": {
+      "shasum": "9b0cb9fcb78087f6fd7eababe2511c4d3d60574e",
+      "tarball": "https://registry.npmjs.org/minimatch/-/minimatch-9.0.9.tgz",
+      "fileCount": 53,
+      "integrity": "sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg==",
+      "signatures": [
+        {
+          "sig": "MEYCIQD62OLH3Oo/MyvCYUlWHTmDHRkzaYDxf2Pwv7GD3ls0nQIhALkuU0Pg7x/6+Nc1nQIn/ftd8UmMz3SBRSPGHBN17oKo",
+          "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+        }
+      ],
+      "unpackedSize": 476318
+    },
+    "archiveSha256": "7d28c9a3ef17ce542093c78ec191481503e2711d29db1bd1522062303ab40478"
+  },
+  "advisoryId": "GHSA-g3hv-75wg-m249",
+  "fixCommit": "77a0f5c4",
+  "files": {
+    "LICENSE": "d11323827fa4edeaafc437cc5b91b6971b335f0127efeeb42bf5122fe8657e8f",
+    "README.md": "6ff5eb652f67318b83bebbacb4e66d433b7637e5066d783d9c94e702bfd15d80",
+    "dist/commonjs/assert-valid-pattern.d.ts": "8470352a01aeabc3149ab72c3bd4f4bb262315f2f23572adf5e4f00f7160027f",
+    "dist/commonjs/assert-valid-pattern.js": "fcd3b0e6efee67b11249804cc64bf4d22c883395491f79bfb484869d61823600",
+    "dist/commonjs/ast.d.ts": "1ef34600dcdf3c557836be168982275ba6ea91a6dc27b81a3342c76226bf0dff",
+    "dist/commonjs/ast.js": "fbf87b713254f8fcc915092093b6aa4dc0f4f7ff43ac646ee20875b229803e92",
+    "dist/commonjs/brace-expressions.d.ts": "c653127b895660361106b3b5131a61060dd1ef9da6c4fded89ab2400064c6d53",
+    "dist/commonjs/brace-expressions.js": "9af1c8892ed1e6a153d2f158438722c666aa906eb7e2ec8a27fce7cf035b4278",
+    "dist/commonjs/escape.d.ts": "58486fd899715857d9cfecf89c28fd8d6045712795036f69acc3ecd049f7e383",
+    "dist/commonjs/escape.js": "55e384815856f5708dad6e501aa47314bc08dcb4b90d11db85e413716f948c17",
+    "dist/commonjs/index.d.ts": "213394807c8e4aac86127b2756b9e019e9c73e6dfd02299128b0cc375fdcdc3f",
+    "dist/commonjs/index.js": "6a216499f86225dbcad92409c3c63e4acd33f23e24039368b8830d53c9616f6b",
+    "dist/commonjs/package.json": "8005a3491db7d92f36ac66369861589f9c47123d3a7c71e643fc2c06168cd45a",
+    "dist/commonjs/unescape.d.ts": "32ffef6e12f038a2cbf047cbc5955ac09202426780b94b46b18080a8cce83b40",
+    "dist/commonjs/unescape.js": "ff3e0dd4664576cfe078c3b494724d7cf2f691cdf960304e354e7c34fa6b5a30",
+    "dist/esm/assert-valid-pattern.d.ts": "8470352a01aeabc3149ab72c3bd4f4bb262315f2f23572adf5e4f00f7160027f",
+    "dist/esm/assert-valid-pattern.js": "90e8d3327d573b9d2391edf03dc7d50c1c0b468d720a4c0fb4a08a36ee5c50dc",
+    "dist/esm/ast.d.ts": "1ef34600dcdf3c557836be168982275ba6ea91a6dc27b81a3342c76226bf0dff",
+    "dist/esm/ast.js": "15ce7a00a4afc2742e0ea01c5c32f27400cd88493b500c7d0057752da35e13c2",
+    "dist/esm/brace-expressions.d.ts": "c653127b895660361106b3b5131a61060dd1ef9da6c4fded89ab2400064c6d53",
+    "dist/esm/brace-expressions.js": "e99f6c57070874422dae185154539c9b33a6fb34e2a12eebac8626dd0ab35204",
+    "dist/esm/escape.d.ts": "58486fd899715857d9cfecf89c28fd8d6045712795036f69acc3ecd049f7e383",
+    "dist/esm/escape.js": "1e510823c9fbc36771c4c1b5edc1a4a5fce1cc443634c19a843d02280acd4639",
+    "dist/esm/index.d.ts": "213394807c8e4aac86127b2756b9e019e9c73e6dfd02299128b0cc375fdcdc3f",
+    "dist/esm/index.js": "a9d1453fa49519612092722f192c65b089abf1c41868045ee381f1fb50f6e1b8",
+    "dist/esm/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+    "dist/esm/unescape.d.ts": "32ffef6e12f038a2cbf047cbc5955ac09202426780b94b46b18080a8cce83b40",
+    "dist/esm/unescape.js": "4c52110a7053ca74d659226519e2d977d10ccbba0305d514d2aeffa78e1583f5",
+    "package.json": "601010f90cbaec5fb1f5548673ea97852b23ebd30a89f017cc3f53baf2cfc57c"
+  }
+}

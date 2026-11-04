@@ -8,3 +8,5 @@ kuma-lite/
 health-witness/
 security-alerts/
 README.upstream.md
+# Preserve exact reviewed upstream security patch hashes.
+vendor/

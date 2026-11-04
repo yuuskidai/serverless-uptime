@@ -1,0 +1,61 @@
+{
+  "name": "glob",
+  "version": "10.5.0",
+  "source": {
+    "name": "glob",
+    "version": "10.5.0",
+    "dist": {
+      "shasum": "8ec0355919cd3338c28428a23d4f24ecc5fe738c",
+      "tarball": "https://registry.npmjs.org/glob/-/glob-10.5.0.tgz",
+      "fileCount": 65,
+      "integrity": "sha512-DfXN8DfhJ7NH3Oe7cFmu3NCu1wKbkReJ8TorzSAFbSKrlNaQSKfIzqYqVY8zlbs2NLBbWpRiU52GX2PbaBVNkg==",
+      "signatures": [
+        {
+          "sig": "MEYCIQCF7HApwpdWhmtU8stDTX2XBLz5uDuTEHpWY7iTZY7TBQIhAPrQ4zaeCakAntKyu79uKJwsP+nVIr80HWP576yKVXU6",
+          "keyid": "SHA256:DhQ8wR5APBvFHLF/+Tc+AYvPOdTpcIDqOhxsBHRwC7U"
+        }
+      ],
+      "unpackedSize": 482422
+    },
+    "archiveSha256": "18b75cb9c66c8c08bab5cacccd09013c31d3182f1e001c19d8815c5bb46e0802"
+  },
+  "advisoryId": "GHSA-3g3m-2fjr-6pw4",
+  "fixCommit": "4682e8c9",
+  "files": {
+    "LICENSE": "cdbc258d13806538e727964c2436a8806e6e2496ccd616224aace6f7bf98dbc1",
+    "README.md": "1d91504739ab671d66695b419dcd9ce11e1ff01198b5b3180e56491040429a40",
+    "dist/commonjs/glob.d.ts": "856f2b4cdeefe892326c22a0357aa20d8b59c6930eb5f811e363dc6e18685ca3",
+    "dist/commonjs/glob.js": "85078777a79f3e4f9026009c57bf0316d947913f579462e73626df94cf409dd6",
+    "dist/commonjs/has-magic.d.ts": "4dc19c0c00dc6aecbc60ccbde00e5c6302197593bb47cd481294d3f78a386b93",
+    "dist/commonjs/has-magic.js": "1e4a9acafa68903d5331e17635339ca59c52b71152e82e195438adc46ef7381a",
+    "dist/commonjs/ignore.d.ts": "d840bff80b305e555ce81588219586207da31317649256fa021ad293de9a3d1a",
+    "dist/commonjs/ignore.js": "793e155177f3b9600432ea3d0978c32ce0c9981c702fff77d587333fc731cfbb",
+    "dist/commonjs/index.d.ts": "b0287d4e1952363942bc3925344293dda6411afc2791c5421b20df03353751bb",
+    "dist/commonjs/index.js": "be0581401dff74824abe8ecd4f177d96535fdc1fe1b6698a9b4a4a9c4448bb61",
+    "dist/commonjs/package.json": "8005a3491db7d92f36ac66369861589f9c47123d3a7c71e643fc2c06168cd45a",
+    "dist/commonjs/pattern.d.ts": "c3e973bb170cda56b3add0962b78ab5859c38b6791f55b46506ee642bba6ea09",
+    "dist/commonjs/pattern.js": "de9a2b4a6d53e41a4b0e555db60a159e1292cb9c2e7e348309d1fe23d89755b9",
+    "dist/commonjs/processor.d.ts": "5d20853a892f76d9c0c01f7a38c428f48f8fca89c33426320826d1f0090a7dac",
+    "dist/commonjs/processor.js": "5c36f0422d39637dd6654a478d34a7465aa8a28bb728ea2c9f9c373f93b3e7b6",
+    "dist/commonjs/walker.d.ts": "c3ab91e697053ab728b5621722040feb03b57d64aa91267e7fca7b2f9dd1ee55",
+    "dist/commonjs/walker.js": "0dcb0c8f4be9dfda097b10aef0bb2670961453990543963c9a8827b7591c0f17",
+    "dist/esm/bin.d.mts": "964edded777bd10b441e2d101ad68e1de592b4d6047831d691504b1c24e4ee4c",
+    "dist/esm/bin.mjs": "eb77a6b359958f341aa9cca28270b1f73939c7e698d38fa6ea8b494c562cf021",
+    "dist/esm/glob.d.ts": "856f2b4cdeefe892326c22a0357aa20d8b59c6930eb5f811e363dc6e18685ca3",
+    "dist/esm/glob.js": "cbbd388d7d35ce34b15427376cd68bcec0e5221c9330c498b8d8d707e13f8893",
+    "dist/esm/has-magic.d.ts": "4dc19c0c00dc6aecbc60ccbde00e5c6302197593bb47cd481294d3f78a386b93",
+    "dist/esm/has-magic.js": "875f1dc7229d850e9adac1786cf1f0fea3a718f4e91242049be0e409c19a8e02",
+    "dist/esm/ignore.d.ts": "d840bff80b305e555ce81588219586207da31317649256fa021ad293de9a3d1a",
+    "dist/esm/ignore.js": "e0c4fd1231423017907978530f4af1b04bbb3152f4206d869bd8ccc3c68264e2",
+    "dist/esm/index.d.ts": "b0287d4e1952363942bc3925344293dda6411afc2791c5421b20df03353751bb",
+    "dist/esm/index.js": "c1c6edeb1f365b61dba99c88592aba8bf36fde8bc6d9f7c515e78086d87e2380",
+    "dist/esm/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+    "dist/esm/pattern.d.ts": "c3e973bb170cda56b3add0962b78ab5859c38b6791f55b46506ee642bba6ea09",
+    "dist/esm/pattern.js": "666d46bd0f5c74ef93793105ac93246d2dc0c8d91b17eaaa49674fe2286fa5c7",
+    "dist/esm/processor.d.ts": "5d20853a892f76d9c0c01f7a38c428f48f8fca89c33426320826d1f0090a7dac",
+    "dist/esm/processor.js": "e0f118e843d05a09908943f8859e884aa8f4164178745bcdc9f09929199834d0",
+    "dist/esm/walker.d.ts": "c3ab91e697053ab728b5621722040feb03b57d64aa91267e7fca7b2f9dd1ee55",
+    "dist/esm/walker.js": "4a46cd5ed938129d6d898b75296f0a1e4fcbe25283c951a698c38125ffda6f04",
+    "package.json": "8503a69df6c2300f2d4635fd1109382b16e2dce7f76e9af1bc5ab34ecc0e163c"
+  }
+}

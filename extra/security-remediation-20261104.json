@@ -1,0 +1,1179 @@
+{
+  "at_utc": "2026-11-04T07:12:31.153051+00:00",
+  "completed": true,
+  "source_baseline": "0263426b2bbf2ccd674f46de46b2e2ea61f9455d",
+  "scope": "legacy root Node application dependency graph only",
+  "worker_code_locks_settings_unchanged": true,
+  "prior": {
+    "legacy_exclusive_matched_name_versions": 61,
+    "including_shared_matched_name_versions": 62,
+    "distinct_advisories": 237
+  },
+  "changes": {
+    "official_releases": {
+      "@grpc/grpc-js": "1.14.7",
+      "axios": "0.34.0",
+      "compression": "1.8.2",
+      "form-data": "4.0.6",
+      "jsonata": "2.2.2",
+      "liquidjs": "10.30.1",
+      "mysql2": "3.24.6",
+      "nanoid": "3.3.20",
+      "nodemailer": "10.3.1",
+      "playwright-core": "1.64.1",
+      "protobufjs": "7.6.6",
+      "qs": "6.17.1",
+      "tar": "7.5.22",
+      "ws": "8.21.0"
+    },
+    "compatible_backports": [
+      "glob10.5.0 upstream4682e8c9 cancellation fix",
+      "minimatch9.0.9 upstream77a0f5c4 bounded preprocessing / large dedupe fix"
+    ],
+    "verified_not_affected": [
+      "minimatch3.1.5",
+      "minimatch5.1.9 exact sources without level-two optimizer"
+    ],
+    "runtime_build_entry_alignment": [
+      "Node>=22 package engine and server guard",
+      "root CI20->22; backend22/24; existing ARMv7 matrix22 only; independent Worker CI unchanged",
+      "Playwright CLI/library1.64.1 aligned",
+      "existing Dockerbase source Node22 confirmed; runtime guard rejects stale pre22 base; vendor copied before npm ci",
+      "setup builds current reviewed source then prunes dev; removed old upstream tag checkout/download rollback path"
+    ],
+    "maintenance": [
+      "npm file deps packed via install-links=true; conditional overrides preserve glob7/minimatch3/5 callback APIs",
+      "standalone complete public OSV ZIP audit; explicit local matching replaces automatic npm graph POST",
+      "fresh-checkout/runtime hash + actual consumer regression guards; vendor excluded from formatting/lint that would alter reviewed bytes",
+      "README/NOTICE/vendor security documentation updated"
+    ]
+  },
+  "comparison": [
+    {
+      "name": "@azure/msal-node",
+      "old_version": "5.1.5",
+      "old_advisory_ids": [
+        "GHSA-xcx6-jx8p-x3h5"
+      ],
+      "current_versions": [
+        "7.1.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@fastify/busboy",
+      "old_version": "2.1.1",
+      "old_advisory_ids": [
+        "GHSA-gxm5-99cw-xjw9",
+        "GHSA-x8mw-p69m-v3mx"
+      ],
+      "current_versions": [],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@grpc/grpc-js",
+      "old_version": "1.14.3",
+      "old_advisory_ids": [
+        "GHSA-5375-pq7m-f5r2",
+        "GHSA-99f4-grh7-6pcq",
+        "GHSA-f596-whhp-79r4",
+        "GHSA-m9gg-hp2v-232j"
+      ],
+      "current_versions": [
+        "1.14.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@grpc/grpc-js",
+      "old_version": "1.8.22",
+      "old_advisory_ids": [
+        "GHSA-5375-pq7m-f5r2",
+        "GHSA-99f4-grh7-6pcq",
+        "GHSA-f596-whhp-79r4",
+        "GHSA-m9gg-hp2v-232j"
+      ],
+      "current_versions": [
+        "1.14.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@intlify/core-base",
+      "old_version": "11.2.8",
+      "old_advisory_ids": [
+        "GHSA-83rm-6c8r-g728",
+        "GHSA-8rc2-428q-7ww3"
+      ],
+      "current_versions": [
+        "11.4.18"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@intlify/shared",
+      "old_version": "11.2.8",
+      "old_advisory_ids": [
+        "GHSA-83rm-6c8r-g728"
+      ],
+      "current_versions": [
+        "11.4.18"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@tootallnate/once",
+      "old_version": "1.1.2",
+      "old_advisory_ids": [
+        "GHSA-vpq2-c234-7xj6"
+      ],
+      "current_versions": [
+        "2.0.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "@vue/server-renderer",
+      "old_version": "3.5.33",
+      "old_advisory_ids": [
+        "GHSA-g2v6-rqmx-r4w6"
+      ],
+      "current_versions": [
+        "3.5.44"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "axios",
+      "old_version": "0.31.1",
+      "old_advisory_ids": [
+        "GHSA-42h9-826w-cgv3",
+        "GHSA-7q8q-rj6j-mhjq",
+        "GHSA-898c-q2cr-xwhg",
+        "GHSA-9fr6-4gfg-395g",
+        "GHSA-f4gw-2p7v-4548",
+        "GHSA-gcfj-64vw-6mp9",
+        "GHSA-hcpx-6fm6-wx23",
+        "GHSA-hfxv-24rg-xrqf",
+        "GHSA-j5f8-grm9-p9fc",
+        "GHSA-mmx7-hfxf-jppx",
+        "GHSA-p92q-9vqr-4j8v",
+        "GHSA-pjwm-pj3p-43mv",
+        "GHSA-pmv8-rq9r-6j72",
+        "GHSA-x97p-jq2g-jp4f"
+      ],
+      "current_versions": [
+        "0.34.0",
+        "1.21.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "axios",
+      "old_version": "1.16.0",
+      "old_advisory_ids": [
+        "GHSA-3pq3-5fj3-cg6v",
+        "GHSA-42h9-826w-cgv3",
+        "GHSA-44g4-m2mj-wpvx",
+        "GHSA-4hqw-qxg8-jxx2",
+        "GHSA-542g-h47m-68v8",
+        "GHSA-7q8q-rj6j-mhjq",
+        "GHSA-9fr6-4gfg-395g",
+        "GHSA-f4gw-2p7v-4548",
+        "GHSA-gcfj-64vw-6mp9",
+        "GHSA-hcpx-6fm6-wx23",
+        "GHSA-j8rh-479h-cp32",
+        "GHSA-jqh4-m9w3-8hp9",
+        "GHSA-m8m8-qj5v-23w3",
+        "GHSA-mghh-pgcx-3jjj",
+        "GHSA-mmx7-hfxf-jppx",
+        "GHSA-mwf2-3pr3-8698",
+        "GHSA-pmv8-rq9r-6j72",
+        "GHSA-vh66-26gq-q6x8",
+        "GHSA-x97p-jq2g-jp4f",
+        "GHSA-xj6q-8x83-jv6g"
+      ],
+      "current_versions": [
+        "0.34.0",
+        "1.21.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "body-parser",
+      "old_version": "1.20.5",
+      "old_advisory_ids": [
+        "GHSA-27r3-jxmh-p828",
+        "GHSA-v422-hmwv-36x6"
+      ],
+      "current_versions": [
+        "1.20.9"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "brace-expansion",
+      "old_version": "1.1.14",
+      "old_advisory_ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-6j4f-fj2g-mc7p",
+        "GHSA-mh99-v99m-4gvg",
+        "GHSA-q2hr-2g5m-vwhr",
+        "GHSA-qhr7-859c-m2p7",
+        "GHSA-rgw5-rvv9-x895"
+      ],
+      "current_versions": [
+        "1.1.21",
+        "2.1.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "brace-expansion",
+      "old_version": "2.1.0",
+      "old_advisory_ids": [
+        "GHSA-3jxr-9vmj-r5cp",
+        "GHSA-6j4f-fj2g-mc7p",
+        "GHSA-mh99-v99m-4gvg",
+        "GHSA-q2hr-2g5m-vwhr",
+        "GHSA-qhr7-859c-m2p7",
+        "GHSA-rgw5-rvv9-x895"
+      ],
+      "current_versions": [
+        "1.1.21",
+        "2.1.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "colord",
+      "old_version": "2.9.3",
+      "old_advisory_ids": [
+        "GHSA-2wm5-q62r-hmrv"
+      ],
+      "current_versions": [
+        "2.10.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "compression",
+      "old_version": "1.8.1",
+      "old_advisory_ids": [
+        "GHSA-vc2v-76pw-4v95"
+      ],
+      "current_versions": [
+        "1.8.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "decode-uri-component",
+      "old_version": "0.2.2",
+      "old_advisory_ids": [
+        "GHSA-qr28-fpjm-wq7f",
+        "GHSA-vcc3-ghjq-m6fr"
+      ],
+      "current_versions": [
+        "0.5.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "dompurify",
+      "old_version": "3.4.2",
+      "old_advisory_ids": [
+        "GHSA-55q2-fjhq-7xh7",
+        "GHSA-6688-9rhm-gjv2",
+        "GHSA-76mc-f452-cxcm",
+        "GHSA-c2j3-45gr-mqc4",
+        "GHSA-c6gr-qvv4-5v3f",
+        "GHSA-cmwh-pvxp-8882",
+        "GHSA-gvmj-g25r-r7wr",
+        "GHSA-hpcv-96wg-7vj8",
+        "GHSA-mrv2-3pqr-j5jr",
+        "GHSA-r47g-fvhr-h676",
+        "GHSA-rp9w-3fw7-7cwq",
+        "GHSA-vxr8-fq34-vvx9",
+        "GHSA-x4vx-rjvf-j5p4"
+      ],
+      "current_versions": [
+        "3.4.17"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "engine.io",
+      "old_version": "6.6.7",
+      "old_advisory_ids": [
+        "GHSA-2gc4-cqfq-p2gv"
+      ],
+      "current_versions": [
+        "6.6.10"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "esbuild",
+      "old_version": "0.21.5",
+      "old_advisory_ids": [
+        "GHSA-67mh-4wv8-2f99"
+      ],
+      "current_versions": [
+        "0.25.12"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "fast-uri",
+      "old_version": "3.1.0",
+      "old_advisory_ids": [
+        "GHSA-333x-w4r6-6crp",
+        "GHSA-4c8g-83qw-93j6",
+        "GHSA-7p8r-x3mc-p8w7",
+        "GHSA-f65p-4m7j-42xc",
+        "GHSA-hrr3-gc8f-f4qj",
+        "GHSA-jqff-g426-hqxp",
+        "GHSA-q3j6-qgpj-74h6",
+        "GHSA-qw65-cvwx-89v3",
+        "GHSA-v2hh-gcrm-f6hx",
+        "GHSA-v39h-62p7-jpjc",
+        "GHSA-w74x-v6f9-j3xg",
+        "GHSA-xhq7-xmqj-769h"
+      ],
+      "current_versions": [
+        "3.1.9"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "fast-xml-builder",
+      "old_version": "1.1.5",
+      "old_advisory_ids": [
+        "GHSA-45c6-75p6-83cc",
+        "GHSA-5wm8-gmm8-39j9"
+      ],
+      "current_versions": [
+        "1.1.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "fast-xml-parser",
+      "old_version": "5.2.5",
+      "old_advisory_ids": [
+        "GHSA-37qj-frw5-hhjh",
+        "GHSA-8gc5-j5rx-235r",
+        "GHSA-fj3w-jwp8-x2g3",
+        "GHSA-gh4j-gqv2-49f6",
+        "GHSA-jmr7-xgp7-cmfj",
+        "GHSA-jp2q-39xq-3w4g",
+        "GHSA-m7jm-9gc2-mpf2"
+      ],
+      "current_versions": [
+        "5.7.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "follow-redirects",
+      "old_version": "1.16.0",
+      "old_advisory_ids": [
+        "GHSA-8r9p-f939-6h3c",
+        "GHSA-mrwp-f3q8-3g9p",
+        "GHSA-q3jh-wrc6-jgq8"
+      ],
+      "current_versions": [
+        "1.16.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "form-data",
+      "old_version": "4.0.5",
+      "old_advisory_ids": [
+        "GHSA-hmw2-7cc7-3qxx"
+      ],
+      "current_versions": [
+        "4.0.6"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "glob",
+      "old_version": "10.3.16",
+      "old_advisory_ids": [
+        "GHSA-3g3m-2fjr-6pw4",
+        "GHSA-5j98-mcp5-4vw2"
+      ],
+      "current_versions": [
+        "10.5.0",
+        "7.2.3"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "glob",
+      "old_version": "10.5.0",
+      "old_advisory_ids": [
+        "GHSA-3g3m-2fjr-6pw4"
+      ],
+      "current_versions": [
+        "10.5.0",
+        "7.2.3"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "ip-address",
+      "old_version": "10.2.0",
+      "old_advisory_ids": [
+        "GHSA-22jq-vg5j-6vgg",
+        "GHSA-2vr4-cq9g-pvrc",
+        "GHSA-4xrf-jv44-h6hh",
+        "GHSA-h3mg-xc3c-68pw",
+        "GHSA-j6r3-76f7-8jcv",
+        "GHSA-mwp4-54f8-5fhr",
+        "GHSA-rpw4-54j3-4h4q",
+        "GHSA-rxp7-6hxx-x8q5"
+      ],
+      "current_versions": [
+        "10.7.4"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "joi",
+      "old_version": "17.13.3",
+      "old_advisory_ids": [
+        "GHSA-4528-x5fx-h6hg",
+        "GHSA-6h2x-m376-mqjq",
+        "GHSA-6w3j-5fw6-r9vr",
+        "GHSA-gg4h-3hg2-grpc",
+        "GHSA-q7cg-457f-vx79",
+        "GHSA-wr44-6hxh-3jwq"
+      ],
+      "current_versions": [
+        "17.13.9"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "js-yaml",
+      "old_version": "4.1.1",
+      "old_advisory_ids": [
+        "GHSA-2883-xcg3-v3hh",
+        "GHSA-52cp-r559-cp3m",
+        "GHSA-5p4m-2wfm-xmqj",
+        "GHSA-h67p-54hq-rp68"
+      ],
+      "current_versions": [
+        "4.3.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "jsonata",
+      "old_version": "2.1.0",
+      "old_advisory_ids": [
+        "GHSA-2943-5xfg-gq5f",
+        "GHSA-663r-x48j-fg8p",
+        "GHSA-66mm-25pp-rfff",
+        "GHSA-86vw-mfpg-wwv9",
+        "GHSA-8gq3-vp5j-2grp"
+      ],
+      "current_versions": [
+        "2.2.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "liquidjs",
+      "old_version": "10.25.7",
+      "old_advisory_ids": [
+        "GHSA-2qv6-9wx5-cwv4",
+        "GHSA-4r6h-5v86-94p3",
+        "GHSA-8xx9-69p8-7jp3",
+        "GHSA-9x9p-qf8f-mvjg",
+        "GHSA-fwxr-j5w2-587m",
+        "GHSA-g357-x5c3-c72p",
+        "GHSA-gf2q-c269-pqgc",
+        "GHSA-hh27-hf48-9f5q",
+        "GHSA-r7g9-xpmj-5fcq"
+      ],
+      "current_versions": [
+        "10.30.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "lodash",
+      "old_version": "4.17.23",
+      "old_advisory_ids": [
+        "GHSA-f23m-r3pf-42rh",
+        "GHSA-r5fr-rjxr-66jc"
+      ],
+      "current_versions": [
+        "4.18.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "minimatch",
+      "old_version": "3.1.5",
+      "old_advisory_ids": [
+        "GHSA-g3hv-75wg-m249"
+      ],
+      "current_versions": [
+        "3.1.5",
+        "5.1.9",
+        "9.0.9"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "minimatch",
+      "old_version": "5.1.9",
+      "old_advisory_ids": [
+        "GHSA-g3hv-75wg-m249"
+      ],
+      "current_versions": [
+        "3.1.5",
+        "5.1.9",
+        "9.0.9"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "minimatch",
+      "old_version": "9.0.3",
+      "old_advisory_ids": [
+        "GHSA-23c5-xmqv-rm74",
+        "GHSA-3ppc-4f35-3m26",
+        "GHSA-7r86-cg39-jmmj",
+        "GHSA-g3hv-75wg-m249"
+      ],
+      "current_versions": [
+        "3.1.5",
+        "5.1.9",
+        "9.0.9"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "minimatch",
+      "old_version": "9.0.9",
+      "old_advisory_ids": [
+        "GHSA-g3hv-75wg-m249"
+      ],
+      "current_versions": [
+        "3.1.5",
+        "5.1.9",
+        "9.0.9"
+      ],
+      "resolution": "verified compatible backport / exact legacy algorithm not affected"
+    },
+    {
+      "name": "mysql2",
+      "old_version": "3.11.5",
+      "old_advisory_ids": [
+        "GHSA-3f6p-5ww8-9rcr",
+        "GHSA-rgwj-5xj2-c3m3"
+      ],
+      "current_versions": [
+        "3.24.6"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "nanoid",
+      "old_version": "3.3.12",
+      "old_advisory_ids": [
+        "GHSA-28wg-ghj8-5hjv",
+        "GHSA-2v37-7h3g-55p8"
+      ],
+      "current_versions": [
+        "3.3.20"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "nodemailer",
+      "old_version": "7.0.13",
+      "old_advisory_ids": [
+        "GHSA-268h-hp4c-crq3",
+        "GHSA-2x7j-588g-ccc2",
+        "GHSA-39m8-27wv-hr27",
+        "GHSA-4ffr-jq9g-5ffx",
+        "GHSA-4g23-2xm8-66gc",
+        "GHSA-6vj9-mwq6-2f5v",
+        "GHSA-85x2-q946-cp5h",
+        "GHSA-8c8m-p3m8-cjg8",
+        "GHSA-8m3c-c648-2xjj",
+        "GHSA-8vvx-rff5-p5rq",
+        "GHSA-c7w3-x93f-qmm8",
+        "GHSA-cc9r-2j5m-2m83",
+        "GHSA-g73g-hqqh-jr95",
+        "GHSA-m943-m63m-w62w",
+        "GHSA-p6gq-j5cr-w38f",
+        "GHSA-r7g4-qg5f-qqm2",
+        "GHSA-v53p-9fqp-m79j",
+        "GHSA-vvjj-xcjg-gr5g",
+        "GHSA-wmmp-3585-3rmp",
+        "GHSA-wqvq-jvpq-h66f"
+      ],
+      "current_versions": [
+        "10.3.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "playwright",
+      "old_version": "1.39.0",
+      "old_advisory_ids": [
+        "GHSA-7mvr-c777-76hp"
+      ],
+      "current_versions": [
+        "1.64.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "postcss",
+      "old_version": "8.5.13",
+      "old_advisory_ids": [
+        "GHSA-fxqj-rqcc-2cmp",
+        "GHSA-r28c-9q8g-f849"
+      ],
+      "current_versions": [
+        "8.5.32"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "postcss-selector-parser",
+      "old_version": "6.1.2",
+      "old_advisory_ids": [
+        "GHSA-rj75-hqrm-r3gf",
+        "GHSA-w9m9-85wc-3x92"
+      ],
+      "current_versions": [
+        "6.1.5"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "protobufjs",
+      "old_version": "7.2.6",
+      "old_advisory_ids": [
+        "GHSA-2pr8-phx7-x9h3",
+        "GHSA-66ff-xgx4-vchm",
+        "GHSA-685m-2w69-288q",
+        "GHSA-75px-5xx7-5xc7",
+        "GHSA-f38q-mgvj-vph7",
+        "GHSA-fx83-v9x8-x52w",
+        "GHSA-jggg-4jg4-v7c6",
+        "GHSA-jvwf-75h9-cwgg",
+        "GHSA-q6x5-8v7m-xcrf",
+        "GHSA-wcpc-wj8m-hjx6",
+        "GHSA-xq3m-2v4x-88gg"
+      ],
+      "current_versions": [
+        "7.6.6"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "protobufjs",
+      "old_version": "7.5.6",
+      "old_advisory_ids": [
+        "GHSA-f38q-mgvj-vph7",
+        "GHSA-j3f2-48v5-ccww",
+        "GHSA-jggg-4jg4-v7c6",
+        "GHSA-wcpc-wj8m-hjx6"
+      ],
+      "current_versions": [
+        "7.6.6"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "proxy-addr",
+      "old_version": "2.0.7",
+      "old_advisory_ids": [
+        "GHSA-jqcg-44mw-7w3h"
+      ],
+      "current_versions": [
+        "2.0.8"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "qs",
+      "old_version": "6.14.2",
+      "old_advisory_ids": [
+        "GHSA-4mjr-xmp4-gh2g",
+        "GHSA-6pq8-jhm2-2vcw",
+        "GHSA-q8mj-m7cp-5q26",
+        "GHSA-x5fp-wj9c-mxmx"
+      ],
+      "current_versions": [
+        "6.17.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "qs",
+      "old_version": "6.15.1",
+      "old_advisory_ids": [
+        "GHSA-4mjr-xmp4-gh2g",
+        "GHSA-6pq8-jhm2-2vcw",
+        "GHSA-q8mj-m7cp-5q26",
+        "GHSA-x5fp-wj9c-mxmx"
+      ],
+      "current_versions": [
+        "6.17.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "shell-quote",
+      "old_version": "1.8.3",
+      "old_advisory_ids": [
+        "GHSA-395f-4hp3-45gv",
+        "GHSA-w7jw-789q-3m8p"
+      ],
+      "current_versions": [
+        "1.11.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "socket.io-parser",
+      "old_version": "4.2.6",
+      "old_advisory_ids": [
+        "GHSA-2m8v-j782-fhvr"
+      ],
+      "current_versions": [
+        "4.2.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "source-map-js",
+      "old_version": "1.2.1",
+      "old_advisory_ids": [
+        "GHSA-68fv-2mgg-jv7q"
+      ],
+      "current_versions": [
+        "1.2.2"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "tar",
+      "old_version": "6.2.1",
+      "old_advisory_ids": [
+        "GHSA-23hp-3jrh-7fpw",
+        "GHSA-34x7-hfp2-rc4v",
+        "GHSA-83g3-92jg-28cx",
+        "GHSA-8qq5-rm4j-mr97",
+        "GHSA-8x88-c5mf-7j5w",
+        "GHSA-9ppj-qmqm-q256",
+        "GHSA-gvwx-54wh-qm9j",
+        "GHSA-qffp-2rhf-9h96",
+        "GHSA-r292-9mhp-454m",
+        "GHSA-r6q2-hw4h-h46w",
+        "GHSA-vmf3-w455-68vh",
+        "GHSA-w8wr-v893-vjvp"
+      ],
+      "current_versions": [
+        "7.5.22"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "tmp",
+      "old_version": "0.2.5",
+      "old_advisory_ids": [
+        "GHSA-ph9p-34f9-6g65"
+      ],
+      "current_versions": [
+        "0.2.7"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "undici",
+      "old_version": "5.29.0",
+      "old_advisory_ids": [
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-2mjp-6q6p-2qxm",
+        "GHSA-35p6-xmwp-9g52",
+        "GHSA-4992-7rv2-5pvq",
+        "GHSA-8xcm-r25x-g524",
+        "GHSA-9fm3-97px-rjf6",
+        "GHSA-g8m3-5g58-fq7m",
+        "GHSA-g9mf-h72j-4rw9",
+        "GHSA-m8rv-5g2x-5cg5",
+        "GHSA-p88m-4jfj-68fv",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-r53p-7pc4-xj5r",
+        "GHSA-v3r7-h72x-cjcm",
+        "GHSA-v9p9-hfj2-hcw8",
+        "GHSA-vrm6-8vpv-qv8q",
+        "GHSA-vxpw-j846-p89q"
+      ],
+      "current_versions": [
+        "6.29.1",
+        "7.30.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "undici",
+      "old_version": "6.25.0",
+      "old_advisory_ids": [
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-35p6-xmwp-9g52",
+        "GHSA-3wwx-pv8p-q78v",
+        "GHSA-4qv8-2p9j-2685",
+        "GHSA-8xcm-r25x-g524",
+        "GHSA-9fm3-97px-rjf6",
+        "GHSA-g8m3-5g58-fq7m",
+        "GHSA-m8rv-5g2x-5cg5",
+        "GHSA-p88m-4jfj-68fv",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-r53p-7pc4-xj5r",
+        "GHSA-rfgv-xxqx-mfg5",
+        "GHSA-v3r7-h72x-cjcm",
+        "GHSA-vxpw-j846-p89q",
+        "GHSA-xjj6-f33q-929c"
+      ],
+      "current_versions": [
+        "6.29.1",
+        "7.30.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "undici",
+      "old_version": "7.25.0",
+      "old_advisory_ids": [
+        "GHSA-2gqq-gqf2-x968",
+        "GHSA-2jfj-6hjv-fm6j",
+        "GHSA-2m5v-pch6-74hx",
+        "GHSA-35p6-xmwp-9g52",
+        "GHSA-3xpg-4rpp-hhhm",
+        "GHSA-4cwx-7wf7-3272",
+        "GHSA-4qv8-2p9j-2685",
+        "GHSA-4w7w-5xrc-9h26",
+        "GHSA-55wc-3pg8-jfw6",
+        "GHSA-8436-99hf-9mmv",
+        "GHSA-8xcm-r25x-g524",
+        "GHSA-9fm3-97px-rjf6",
+        "GHSA-f72v-6w45-q472",
+        "GHSA-g8m3-5g58-fq7m",
+        "GHSA-hm92-r4w5-c3mj",
+        "GHSA-jr45-8vmc-qm54",
+        "GHSA-m8rv-5g2x-5cg5",
+        "GHSA-p88m-4jfj-68fv",
+        "GHSA-pmjh-fq2x-6v4x",
+        "GHSA-pr7r-676h-xcf6",
+        "GHSA-qrxm-fqhp-jwvm",
+        "GHSA-r53p-7pc4-xj5r",
+        "GHSA-rfgv-xxqx-mfg5",
+        "GHSA-rx4f-c7p8-82vq",
+        "GHSA-v3r7-h72x-cjcm",
+        "GHSA-vmh5-mc38-953g",
+        "GHSA-vxpw-j846-p89q",
+        "GHSA-w293-vg96-wgc3",
+        "GHSA-xjj6-f33q-929c"
+      ],
+      "current_versions": [
+        "6.29.1",
+        "7.30.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "uuid",
+      "old_version": "10.0.0",
+      "old_advisory_ids": [
+        "GHSA-w5hq-g745-h8pq"
+      ],
+      "current_versions": [
+        "11.1.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "uuid",
+      "old_version": "8.3.2",
+      "old_advisory_ids": [
+        "GHSA-w5hq-g745-h8pq"
+      ],
+      "current_versions": [
+        "11.1.1"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "vite",
+      "old_version": "5.4.21",
+      "old_advisory_ids": [
+        "GHSA-4w7w-66w2-5vf9",
+        "GHSA-587h-7wmj-h5pm",
+        "GHSA-698v-4r3x-3vcv",
+        "GHSA-9jrq-w75r-8gcw",
+        "GHSA-fx2h-pf6j-xcff",
+        "GHSA-r825-w8mm-5pxw",
+        "GHSA-rq7h-c2jc-7f22",
+        "GHSA-v6wh-96g9-6wx3"
+      ],
+      "current_versions": [
+        "6.4.5"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "vue-i18n",
+      "old_version": "11.2.8",
+      "old_advisory_ids": [
+        "GHSA-83rm-6c8r-g728",
+        "GHSA-8rc2-428q-7ww3"
+      ],
+      "current_versions": [
+        "11.4.18"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "ws",
+      "old_version": "7.5.10",
+      "old_advisory_ids": [
+        "GHSA-96hv-2xvq-fx4p"
+      ],
+      "current_versions": [
+        "7.5.11",
+        "8.21.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "ws",
+      "old_version": "8.18.3",
+      "old_advisory_ids": [
+        "GHSA-58qx-3vcg-4xpx",
+        "GHSA-96hv-2xvq-fx4p"
+      ],
+      "current_versions": [
+        "7.5.11",
+        "8.21.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    },
+    {
+      "name": "ws",
+      "old_version": "8.19.0",
+      "old_advisory_ids": [
+        "GHSA-58qx-3vcg-4xpx",
+        "GHSA-96hv-2xvq-fx4p"
+      ],
+      "current_versions": [
+        "7.5.11",
+        "8.21.0"
+      ],
+      "resolution": "official safe release or obsolete vulnerable branch removed"
+    }
+  ],
+  "validation": {
+    "security_and_auditor_tests": {
+      "passed": 19,
+      "failed": 0,
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/combined-security-tests-final.log"
+    },
+    "selected_existing_backend_tests": {
+      "passed": 77,
+      "failed": 0,
+      "TEST_BACKEND": true,
+      "explicitly_excluded": "year-long worst-case simulation (existing upstream CI also skips it as unstable)",
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/backend-local-tests-correct-env.log"
+    },
+    "frontend_production_build": {
+      "passed": true,
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/frontend-build-final.log",
+      "env": "filtered; separate empty envDir; temporary output only"
+    },
+    "native_sqlite": {
+      "passed": true,
+      "build": "selected addon compiled offline using verified existing npm node-gyp12.4.0 + existing Node24.22.1 distribution headers",
+      "test": "real sqlite native addon created/inserted/queried/closed :memory: database",
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/sqlite-local-build.log",
+      "prebuilt_download": "normal-proxy GitHub release and nodejs.org requests returned503, consistent with shared environment outage; no blind retry or bypass",
+      "scratch_cleanup": "only two known generated Makefiles moved from unlisted scope directory to diagnostic cache; no installed package removed or audit guard weakened"
+    },
+    "full_js_lint": {
+      "errors": 0,
+      "warnings": 72,
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/full-js-lint.log"
+    },
+    "changed_js_lint": {
+      "passed": true,
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/changed-lint-final.log"
+    },
+    "workflow_yaml": {
+      "passed": true,
+      "files": [
+        ".github/workflows/auto-test.yml",
+        ".github/workflows/autofix.yml",
+        ".github/workflows/build-docker-base.yml",
+        ".github/workflows/build-docker-push.yml",
+        ".github/workflows/close-incorrect-issue.yml",
+        ".github/workflows/npm-update.yml",
+        ".github/workflows/release-nightly.yml"
+      ]
+    },
+    "package_validation": {
+      "passed": true,
+      "log": "/workspace/.cache/security-remaining-20261104/legacy/package-validation.log"
+    },
+    "git_diff_check": true
+  },
+  "limits": [
+    "Known npm advisories are matched, not proof against unknown vulnerabilities or all native/C library issues. Raw matches and deprecated-package warnings remain visible.",
+    "Tests used Node24.22.1 locally. Node22 CI, Windows/macOS/ARM and complete browser E2E/container image builds were not executed here.",
+    "External provider integrations and real notifications were not exercised. Existing network/container-dependent backend suites were excluded; no production behavior claim from those unrun tests.",
+    "First broad backend attempt omitted required TEST_BACKEND and hit the existing year-long stress OOM; correct configured local subset subsequently passed77 tests. Original failed logs retained and not counted as success.",
+    "Normal native prebuilt/header download was503 through the shared environment proxy. Offline selected native compilation and memory test passed; this does not establish restored external API/network health."
+  ],
+  "files_sha256": {
+    ".eslintrc.js": "22a4c1e09c7dd355b67abf561d8d1d7860b4e780500df08122b48c10260ca4a1",
+    ".github/workflows/auto-test.yml": "2ce2920546f3bc2870428d3c8bbdffa29ffd9b4d779933aca533ed021ce7644e",
+    ".github/workflows/autofix.yml": "3fae24b6e30cd31ad8b8a3b4bdda59e1b73ceefa51cb2591e4ecfc1e9cfd4f6b",
+    ".github/workflows/build-docker-base.yml": "fb8af7660b8dbe141695f5229f04cd1cdbe8e1993269248b43d7d617157dff59",
+    ".github/workflows/build-docker-push.yml": "0ab61f78b587370f6da122cbcdcce44fb9abce6e146681f743d8674033dd9c26",
+    ".github/workflows/close-incorrect-issue.yml": "50b21dec12b7f6285f8e8a796f4b4edee8c3dfc1a1b2734965ac66d5cb3a46e9",
+    ".github/workflows/npm-update.yml": "242f43f9b768bca72f80be6a726d242e12a0f675a2a0cd09f5ca4154b9f5aa24",
+    ".github/workflows/release-nightly.yml": "76dd15171cb05889cbbb7bffea6b79b8e7eaf6de3220b30ef7eaf669212a5465",
+    ".gitignore": "accf923202be9388e7ac578936f611c1dfdc6cd41ae67ea05d951006dc2c3397",
+    ".npmrc": "adbcc8dae4eb0334b78b75ae06e08e06f2c1f54dc5812ff4f8bfddff0935b122",
+    ".prettierignore": "5a73b2292545434b908647fdfa4413709c5a1c0dd9f2488b1d5c26f34688793a",
+    "NOTICE": "a66ad68a31a2c6cc0dd8dcd2d42206d61ee0c67a5d020286607fcd2524f913a3",
+    "README.md": "2c1aa45d908925570500009e210fa566561c5c81fcc7506fcc1716de3cf32842",
+    "config/vite.config.js": "4d500f60f03589317f31382aeb44c40217001462852fa29512eceb063e7a3b44",
+    "docker/dockerfile": "6984407708c49832e36d4ff30db0094a25be319f3d66bd932806d50e2843ba59",
+    "extra/legacy-dependency-regressions.mjs": "75b2f5324fb8c7887cfc113579341e12af5c88d2ec5f3789556552ca124627a0",
+    "extra/lib/legacy-patch-review.mjs": "718d08432a451fb7daa0c9e4b20913072124faa98ed6b73107a4ea10c616695a",
+    "extra/lib/osv-semver.mjs": "89995845c7c014da2fa1d5443c6bf3a7d09a8c9e11ff37081c9b354357236f00",
+    "extra/lib/scan-osv-archive.py": "5022ecff5a5e5be8594e47ef8ea6bd933edb594278aea135dc053b092ccb6232",
+    "extra/security-audit.mjs": "a0b0b0884c4a7fc0a7c3689c0356c1a7ed76b833a48aeacfc58a2d931a8b94ce",
+    "extra/security-audit.test.mjs": "01f3ee996539bf6d6e0c821e7888c7dda04efd923cc4ed3bcd6415c74ef55009",
+    "package-lock.json": "62c0e0b9889630af4b9c3d1561431b7c104a09f26c0a630e5364b73bf42105b0",
+    "package.json": "971f13c7fcd24dad2868508a71eb2bb7147721d6fc2ea3d1f6520019e13fee79",
+    "server/server.js": "701ea904b86e66fabbbbb8caa8703b3a42436a4122748a4b354ea99cda057069",
+    "test/dependency-security.test.js": "6108ef7830611d1856335770f71939b087af75fbcfdd42abb1d08cc27fea669d",
+    "vendor/SECURITY.md": "a9912bb712f0314e00702b3eb69a6aad4b45cfa8a5b6368a656735c60d4ca154",
+    "vendor/glob/LICENSE": "cdbc258d13806538e727964c2436a8806e6e2496ccd616224aace6f7bf98dbc1",
+    "vendor/glob/README.md": "1d91504739ab671d66695b419dcd9ce11e1ff01198b5b3180e56491040429a40",
+    "vendor/glob/SECURITY_PATCH.json": "35fd6b2b2f2e0736846a996d89c5e27e7105fd10a4c453447c014307c7fdbf8c",
+    "vendor/glob/dist/commonjs/glob.d.ts": "856f2b4cdeefe892326c22a0357aa20d8b59c6930eb5f811e363dc6e18685ca3",
+    "vendor/glob/dist/commonjs/glob.js": "85078777a79f3e4f9026009c57bf0316d947913f579462e73626df94cf409dd6",
+    "vendor/glob/dist/commonjs/has-magic.d.ts": "4dc19c0c00dc6aecbc60ccbde00e5c6302197593bb47cd481294d3f78a386b93",
+    "vendor/glob/dist/commonjs/has-magic.js": "1e4a9acafa68903d5331e17635339ca59c52b71152e82e195438adc46ef7381a",
+    "vendor/glob/dist/commonjs/ignore.d.ts": "d840bff80b305e555ce81588219586207da31317649256fa021ad293de9a3d1a",
+    "vendor/glob/dist/commonjs/ignore.js": "793e155177f3b9600432ea3d0978c32ce0c9981c702fff77d587333fc731cfbb",
+    "vendor/glob/dist/commonjs/index.d.ts": "b0287d4e1952363942bc3925344293dda6411afc2791c5421b20df03353751bb",
+    "vendor/glob/dist/commonjs/index.js": "be0581401dff74824abe8ecd4f177d96535fdc1fe1b6698a9b4a4a9c4448bb61",
+    "vendor/glob/dist/commonjs/package.json": "8005a3491db7d92f36ac66369861589f9c47123d3a7c71e643fc2c06168cd45a",
+    "vendor/glob/dist/commonjs/pattern.d.ts": "c3e973bb170cda56b3add0962b78ab5859c38b6791f55b46506ee642bba6ea09",
+    "vendor/glob/dist/commonjs/pattern.js": "de9a2b4a6d53e41a4b0e555db60a159e1292cb9c2e7e348309d1fe23d89755b9",
+    "vendor/glob/dist/commonjs/processor.d.ts": "5d20853a892f76d9c0c01f7a38c428f48f8fca89c33426320826d1f0090a7dac",
+    "vendor/glob/dist/commonjs/processor.js": "5c36f0422d39637dd6654a478d34a7465aa8a28bb728ea2c9f9c373f93b3e7b6",
+    "vendor/glob/dist/commonjs/walker.d.ts": "c3ab91e697053ab728b5621722040feb03b57d64aa91267e7fca7b2f9dd1ee55",
+    "vendor/glob/dist/commonjs/walker.js": "0dcb0c8f4be9dfda097b10aef0bb2670961453990543963c9a8827b7591c0f17",
+    "vendor/glob/dist/esm/bin.d.mts": "964edded777bd10b441e2d101ad68e1de592b4d6047831d691504b1c24e4ee4c",
+    "vendor/glob/dist/esm/bin.mjs": "eb77a6b359958f341aa9cca28270b1f73939c7e698d38fa6ea8b494c562cf021",
+    "vendor/glob/dist/esm/glob.d.ts": "856f2b4cdeefe892326c22a0357aa20d8b59c6930eb5f811e363dc6e18685ca3",
+    "vendor/glob/dist/esm/glob.js": "cbbd388d7d35ce34b15427376cd68bcec0e5221c9330c498b8d8d707e13f8893",
+    "vendor/glob/dist/esm/has-magic.d.ts": "4dc19c0c00dc6aecbc60ccbde00e5c6302197593bb47cd481294d3f78a386b93",
+    "vendor/glob/dist/esm/has-magic.js": "875f1dc7229d850e9adac1786cf1f0fea3a718f4e91242049be0e409c19a8e02",
+    "vendor/glob/dist/esm/ignore.d.ts": "d840bff80b305e555ce81588219586207da31317649256fa021ad293de9a3d1a",
+    "vendor/glob/dist/esm/ignore.js": "e0c4fd1231423017907978530f4af1b04bbb3152f4206d869bd8ccc3c68264e2",
+    "vendor/glob/dist/esm/index.d.ts": "b0287d4e1952363942bc3925344293dda6411afc2791c5421b20df03353751bb",
+    "vendor/glob/dist/esm/index.js": "c1c6edeb1f365b61dba99c88592aba8bf36fde8bc6d9f7c515e78086d87e2380",
+    "vendor/glob/dist/esm/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+    "vendor/glob/dist/esm/pattern.d.ts": "c3e973bb170cda56b3add0962b78ab5859c38b6791f55b46506ee642bba6ea09",
+    "vendor/glob/dist/esm/pattern.js": "666d46bd0f5c74ef93793105ac93246d2dc0c8d91b17eaaa49674fe2286fa5c7",
+    "vendor/glob/dist/esm/processor.d.ts": "5d20853a892f76d9c0c01f7a38c428f48f8fca89c33426320826d1f0090a7dac",
+    "vendor/glob/dist/esm/processor.js": "e0f118e843d05a09908943f8859e884aa8f4164178745bcdc9f09929199834d0",
+    "vendor/glob/dist/esm/walker.d.ts": "c3ab91e697053ab728b5621722040feb03b57d64aa91267e7fca7b2f9dd1ee55",
+    "vendor/glob/dist/esm/walker.js": "4a46cd5ed938129d6d898b75296f0a1e4fcbe25283c951a698c38125ffda6f04",
+    "vendor/glob/package.json": "8503a69df6c2300f2d4635fd1109382b16e2dce7f76e9af1bc5ab34ecc0e163c",
+    "vendor/minimatch/LICENSE": "d11323827fa4edeaafc437cc5b91b6971b335f0127efeeb42bf5122fe8657e8f",
+    "vendor/minimatch/README.md": "6ff5eb652f67318b83bebbacb4e66d433b7637e5066d783d9c94e702bfd15d80",
+    "vendor/minimatch/SECURITY_PATCH.json": "43ba06c986ae18e4d691cfb313a95d24b9af04d34284cde38e2019f313b49ae2",
+    "vendor/minimatch/dist/commonjs/assert-valid-pattern.d.ts": "8470352a01aeabc3149ab72c3bd4f4bb262315f2f23572adf5e4f00f7160027f",
+    "vendor/minimatch/dist/commonjs/assert-valid-pattern.js": "fcd3b0e6efee67b11249804cc64bf4d22c883395491f79bfb484869d61823600",
+    "vendor/minimatch/dist/commonjs/ast.d.ts": "1ef34600dcdf3c557836be168982275ba6ea91a6dc27b81a3342c76226bf0dff",
+    "vendor/minimatch/dist/commonjs/ast.js": "fbf87b713254f8fcc915092093b6aa4dc0f4f7ff43ac646ee20875b229803e92",
+    "vendor/minimatch/dist/commonjs/brace-expressions.d.ts": "c653127b895660361106b3b5131a61060dd1ef9da6c4fded89ab2400064c6d53",
+    "vendor/minimatch/dist/commonjs/brace-expressions.js": "9af1c8892ed1e6a153d2f158438722c666aa906eb7e2ec8a27fce7cf035b4278",
+    "vendor/minimatch/dist/commonjs/escape.d.ts": "58486fd899715857d9cfecf89c28fd8d6045712795036f69acc3ecd049f7e383",
+    "vendor/minimatch/dist/commonjs/escape.js": "55e384815856f5708dad6e501aa47314bc08dcb4b90d11db85e413716f948c17",
+    "vendor/minimatch/dist/commonjs/index.d.ts": "213394807c8e4aac86127b2756b9e019e9c73e6dfd02299128b0cc375fdcdc3f",
+    "vendor/minimatch/dist/commonjs/index.js": "6a216499f86225dbcad92409c3c63e4acd33f23e24039368b8830d53c9616f6b",
+    "vendor/minimatch/dist/commonjs/package.json": "8005a3491db7d92f36ac66369861589f9c47123d3a7c71e643fc2c06168cd45a",
+    "vendor/minimatch/dist/commonjs/unescape.d.ts": "32ffef6e12f038a2cbf047cbc5955ac09202426780b94b46b18080a8cce83b40",
+    "vendor/minimatch/dist/commonjs/unescape.js": "ff3e0dd4664576cfe078c3b494724d7cf2f691cdf960304e354e7c34fa6b5a30",
+    "vendor/minimatch/dist/esm/assert-valid-pattern.d.ts": "8470352a01aeabc3149ab72c3bd4f4bb262315f2f23572adf5e4f00f7160027f",
+    "vendor/minimatch/dist/esm/assert-valid-pattern.js": "90e8d3327d573b9d2391edf03dc7d50c1c0b468d720a4c0fb4a08a36ee5c50dc",
+    "vendor/minimatch/dist/esm/ast.d.ts": "1ef34600dcdf3c557836be168982275ba6ea91a6dc27b81a3342c76226bf0dff",
+    "vendor/minimatch/dist/esm/ast.js": "15ce7a00a4afc2742e0ea01c5c32f27400cd88493b500c7d0057752da35e13c2",
+    "vendor/minimatch/dist/esm/brace-expressions.d.ts": "c653127b895660361106b3b5131a61060dd1ef9da6c4fded89ab2400064c6d53",
+    "vendor/minimatch/dist/esm/brace-expressions.js": "e99f6c57070874422dae185154539c9b33a6fb34e2a12eebac8626dd0ab35204",
+    "vendor/minimatch/dist/esm/escape.d.ts": "58486fd899715857d9cfecf89c28fd8d6045712795036f69acc3ecd049f7e383",
+    "vendor/minimatch/dist/esm/escape.js": "1e510823c9fbc36771c4c1b5edc1a4a5fce1cc443634c19a843d02280acd4639",
+    "vendor/minimatch/dist/esm/index.d.ts": "213394807c8e4aac86127b2756b9e019e9c73e6dfd02299128b0cc375fdcdc3f",
+    "vendor/minimatch/dist/esm/index.js": "a9d1453fa49519612092722f192c65b089abf1c41868045ee381f1fb50f6e1b8",
+    "vendor/minimatch/dist/esm/package.json": "3ca9d4afd21425087cf31893b8f9f63c81b0b8408db5e343ca76e5f8aa26ab9a",
+    "vendor/minimatch/dist/esm/unescape.d.ts": "32ffef6e12f038a2cbf047cbc5955ac09202426780b94b46b18080a8cce83b40",
+    "vendor/minimatch/dist/esm/unescape.js": "4c52110a7053ca74d659226519e2d977d10ccbba0305d514d2aeffa78e1583f5",
+    "vendor/minimatch/package.json": "601010f90cbaec5fb1f5548673ea97852b23ebd30a89f017cc3f53baf2cfc57c"
+  },
+  "audit": {
+    "result": "passed",
+    "matchingComplete": true,
+    "raw_matching_occurrences": 11,
+    "reviewed_patched_occurrences": 2,
+    "reviewed_not_affected_occurrences": 9,
+    "actionable_occurrences": 0,
+    "unsupported": 0,
+    "locked_packages": 1366,
+    "installed_packages": 1305,
+    "optional_absent_packages": 61,
+    "whole_feed_crc_verified": {
+      "centralDirectoryEntries": 231158,
+      "processedEntries": 231158,
+      "inflatedBytes": 389912693,
+      "withdrawnRecords": 747,
+      "repositoryOnlyAffectedEntries": 1,
+      "crc32VerifiedEntries": 231158,
+      "knownBracesAdvisoryPresent": true,
+      "completed": true
+    },
+    "completedAt": "2026-11-04T07:08:50.037Z",
+    "evidence": "/workspace/.cache/security-remaining-20261104/legacy/final-audit.json",
+    "snapshot": {
+      "source": "https://osv-vulnerabilities.storage.googleapis.com/npm/all.zip",
+      "method": "GET",
+      "requestBodyBytes": 0,
+      "dependencyMetadataSent": false,
+      "credentialsSent": false,
+      "bytes": 219907990,
+      "sha256": "5f6eee194b40ae6d42767602409545fe1cc9fbba982eb3fca39471e77b6e91b9",
+      "publisherLastModified": "2026-11-04T06:18:27.000Z"
+    }
+  },
+  "deployment_scope": "Legacy Node application remains unprovisioned. Existing helth Worker security fixes are deployed separately from this repository master; no old Node service is created."
+}
