@@ -5,16 +5,31 @@ import { login, restoreSqliteSnapshot, screenshot } from "../util-test";
  * The successful save callback hides the sidebar before scheduling a document
  * reload. Waiting only for sidebar removal let tests inspect the old analytics
  * head or start another edit while that earlier reload was still pending.
- * Register the navigation wait before clicking, then retain every state assertion.
+ * waitForNavigation also resolves for a history-only edit URL change with a null
+ * response. Require a future document load and its main-frame HTTP response;
+ * register both before clicking and retain every state assertion.
  * @param {Page} page Playwright page
  * @returns {Promise<void>}
  */
 async function saveStatusPageAndWaitForReload(page) {
+    await page.waitForLoadState("domcontentloaded");
+    const expectedURL = new URL(page.url());
+    expect(expectedURL.pathname).toMatch(/^\/status\//);
     const [navigation] = await Promise.all([
-        page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+        page.waitForResponse((response) => {
+            const request = response.request();
+            const responseURL = new URL(response.url());
+            return (
+                request.isNavigationRequest() &&
+                request.resourceType() === "document" &&
+                request.frame() === page.mainFrame() &&
+                responseURL.origin === expectedURL.origin &&
+                responseURL.pathname === expectedURL.pathname
+            );
+        }),
+        page.waitForEvent("domcontentloaded"),
         page.getByTestId("save-button").click(),
     ]);
-    expect(navigation, "Saving a Status Page must reload the document").not.toBeNull();
     expect(navigation.ok(), "The saved Status Page document must load successfully").toBeTruthy();
 }
 
