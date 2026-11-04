@@ -2,6 +2,8 @@ import type { CheckRow, Env, Monitor } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
 import { resolveCheckIntervalMs } from './check-schedule';
+import { hiddenPublicMonitorIds, publicMonitorVisible } from './public-monitor-visibility';
+import { redactPublicUrls } from './url-display';
 
 const TIMEZONE = 'Asia/Tokyo';
 /** How far back to look when synthesising the incident timeline. */
@@ -48,7 +50,8 @@ export async function renderRssFeed(env: Env, baseUrl: URL): Promise<Response> {
   const monitorsResult = await db.prepare(
     `SELECT * FROM monitors WHERE enabled = 1 AND ${AVAILABILITY_ROLE_SQL} ORDER BY id ASC`,
   ).all<Monitor>();
-  const monitors = monitorsResult.results ?? [];
+  const hidden = hiddenPublicMonitorIds(env.HIDDEN_MONITOR_IDS);
+  const monitors = (monitorsResult.results ?? []).filter(monitor => publicMonitorVisible(monitor, hidden));
 
   const incidents: Incident[] = [];
   if (monitors.length > 0) {
@@ -271,7 +274,7 @@ function renderItem(inc: Incident, baseUrl: URL): string {
   // one through /healthz; otherwise falls back to the kind-headline so
   // pre-/healthz monitors still produce readable items.
   const titleCause = reason ?? copy.headline;
-  const title = `${statusPrefix} ${monitorLabel} — ${titleCause}`;
+  const title = redactPublicUrls(`${statusPrefix} ${monitorLabel} — ${titleCause}`, [monitor.url, monitor.fallback_url]);
 
   const linkFromMs = startedAt;
   const linkToMs = endedAt ?? Date.now();
@@ -296,7 +299,7 @@ function renderItem(inc: Incident, baseUrl: URL): string {
     descriptionLines.push('現在も継続中です。');
   }
 
-  const description = descriptionLines.join('\n');
+  const description = redactPublicUrls(descriptionLines.join('\n'), [monitor.url, monitor.fallback_url]);
 
   return `    <item>
       <title>${escapeXml(title)}</title>

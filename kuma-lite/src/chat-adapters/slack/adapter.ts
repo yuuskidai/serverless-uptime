@@ -33,7 +33,7 @@ import {
 
 import { ValidationError } from './errors';
 import { SlackClient } from './client';
-import { verifySlackRequest } from './signing';
+import { admitSlackWebhook } from './signing';
 
 const ADAPTER_NAME = 'slack';
 
@@ -198,12 +198,17 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
   async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
     this.logger = this.logger ?? chat.getLogger('slack');
+    // The SDK initializes before webhook authentication. Keep initialization
+    // local so unsigned requests cannot trigger Slack auth.test or its quota.
+  }
+
+  private async ensureBotIdentity(): Promise<void> {
     if (!this.botUserId) {
       try {
         const auth = (await this.client.authTest()) as { user_id?: string; user?: string };
         this.botUserId = auth.user_id;
       } catch (err) {
-        this.logger?.warn('auth.test failed during initialize', err);
+        this.logger?.warn('auth.test failed for an authenticated event', err);
       }
     }
   }
@@ -233,17 +238,9 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
       );
     }
 
-    const rawBody = await request.text();
-    const verification = await verifySlackRequest({
-      signingSecret: this.signingSecret,
-      signatureHeader: request.headers.get('x-slack-signature'),
-      timestampHeader: request.headers.get('x-slack-request-timestamp'),
-      rawBody,
-    });
-    if (!verification.ok) {
-      this.logger?.warn(`slack webhook rejected: ${verification.reason}`);
-      return new Response('invalid_signature', { status: 401 });
-    }
+    const admission = await admitSlackWebhook(request, this.signingSecret);
+    if (!admission.ok) return admission.response;
+    const rawBody = admission.rawBody;
 
     const contentType = request.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {
@@ -273,6 +270,9 @@ export class SlackWorkersAdapter implements Adapter<SlackThreadId, SlackRawMessa
     if (payload.type === 'event_callback') {
       const event = payload.event as Record<string, unknown> | undefined;
       if (event && this.chat) {
+        // Identity matching is needed for events, after their signed admission;
+        // URL verification and slash acknowledgements need no network lookup.
+        await this.ensureBotIdentity();
         await this.dispatchEvent(event, options);
       }
       return jsonResponse({ ok: true });

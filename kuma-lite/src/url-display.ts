@@ -12,16 +12,46 @@
  * `/healthz`).
  */
 
-export function publicFacingUrl(probeUrl: string): string {
+/** Shared presentation boundary: probe credentials never belong in public URLs. */
+export function safePublicWebUrl(probeUrl: string, rootOnly = false): string | null {
   try {
     const u = new URL(probeUrl);
-    if (u.pathname === '/healthz' || u.pathname === '/healthz/') {
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    // Query strings and fragments may carry probe/API tokens. This redacts only
+    // presentation; the stored URL used by the actual probe remains untouched.
+    u.username = ''; u.password = ''; u.search = ''; u.hash = '';
+    if (rootOnly || u.pathname === '/healthz' || u.pathname === '/healthz/') {
       u.pathname = '/';
     }
-    return u.toString();
+    const output = u.toString();
+    return output.length <= 3000 ? output : null;
   } catch {
-    return probeUrl;
+    return null;
   }
+}
+
+export function publicFacingUrl(probeUrl: string): string {
+  return safePublicWebUrl(probeUrl) ?? '';
+}
+
+/** Exception/health text can repeat the probe URL even when its link is safe. */
+export type PublicUrlContext = string | readonly (string | null | undefined)[];
+
+export function redactPublicUrls(text: string, probeUrls?: PublicUrlContext): string {
+  // A stored probe URL may contain raw spaces/quotes that terminate a generic
+  // URL matcher. Replace its full reprint before tokenization or output escaping.
+  // Longest first also protects fallback URLs whose prefix is the primary URL.
+  const known = (typeof probeUrls === 'string' ? [probeUrls] : probeUrls ?? [])
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .sort((a, b) => b.length - a.length);
+  const knownRedacted = known.reduce((value, url) => value.split(url).join(safePublicWebUrl(url) ?? '[URL removed]'), text);
+  const withoutUserinfo = knownRedacted.replace(/\b(https?:\/\/)[^/?#<>"'`\r\n]*@/gi, '$1');
+  return withoutUserinfo
+    .replace(/https?%3a%2f%2f[^\s<>"'`]+/gi, value => {
+      try { const safe = safePublicWebUrl(decodeURIComponent(value)); return safe ? encodeURIComponent(safe) : '[URL removed]'; }
+      catch { return '[URL removed]'; }
+    })
+    .replace(/\bhttps?:\/\/[^\s<>"'`]+/gi, value => safePublicWebUrl(value) ?? '[URL removed]');
 }
 
 /**
@@ -36,6 +66,6 @@ export function publicFacingDisplay(probeUrl: string): string {
     const u = new URL(publicFacingUrl(probeUrl));
     return u.host + (u.pathname === '/' ? '' : u.pathname);
   } catch {
-    return probeUrl;
+    return '';
   }
 }

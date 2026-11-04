@@ -1,0 +1,164 @@
+{
+  "recorded_at": "2026-11-04T06:30:17.911446+00:00",
+  "baseline_commit": "439fe78ce3d89a1aea5e47a4244a940ca50d7838",
+  "status": "implemented_and_locally_verified",
+  "findings": [
+    {
+      "id": "MON01",
+      "status": "fixed",
+      "change": "Slack POST and signature metadata are rejected before schema and SDK initialization; read/HMAC admission is capped at 256 KiB and 3 seconds; only signed events may resolve bot identity; private admitted-request cache avoids double consumption and rechecks freshness. One fixed-capacity byte buffer and one read-plus-HMAC deadline race bound retained allocation and promise reactions independently of empty/one-byte chunk counts.",
+      "verification": "Actual Chat SDK with mock fetch verifies unsigned/invalid requests cause zero provider calls, valid URL challenge and Slash work, tampered/invalid UTF-8 and oversized/stalled/aborted bodies reject; actual full Worker without D1 binding proves rejection before schema. A fragmented signed UTF-8 stream at its exact byte cap preserves HMAC; an endless empty-chunk stream terminates at its monotonic deadline without awaiting cancellation."
+    },
+    {
+      "id": "MON02",
+      "status": "fixed",
+      "change": "A shared HTTP(S)-only presentation boundary strips URL username/password/query/fragment in public links, Slash, rich cards and repeated error/reason text. Probe URL and history remain unchanged. Both stored primary/fallback URLs are replaced in full before generic URL matching, escaping, clipping or truncation, longest URL first to cover overlapping prefixes and raw query spaces/quotes.",
+      "verification": "Real SQLite renderer and actual notification regressions verify synthetic credential-bearing probe URLs in stored error, reason and components do not leak through status, incident, RSS, Slash, rich Slack or Discord payloads; valid detail routing parameters remain. Regression reprints both primary/fallback URLs with raw query spaces and quotes in error/reason/component/name/description; no synthetic secret marker survives any tested renderer or notification payload."
+    },
+    {
+      "id": "MON03",
+      "status": "fixed",
+      "change": "A common fail-closed hidden monitor predicate covers public dashboard, RSS, incident and shared Slash status; hidden incident IDs return 404 before DB lookup. Availability role filtering is preserved. Public cache keys are partitioned by presentation version, Worker version and hidden monitor configuration.",
+      "verification": "Real SQLite renderer tests verify hidden monitor names and history stay out of each shared view and direct enumeration; history and monitor state remain unchanged; cache tests demonstrate old responses cannot bypass privacy or rendering changes."
+    }
+  ],
+  "validation": {
+    "node": "24.22.1",
+    "kuma_full_suite": {
+      "passed": 683,
+      "failed": 0,
+      "skipped": 0,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/kuma-tests.log"
+    },
+    "security_full_suite": {
+      "passed": 38,
+      "failed": 0,
+      "skipped": 0,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/security-tests.log"
+    },
+    "kuma_typecheck": {
+      "exit_code": 0,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/kuma-typecheck.log"
+    },
+    "security_typecheck": {
+      "exit_code": 0,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/security-typecheck.log"
+    },
+    "git_diff_check": {
+      "exit_code": 0
+    },
+    "native_worker": {
+      "passed": 1,
+      "failed": 0,
+      "included_in_kuma_full_suite": true,
+      "test": "actual Worker rejects unsigned Slack traffic before its D1 schema gate and without provider I/O"
+    },
+    "slack_fragmentation_regression": {
+      "passed": 7,
+      "failed": 0,
+      "included_in_kuma_full_suite": true,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/slack-fragmentation-final.log"
+    },
+    "known_primary_and_fallback_url_regression": {
+      "passed": 5,
+      "failed": 0,
+      "included_in_kuma_full_suite": true,
+      "log": "/workspace/.cache/repository-security-remediation-20261104/monitor/public-redaction-final.log"
+    }
+  },
+  "unchanged": [
+    "monitor thresholds/frequency/route semantics",
+    "D1 schema and durable namespaces/generations",
+    "production settings and data",
+    "rich Slack message layout",
+    "dependencies and lockfiles"
+  ],
+  "limitations": [
+    "Local verification only; parent will coordinate repository-wide review and any separately authorized release.",
+    "Public monitor privacy now also applies to shared authenticated Slash status; privileged monitoring administration remains in the authenticated management API."
+  ],
+  "changed_files": [
+    {
+      "path": "kuma-lite/README.md",
+      "sha256": "79b3485fc7d3856bb8acfa2369b4b6cb70f5cd22871edecf2ada731cca1af505"
+    },
+    {
+      "path": "kuma-lite/src/chat-adapters/slack/adapter.ts",
+      "sha256": "3738e22bab80bfe04518bb8473bdd3da128ff7426ad9ea8368ecf0be48b0cd04"
+    },
+    {
+      "path": "kuma-lite/src/chat-adapters/slack/signing.ts",
+      "sha256": "b2145a1810630469d7b85c573b2af810dca7b7d3bfccbf40ccca60ca9e00f0ab"
+    },
+    {
+      "path": "kuma-lite/src/edge-cache.ts",
+      "sha256": "ed58d54dcb56a95abf3c860991a94a15a319d4e5d8e3b30b73ab9b2f5c405165"
+    },
+    {
+      "path": "kuma-lite/src/incident-page.ts",
+      "sha256": "584dd86346909b7ec9573c6da664224ba149fb821eb7126662375a88dddc10f3"
+    },
+    {
+      "path": "kuma-lite/src/index.ts",
+      "sha256": "ad3c0a5bc439c69789b0338f0df29adf2d9e0c9d4d73ba36c96ab2bed5e7b52f"
+    },
+    {
+      "path": "kuma-lite/src/notifier.ts",
+      "sha256": "20052347ec291adfc7588b0394f6ee84cb57cc4d66abbf0f1747cf7dd9e4812f"
+    },
+    {
+      "path": "kuma-lite/src/rss-feed.ts",
+      "sha256": "46a251b270ca9e17c73925fb31413f51e125fc06ef73d393e4f975f51244471e"
+    },
+    {
+      "path": "kuma-lite/src/slack-bot.ts",
+      "sha256": "d8aa94ee8cf03a5e5a43f9e6df623b3410e2ea46d524e58adb547d4971a10629"
+    },
+    {
+      "path": "kuma-lite/src/slack-notification-layout.ts",
+      "sha256": "45e8666b66980b9a749c68605b62337f7493f4b14ff6b4ee2094ef62c89c218d"
+    },
+    {
+      "path": "kuma-lite/src/status-page.ts",
+      "sha256": "0c188ff4a763e8f0902f095a70034adffdedfaaf022c5b70c54d2965aee37696"
+    },
+    {
+      "path": "kuma-lite/src/url-display.ts",
+      "sha256": "db2246786349324528c3aea2fe9410c729df9ab6fcf55acb62ba6faf766d217d"
+    },
+    {
+      "path": "kuma-lite/tests/helpers.mjs",
+      "sha256": "3b251f57c31bf63e706588ebec68fedb831a66a053a5d6398775b0068083f791"
+    },
+    {
+      "path": "kuma-lite/tests/notification-semantics.test.mjs",
+      "sha256": "175a998ff11d923da7d92a3f2d7b81dfcc02adb19c7fe0a417f4e4416f9851cd"
+    },
+    {
+      "path": "kuma-lite/src/public-monitor-visibility.ts",
+      "sha256": "3a166ba06eb18be3574eea5aa2cfd71d9390afca43f8c799acdf5b70d3fae054"
+    },
+    {
+      "path": "kuma-lite/src/slack-webhook.ts",
+      "sha256": "80434730e3673e98fadd08ef32b5fa2b4b07c9603dd303d10f7daf81b774e854"
+    },
+    {
+      "path": "kuma-lite/tests/public-cache-security.test.mjs",
+      "sha256": "a01ba56930f308673f1f31780aa6d984d8948c8d8d917f11bdaa6fa0747168a9"
+    },
+    {
+      "path": "kuma-lite/tests/public-monitor-security.test.mjs",
+      "sha256": "ea9bf4e44d73562e60c4c3e91609f6be052e7a69042af82782e208d8aec3352c"
+    },
+    {
+      "path": "kuma-lite/tests/slack-ingress-security.test.mjs",
+      "sha256": "403a2158e061ae313d4f4de4cb838e1ee5730f0b23bd3b42d7dc4728845280b1"
+    },
+    {
+      "path": "kuma-lite/tests/slack-ingress-workerd.test.mjs",
+      "sha256": "7ec7734c95c3de90326a6d391f7ee50d94224c488e1971741bae4cf99d710ddd"
+    }
+  ],
+  "production_deployment": "Not deployed; local verification and commit only.",
+  "related_application_fixes": "sales-ops-platform/docs/security-audit/REMEDIATION_EVIDENCE_2026-11-04.json"
+}

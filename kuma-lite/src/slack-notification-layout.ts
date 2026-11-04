@@ -1,5 +1,6 @@
 import type { ComponentHealth, Monitor } from './types';
 import type { IncidentDetail } from './notifier';
+import { safePublicWebUrl, redactPublicUrls, type PublicUrlContext } from './url-display';
 
 type NotificationKind = 'down' | 'degraded' | 'partial' | 'up';
 interface LayoutOptions {
@@ -9,8 +10,8 @@ interface LayoutOptions {
 }
 
 /** Bound every dynamic value before building Slack's limited text objects. */
-function clip(value: string, max: number): string {
-  const clean = value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '');
+function clip(value: string, max: number, probeUrl?: PublicUrlContext): string {
+  const clean = redactPublicUrls(value, probeUrl).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '');
   if (clean.length <= max) return clean;
   let out = '';
   for (const char of clean) {
@@ -30,13 +31,7 @@ function escapeMarkup(text: string): string {
 
 /** Never put credentials, tokens in a query, or non-web schemes in action URLs. */
 export function notificationServiceUrl(input: string): string | null {
-  try {
-    const url = new URL(input);
-    if (!['https:', 'http:'].includes(url.protocol)) return null;
-    url.username = ''; url.password = ''; url.pathname = '/'; url.search = ''; url.hash = '';
-    const output = url.toString();
-    return output.length <= 3000 ? output : null;
-  } catch { return null; }
+  return safePublicWebUrl(input, true);
 }
 
 export function notificationTimeJst(observedAt?: number): string {
@@ -59,15 +54,15 @@ function durationText(ms: number): string {
     total % 60 ? `${total % 60}秒` : ''].filter(Boolean).join('');
 }
 
-function componentSummary(components: ComponentHealth[]): string | null {
+function componentSummary(components: ComponentHealth[], probeUrl: PublicUrlContext): string | null {
   if (!components.length) return null;
   const labels = { down: '異常', degraded: '遅延・一部不調', ok: '正常' };
   const lines = components.slice(0, 5).map(component => {
     const icon = component.status === 'down' ? '🔴' : component.status === 'degraded' ? '🟠' : '🟢';
     const latency = typeof component.latency_ms === 'number' && Number.isFinite(component.latency_ms) && component.latency_ms >= 0
       ? `｜${new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 1 }).format(component.latency_ms)} ms` : '';
-    return `${icon} ${clip(component.name, 100)}｜${labels[component.status]}${latency}` +
-      (component.reason ? `\n   ${clip(component.reason, 200)}` : '');
+    return `${icon} ${clip(component.name, 100, probeUrl)}｜${labels[component.status]}${latency}` +
+      (component.reason ? `\n   ${clip(component.reason, 200, probeUrl)}` : '');
   });
   if (components.length > 5) lines.push(`ほか ${components.length - 5} コンポーネント`);
   return `コンポーネントの状態\n${lines.join('\n\n')}`;
@@ -80,7 +75,7 @@ export function renderMonitorSlackMessage(
   const internal = options.internal === true;
   const normal = kind === 'up';
   const partial = kind === 'partial';
-  const name = clip(monitor.name.replace(/[\r\n\t]+/g, ' '), 100);
+  const name = clip(redactPublicUrls(monitor.name, [monitor.url, monitor.fallback_url]).replace(/[\r\n\t]+/g, ' '), 100);
   const title = internal
     ? normal ? '🟢 内部経路が正常化' : partial ? '🔵 内部経路の応答が改善' : '🟠 内部経路の継続異常'
     : normal ? '🟢 復旧を確認' : partial ? '🟡 応答が回復・一部不調が継続' : kind === 'down' ? '🔴 公開サービスの異常' : '🟠 応答遅延・一部不調';
@@ -105,8 +100,8 @@ export function renderMonitorSlackMessage(
     { type: 'section', fields },
     { type: 'divider' },
   ];
-  if (!normal && detail.reason) blocks.push(section(`原因・観測内容\n${clip(detail.reason, 700)}`));
-  const components = !normal ? componentSummary(detail.components) : null;
+  if (!normal && detail.reason) blocks.push(section(`原因・観測内容\n${clip(detail.reason, 700, [monitor.url, monitor.fallback_url])}`));
+  const components = !normal ? componentSummary(detail.components, [monitor.url, monitor.fallback_url]) : null;
   if (components) blocks.push(section(components));
   const guidance = normal
     ? internal ? '追加対応の目安\n内部経路の正常化を確認しました。公開サービスの状態は、公開サービス監視の通知で確認してください。' : '追加対応の目安\n利用画面の応答も確認してください。再発した場合は、今回の原因・観測内容と照合してください。'
@@ -119,8 +114,8 @@ export function renderMonitorSlackMessage(
   buttons.push({ type: 'button', text: plain('Cloudflareを開く', 75), url: 'https://dash.cloudflare.com/', action_id: 'open_cloudflare_dashboard' });
   blocks.push({ type: 'actions', elements: buttons });
   blocks.push({ type: 'context', elements: [plain(internal ? '内部診断｜継続異常に絞って通知・正常化はスレッドへ返信' : '公開サービス監視｜観測時刻は検査時点・復旧はスレッドへ返信'),
-    ...(detail.version ? [plain(`アプリ版 ${clip(detail.version, 64)}`, 100)] : [])] });
-  const text = clip(`${title}｜${name}｜${priority}｜${summary}${!normal && detail.reason ? ` 原因: ${clip(detail.reason, 500)}` : ''}｜${observed}` +
+    ...(detail.version ? [plain(`アプリ版 ${clip(detail.version, 64, [monitor.url, monitor.fallback_url])}`, 100)] : [])] });
+  const text = clip(`${title}｜${name}｜${priority}｜${summary}${!normal && detail.reason ? ` 原因: ${clip(detail.reason, 500, [monitor.url, monitor.fallback_url])}` : ''}｜${observed}` +
     (internal ? '｜公開サービスの稼働判定とは別の内部診断です。' : ''), 2800);
   return { text: text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'), blocks };
 }

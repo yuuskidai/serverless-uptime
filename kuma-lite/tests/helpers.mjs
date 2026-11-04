@@ -16,7 +16,7 @@ export function loadTs(file, overrides = {}) {
   const module = { exports: {} };
   runInNewContext(output, {
     module, exports: module.exports, crypto: webcrypto, Date, Error, Response, Request, URL, performance,
-    AbortController, TextEncoder, TextDecoder, Uint8Array, atob, btoa,
+    AbortController, AbortSignal, TextEncoder, TextDecoder, Uint8Array, atob, btoa,
     fetch: (...args) => globalThis.fetch(...args),
     console: overrides.console ?? { error() {}, warn() {}, log() {}, info() {} },
     setTimeout, clearTimeout,

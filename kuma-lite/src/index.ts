@@ -15,7 +15,8 @@ import {
   publicSchemaErrorResponse,
 } from './schema-gate';
 import { renderStatusPage } from './status-page';
-import { buildSlackBot } from './slack-bot';
+import { handleSlackWebhook } from './slack-webhook';
+import { publicMonitorCacheScope } from './public-monitor-visibility';
 import { handleSecurityAdminRequest } from './security-integration';
 import type { Env } from './types';
 
@@ -113,6 +114,7 @@ export default {
     if (url.pathname === '/readyz') return monitoringReadiness(env);
     // Security state is SQLite DO-owned; do not make administration depend on monitor D1/schema availability.
     if (url.pathname === '/api/security' || url.pathname.startsWith('/api/security/')) return handleSecurityAdminRequest(req, env);
+    if (url.pathname === '/slack/events') return handleSlackWebhook(req, env, ctx);
     // Supplemental probes are retired; reject late deliveries before reading a body or D1.
     // The authenticated GET below remains available for retained observation history.
     if (url.pathname === '/api/external-observations' && req.method !== 'GET') {
@@ -135,26 +137,16 @@ export default {
       return handleApiRequest(req, env);
     }
 
-    if (url.pathname === '/slack/events') {
-      const bot = buildSlackBot(env);
-      if (!bot) {
-        return new Response('slack_not_configured', { status: 503 });
-      }
-      return bot.chat.webhooks.slack(req, {
-        waitUntil: (task) => ctx.waitUntil(task),
-      });
-    }
-
     if (url.pathname === '/' || url.pathname === '/status') {
-      return withEdgeCache(req, ctx, () => renderStatusPage(env, url));
+      return withEdgeCache(req, ctx, () => renderStatusPage(env, url), await publicMonitorCacheScope(env));
     }
 
     if (url.pathname === '/incident') {
-      return withEdgeCache(req, ctx, () => renderIncidentPage(env, url));
+      return withEdgeCache(req, ctx, () => renderIncidentPage(env, url), await publicMonitorCacheScope(env));
     }
 
     if (url.pathname === '/rss.xml' || url.pathname === '/feed') {
-      return withEdgeCache(req, ctx, () => renderRssFeed(env, url));
+      return withEdgeCache(req, ctx, () => renderRssFeed(env, url), await publicMonitorCacheScope(env));
     }
 
     return new Response('Not found', { status: 404 });

@@ -5,7 +5,6 @@ import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import * as urlDisplay from '../src/url-display.ts';
 import * as monitorPolicy from '../src/monitor-policy.ts';
-import * as notificationLayout from '../src/slack-notification-layout.ts';
 
 function load(file,dependencies,globals={}){
  const module={exports:{}};const source=readFileSync(new URL('../src/'+file+'.ts',import.meta.url),'utf8');
@@ -14,6 +13,7 @@ function load(file,dependencies,globals={}){
   console:{error(){},warn(){},log(){}},require(id){if(Object.hasOwn(dependencies,id))return dependencies[id];throw Error('Unexpected module '+id);},...globals},{filename:file+'.ts'});
  return module.exports;
 }
+const notificationLayout=load('slack-notification-layout',{'./url-display':urlDisplay});
 function fixture(options={}){
  const posts=[],reactions=[],discord=[],jobs=[];
  const bot={defaultChannelId:'synthetic-channel',slack:{async postBlocks(_channel,payload){posts.push(payload);if(options.post)return options.post(payload);return {ts:'synthetic-thread'};},async addReaction(...args){reactions.push(args);}}};

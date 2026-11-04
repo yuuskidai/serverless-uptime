@@ -6,7 +6,8 @@ import type {
   MonitorState,
 } from './types';
 import { classify, KIND_HEADLINE } from './kinds';
-import { publicFacingUrl } from './url-display';
+import { publicFacingUrl, redactPublicUrls, type PublicUrlContext } from './url-display';
+import { hiddenPublicMonitorIds, publicMonitorVisible } from './public-monitor-visibility';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql, availabilitySince } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
 import { historicalIntervalSql, isDueSlot, nextDueSlot, resolveCheckIntervalMs } from './check-schedule';
@@ -183,7 +184,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
     : scale === '60m' ? Math.floor(now / MINUTE_MS) * MINUTE_MS - (bucketCount - 1) * MINUTE_MS
     : now - windowMs;
 
-  const hidden = parseHidden(env.HIDDEN_MONITOR_IDS);
+  const hidden = hiddenPublicMonitorIds(env.HIDDEN_MONITOR_IDS);
 
   // Bind the read-only render path to a Sessions API session so D1
   // can route subsequent reads to the nearest replica when the
@@ -198,7 +199,7 @@ export async function renderStatusPage(env: Env, url: URL): Promise<Response> {
   const monitorsResult = await db.prepare(
     `SELECT * FROM monitors WHERE enabled = 1 AND ${AVAILABILITY_ROLE_SQL} ORDER BY id ASC`,
   ).all<Monitor>();
-  const monitors = (monitorsResult.results ?? []).filter((m) => !hidden.has(m.id));
+  const monitors = (monitorsResult.results ?? []).filter(m => publicMonitorVisible(m, hidden));
 
   if (monitors.length === 0) {
     return htmlResponse(renderShell('No monitors configured', emptyState(), now, scale));
@@ -736,16 +737,6 @@ function applyMinuteSchedule(buckets: BucketView[], monitor: Monitor, input: Sch
   markPendingBucket(buckets, monitor, now);
 }
 
-function parseHidden(input: string | undefined): Set<number> {
-  const set = new Set<number>();
-  if (!input) return set;
-  for (const part of input.split(',')) {
-    const n = Number.parseInt(part.trim(), 10);
-    if (Number.isFinite(n)) set.add(n);
-  }
-  return set;
-}
-
 interface OverallStatus {
   status: 'ok' | 'degraded' | 'down' | 'maintenance' | 'unknown';
   downCount: number;
@@ -1014,10 +1005,10 @@ function renderMaintenanceBanner(views: MonitorView[], now: number): string {
         : `<span class="text-blue-300/80 font-medium">予定</span>（開始まで ${formatRelativeFuture(m.fromMs - now)}）`;
       return `<li class="flex flex-col gap-0.5">
         <div class="flex flex-wrap items-baseline gap-2">
-          <span class="text-blue-100 font-medium">${escapeHtml(view.monitor.name)}</span>
+          <span class="text-blue-100 font-medium">${escapeHtml(view.monitor.name, [view.monitor.url, view.monitor.fallback_url])}</span>
           ${phase}
         </div>
-        <div class="text-blue-200/90 text-xs">${escapeHtml(m.reason)}</div>
+        <div class="text-blue-200/90 text-xs">${escapeHtml(m.reason, [view.monitor.url, view.monitor.fallback_url])}</div>
         <div class="text-blue-200/60 text-[11px] tabular-nums" data-jst-range-from="${m.fromMs}" data-jst-range-to="${m.toMs}">${escapeHtml(when)}</div>
       </li>`;
     })
@@ -1128,7 +1119,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
         ? ' role="button" tabindex="0"'
         : ' aria-hidden="true"';
       const sampleAttr = b.sampleLabel
-        ? ` data-label="${escapeAttr(b.sampleLabel)}"`
+        ? ` data-label="${escapeAttr(b.sampleLabel, [view.monitor.url, view.monitor.fallback_url])}"`
         : '';
       const cls = `bar bar-${b.state}${isClickable ? ' is-clickable' : ''}`;
       return `<${tag}${href} class="${cls}"${role}
@@ -1144,18 +1135,18 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
   const endLabel = useDateLabels ? formatJstShortDate(windowEnd) : formatJstTime(windowEnd);
 
   const descriptionLine = view.monitor.description
-    ? `<p class="mt-0.5 text-xs text-slate-300 leading-snug">${escapeHtml(view.monitor.description)}</p>`
+    ? `<p class="mt-0.5 text-xs text-slate-300 leading-snug">${escapeHtml(view.monitor.description, [view.monitor.url, view.monitor.fallback_url])}</p>`
     : '';
 
   const reasonLine = renderLatestReason(view);
-  const componentsBlock = renderComponents(view.latestComponents);
+  const componentsBlock = renderComponents(view.latestComponents, [view.monitor.url, view.monitor.fallback_url]);
 
   return `
     <article class="glass rounded-2xl p-5">
       <div class="flex items-start justify-between gap-4">
         <div class="min-w-0 flex-1">
           <h2 class="font-semibold text-slate-100 truncate">
-            ${escapeHtml(view.monitor.name)}
+            ${escapeHtml(view.monitor.name, [view.monitor.url, view.monitor.fallback_url])}
           </h2>
           ${descriptionLine}
           ${availabilitySince(view.monitor) ? `<p class="mt-1 text-[11px] text-slate-400">公開HTTPS監視開始: ${escapeHtml(formatJstDateTime(availabilitySince(view.monitor)))}</p>` : ''}
@@ -1174,7 +1165,7 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
 
       <div class="mt-5">
         <div class="bar-row" role="img"
-             aria-label="${escapeAttr(view.monitor.name)} の${escapeAttr(config.label)}のタイムライン">
+             aria-label="${escapeAttr(view.monitor.name, [view.monitor.url, view.monitor.fallback_url])} の${escapeAttr(config.label)}のタイムライン">
           ${bars}
         </div>
         <div class="mt-2 flex justify-between text-[10px] text-slate-500 font-mono tabular-nums">
@@ -1211,10 +1202,10 @@ function renderCard(view: MonitorView, scale: Scale, now: number): string {
  * "planned maintenance".
  */
 function renderLatestReason(view: MonitorView): string {
-  if (view.effState === 'unknown') return `<p class="mt-2 text-xs text-slate-300 leading-snug">${escapeHtml(view.latestReason ?? '監視情報を確認できません。')}</p>`;
+  if (view.effState === 'unknown') return `<p class="mt-2 text-xs text-slate-300 leading-snug">${escapeHtml(view.latestReason ?? '監視情報を確認できません。', [view.monitor.url, view.monitor.fallback_url])}</p>`;
   if (view.maintenance?.active) {
     return `<p class="mt-2 text-xs text-blue-300/90 leading-snug">
-      <span class="font-medium">メンテナンス中:</span> ${escapeHtml(view.maintenance.reason)}
+      <span class="font-medium">メンテナンス中:</span> ${escapeHtml(view.maintenance.reason, [view.monitor.url, view.monitor.fallback_url])}
     </p>`;
   }
   if (view.effState === 'up') return '';
@@ -1225,7 +1216,7 @@ function renderLatestReason(view: MonitorView): string {
       : view.effState === 'degraded'
       ? 'text-amber-300'
       : 'text-slate-300';
-  return `<p class="mt-2 text-xs ${tone} leading-snug">${escapeHtml(view.latestReason)}</p>`;
+  return `<p class="mt-2 text-xs ${tone} leading-snug">${escapeHtml(view.latestReason, [view.monitor.url, view.monitor.fallback_url])}</p>`;
 }
 
 /**
@@ -1233,7 +1224,7 @@ function renderLatestReason(view: MonitorView): string {
  * non-OK — listing five healthy components on a green card is just
  * noise. Each row uses a small dot in the component status colour.
  */
-function renderComponents(components: ComponentHealth[]): string {
+function renderComponents(components: ComponentHealth[], probeUrl: PublicUrlContext): string {
   if (components.length === 0) return '';
   const unhealthy = components.filter((c) => c.status !== 'ok');
   if (unhealthy.length === 0) return '';
@@ -1245,10 +1236,10 @@ function renderComponents(components: ComponentHealth[]): string {
           : c.status === 'degraded'
           ? 'bg-amber-400'
           : 'bg-green-400';
-      const reason = c.reason ? ` — ${escapeHtml(c.reason)}` : '';
+      const reason = c.reason ? ` — ${escapeHtml(c.reason, probeUrl)}` : '';
       return `<li class="flex items-baseline gap-2 text-xs text-slate-300">
         <span class="w-1.5 h-1.5 rounded-full ${dotColor} mt-1 shrink-0"></span>
-        <span><span class="font-medium text-slate-200">${escapeHtml(c.name)}</span>${reason}</span>
+        <span><span class="font-medium text-slate-200">${escapeHtml(c.name, probeUrl)}</span>${reason}</span>
       </li>`;
     })
     .join('\n');
@@ -1528,8 +1519,8 @@ function htmlResponse(html: string): Response {
   });
 }
 
-function escapeHtml(s: string): string {
-  return s
+function escapeHtml(s: string, probeUrl?: PublicUrlContext): string {
+  return redactPublicUrls(s, probeUrl)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -1537,8 +1528,8 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function escapeAttr(s: string): string {
-  return escapeHtml(s);
+function escapeAttr(s: string, probeUrl?: PublicUrlContext): string {
+  return escapeHtml(s, probeUrl);
 }
 
 

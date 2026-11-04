@@ -2,7 +2,8 @@ import { AVAILABILITY_ROLE_SQL, availabilitySince, availabilityHistorySql } from
 import { monitorFreshness, type FreshnessCheck, type MonitorFreshness } from './monitor-readiness';
 import type { CheckRow, ComponentHealth, Env, Monitor, MonitorState } from './types';
 import { classify, KIND_COPY, type IncidentKind } from './kinds';
-import { publicFacingUrl } from './url-display';
+import { publicFacingUrl, redactPublicUrls, type PublicUrlContext } from './url-display';
+import { hiddenPublicMonitorIds, publicMonitorVisible } from './public-monitor-visibility';
 
 const TIMEZONE = 'Asia/Tokyo';
 const MAX_ROWS = 200;
@@ -20,6 +21,11 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     );
   }
 
+  const hidden = hiddenPublicMonitorIds(env.HIDDEN_MONITOR_IDS);
+  // Do not query a private monitor just because its sequential ID is known.
+  if (hidden.has(monitorId)) return htmlResponse(
+    shell('対象が見つかりません', errorBlock('指定された監視対象が見つかりませんでした。')), 404);
+
   // See status-page.ts for the rationale on 'first-unconstrained' —
   // incident pages are public, read-only, and tolerate replica lag.
   const db = env.DB.withSession('first-unconstrained');
@@ -31,7 +37,7 @@ export async function renderIncidentPage(env: Env, url: URL): Promise<Response> 
     .bind(monitorId)
     .first<Monitor>();
 
-  if (!monitor) {
+  if (!monitor || !publicMonitorVisible(monitor, hidden)) {
     return htmlResponse(
       shell('対象が見つかりません', errorBlock('指定された監視対象が見つかりませんでした。')),
       404,
@@ -163,7 +169,7 @@ function renderBody(args: RenderArgs): string {
           ${escapeHtml(verdict.label)}
         </span>
         <h2 class="mt-4 text-lg sm:text-xl font-semibold text-slate-100 leading-snug">
-          ${escapeHtml(headline)}
+          ${escapeHtml(headline, [monitor.url, monitor.fallback_url])}
         </h2>
         ${detail ? `<p class="mt-2 text-sm text-slate-300">${escapeHtml(detail)}</p>` : ''}
 
@@ -182,7 +188,7 @@ function renderBody(args: RenderArgs): string {
           </div>
         </dl>
 
-        ${renderComponentsBlock(components)}
+        ${renderComponentsBlock(components, [monitor.url, monitor.fallback_url])}
       </section>
     </main>
   `;
@@ -225,7 +231,7 @@ function parseComponents(json: string | null): ComponentHealth[] {
   }
 }
 
-function renderComponentsBlock(components: ComponentHealth[]): string {
+function renderComponentsBlock(components: ComponentHealth[], probeUrl: PublicUrlContext): string {
   if (components.length === 0) return '';
   // Show *all* components (not just unhealthy) on the incident page — a
   // visitor coming in from a red bar wants to see the full breakdown so
@@ -240,7 +246,7 @@ function renderComponentsBlock(components: ComponentHealth[]): string {
           : 'bg-green-400';
       const statusLabel =
         c.status === 'down' ? '停止' : c.status === 'degraded' ? '不調' : '正常';
-      const reason = c.reason ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(c.reason)}</div>` : '';
+      const reason = c.reason ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(c.reason, probeUrl)}</div>` : '';
       const latency =
         typeof c.latency_ms === 'number'
           ? `<span class="text-[11px] font-mono text-slate-500 ml-2 tabular-nums">${c.latency_ms} ms</span>`
@@ -249,7 +255,7 @@ function renderComponentsBlock(components: ComponentHealth[]): string {
         <span class="w-1.5 h-1.5 rounded-full ${dotColor} mt-2 shrink-0"></span>
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline gap-2">
-            <span class="text-sm font-medium text-slate-100">${escapeHtml(c.name)}</span>
+            <span class="text-sm font-medium text-slate-100">${escapeHtml(c.name, probeUrl)}</span>
             <span class="text-[10px] uppercase tracking-wider text-slate-400">${escapeHtml(statusLabel)}</span>
             ${latency}
           </div>
@@ -292,7 +298,7 @@ function renderNoFailuresWindow(monitor: Monitor, from: number, to: number): str
 
 function renderHeader(monitor: Monitor): string {
   const descriptionLine = monitor.description
-    ? `<p class="mt-2 text-sm text-slate-300 leading-relaxed">${escapeHtml(monitor.description)}</p>`
+    ? `<p class="mt-2 text-sm text-slate-300 leading-relaxed">${escapeHtml(monitor.description, [monitor.url, monitor.fallback_url])}</p>`
     : '';
   return `
     <header class="mb-8">
@@ -303,7 +309,7 @@ function renderHeader(monitor: Monitor): string {
         ステータスページに戻る
       </a>
       <p class="text-xs uppercase tracking-[0.18em] text-slate-500 mb-2">状況レポート</p>
-      <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-100">${escapeHtml(monitor.name)}</h1>
+      <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-100">${escapeHtml(monitor.name, [monitor.url, monitor.fallback_url])}</h1>
       ${descriptionLine}
       ${(() => {
         const display = publicFacingUrl(monitor.url);
@@ -444,8 +450,8 @@ function htmlResponse(html: string, status: number): Response {
   });
 }
 
-function escapeHtml(s: string): string {
-  return s
+function escapeHtml(s: string, probeUrl?: PublicUrlContext): string {
+  return redactPublicUrls(s, probeUrl)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

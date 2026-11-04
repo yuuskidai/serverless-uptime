@@ -1,6 +1,6 @@
 import type { ComponentHealth, Env, Monitor } from './types';
 import { buildSlackBot } from './slack-bot';
-import { publicFacingUrl } from './url-display';
+import { publicFacingUrl, redactPublicUrls, type PublicUrlContext } from './url-display';
 import { renderMonitorSlackMessage } from './slack-notification-layout';
 
 export class NotificationDeliveryError extends Error {
@@ -63,9 +63,9 @@ export async function notifyInternalPath(
   const slackMessage = renderMonitorSlackMessage(monitor, detail, kind, { internal: true });
   const [discord, slack] = await Promise.allSettled([
     env.DISCORD_WEBHOOK_URL ? postWebhook(env.DISCORD_WEBHOOK_URL, {
-      embeds: [{ title, description: `${truncate(message, 800)}\n\n${guidance}`,
+      embeds: [{ title, description: `${truncate(redactPublicUrls(message, [monitor.url, monitor.fallback_url]), 800)}\n\n${guidance}`,
         color: normal ? 0x94a3b8 : 0xfbbf24, timestamp: observedIso(detail) }],
-    }) : Promise.resolve(),
+    }, [monitor.url, monitor.fallback_url]) : Promise.resolve(),
     bot?.defaultChannelId ? bot.slack.postBlocks(bot.defaultChannelId, {
       ...slackMessage,
       threadTs: threadTs ?? undefined,
@@ -179,7 +179,7 @@ async function sendDiscordDown(
         footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
-  });
+  }, [monitor.url, monitor.fallback_url]);
 }
 
 async function sendDiscordDegraded(
@@ -198,7 +198,7 @@ async function sendDiscordDegraded(
         footer: detail.version ? { text: `build ${detail.version}` } : undefined,
       },
     ],
-  });
+  }, [monitor.url, monitor.fallback_url]);
 }
 
 async function sendDiscordRecovery(
@@ -219,7 +219,7 @@ async function sendDiscordRecovery(
         timestamp: observedIso(detail),
       },
     ],
-  });
+  }, [monitor.url, monitor.fallback_url]);
 }
 
 /**
@@ -237,7 +237,7 @@ function discordIncidentBody(
   const parts: string[] = [];
   parts.push(publicFacingUrl(monitor.url));
   parts.push('');
-  parts.push(`**${reasonLabel}:** ${truncate(detail.reason, 800)}`);
+  parts.push(`**${reasonLabel}:** ${truncate(redactPublicUrls(detail.reason, [monitor.url, monitor.fallback_url]), 800)}`);
   if (detail.components.length > 0) {
     parts.push('');
     parts.push('**Components**');
@@ -248,13 +248,14 @@ function discordIncidentBody(
   return parts.join('\n');
 }
 
-async function postWebhook(url: string, payload: unknown): Promise<void> {
+async function postWebhook(url: string, payload: unknown, probeUrl: PublicUrlContext): Promise<void> {
   const response = await fetch(url, {
     method: 'POST',
     signal: AbortSignal.timeout(6000),
     redirect: 'manual',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...(payload as Record<string, unknown>), allowed_mentions: { parse: [] } }),
+    body: JSON.stringify({ ...(payload as Record<string, unknown>), allowed_mentions: { parse: [] } },
+      (_key, value: unknown) => typeof value === 'string' ? redactPublicUrls(value, probeUrl) : value),
   });
   if (!response.ok && response.status !== 204) {
     const body = await response.text().catch(() => '');

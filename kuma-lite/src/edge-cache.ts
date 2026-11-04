@@ -22,6 +22,7 @@ export async function withEdgeCache(
   request: Request,
   ctx: ExecutionContext,
   produce: () => Promise<Response>,
+  scope?: string,
 ): Promise<Response> {
   // The Cache API only stores GET/HEAD; skip the lookup for anything else
   // so callers can pass any request through this helper safely.
@@ -30,7 +31,12 @@ export async function withEdgeCache(
   }
 
   const cache = caches.default;
-  const hit = await cache.match(request);
+  // The server supplies the presentation scope. Never trust a caller's query
+  // marker to retain an older, less private public representation.
+  const cacheUrl = new URL(request.url);
+  if (scope) cacheUrl.searchParams.set('__monitor_public_scope', scope);
+  const cacheRequest = scope ? new Request(cacheUrl, request) : request;
+  const hit = await cache.match(cacheRequest);
   if (hit) {
     return annotate(hit, 'HIT');
   }
@@ -53,7 +59,7 @@ export async function withEdgeCache(
   const annotated = annotate(fresh, 'MISS');
   // `cache.put` consumes the response body; clone first so the half we
   // return to the visitor is independent of the half being persisted.
-  ctx.waitUntil(cache.put(request, annotated.clone()));
+  ctx.waitUntil(cache.put(cacheRequest, annotated.clone()));
   return annotated;
 }
 

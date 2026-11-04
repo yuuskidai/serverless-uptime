@@ -4,6 +4,8 @@ import { createSlackAdapter, SlackWorkersAdapter } from './chat-adapters/slack';
 import type { Env, Monitor } from './types';
 import { AVAILABILITY_ROLE_SQL, availabilityHistorySql } from './monitor-policy';
 import { monitorFreshness } from './monitor-readiness';
+import { publicFacingUrl, publicFacingDisplay, redactPublicUrls, type PublicUrlContext } from './url-display';
+import { hiddenPublicMonitorIds, publicMonitorVisible } from './public-monitor-visibility';
 
 export interface SlackBot {
   chat: Chat<{ slack: SlackWorkersAdapter }>;
@@ -83,7 +85,10 @@ export async function renderStatusBlocks(
       WHERE m.enabled = 1 AND ${AVAILABILITY_ROLE_SQL.replace('COALESCE(monitor_role', 'COALESCE(m.monitor_role')}
       ORDER BY m.id`,
   ).all<MonitorWithState>();
-  const monitors = rows.results ?? [];
+  // Slash status mirrors public visibility; privileged administration remains
+  // in the authenticated management API rather than these shared Slack cards.
+  const hidden = hiddenPublicMonitorIds(env.HIDDEN_MONITOR_IDS);
+  const monitors = (rows.results ?? []).filter(monitor => publicMonitorVisible(monitor, hidden));
   if (monitors.length === 0) return {
     text: 'No monitors are configured.',
     blocks: [{ type: 'section', text: { type: 'mrkdwn', text: ':information_source: No monitors are configured.' } }],
@@ -105,23 +110,16 @@ export async function renderStatusBlocks(
   for (const {monitor, state} of views) {
     const label = state === 'unknown' ? ':white_circle: 監視情報が古いか、まだ取得されていません'
       : state === 'down' ? ':red_circle: DOWN' : state === 'degraded' ? ':large_yellow_circle: DEGRADED' : ':large_green_circle: UP';
+    const url = publicFacingUrl(monitor.url);
+    const link = url ? `<${slackEscape(url.replace(/\|/g, '%7C'))}|${slackEscape(publicFacingDisplay(monitor.url))}>` : '';
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text:
-      `*${slackEscape(monitor.name)}*\n${label}\n<${monitor.url}|${slackEscape(displayUrl(monitor.url))}>` } });
+      `*${slackEscape(monitor.name, [monitor.url, monitor.fallback_url])}*\n${label}${link ? `\n${link}` : ''}` } });
   }
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text:
     `:clock1: as of <!date^${Math.floor(now/1000)}^{date_short_pretty} {time}|${new Date(now).toISOString()}>` }] });
   return { text: headerText, blocks };
 }
 
-function displayUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.host + (u.pathname === '/' ? '' : u.pathname);
-  } catch {
-    return url;
-  }
-}
-
-function slackEscape(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function slackEscape(s: string, probeUrl?: PublicUrlContext): string {
+  return redactPublicUrls(s, probeUrl).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
